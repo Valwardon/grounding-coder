@@ -1,0 +1,270 @@
+/* Grounding Coder — Dioxus UI styles */
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #0f0f1a;
+    color: #e0e0e0;
+    overflow: hidden;
+}
+
+.app {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    width: 100vw;
+}
+
+.content {
+    flex: 1;
+    overflow-y: auto;
+    padding-bottom: 60px;
+}
+
+.screen {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 16px;
+}
+
+.screen-header {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 16px;
+}
+
+.screen-header h2 {
+    font-size: 20px;
+    font-weight: 700;
+    color: #ffffff;
+}
+
+.subtitle {
+    font-size: 13px;
+    color: #888;
+}
+
+.card-block {
+    background: #1a1a2e;
+    border: 1px solid #2a2a3e;
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 12px;
+}
+
+.group-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: #88aaff;
+    margin-bottom: 12px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid #2a2a3e;
+}
+
+.field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 12px;
+}
+
+.field-label {
+    font-size: 12px;
+    color: #aaa;
+    font-weight: 500;
+}
+
+.input {
+    background: #2a2a3e;
+    border: 1px solid #444;
+    border-radius: 6px;
+    padding: 8px 12px;
+    color: #e0e0e0;
+    font-size: 14px;
+    width: 100%;
+}
+
+.input:focus {
+    outline: none;
+    border-color: #5a8eff;
+}
+
+.card-block textarea.input {
+    min-height: 100px;
+    font-family: 'Fira Code', monospace;
+    font-size: 12px;
+    resize: vertical;
+}
+
+.btn-primary {
+    background: #3a7aff;
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    padding: 10px 20px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.btn-primary:hover {
+    background: #5a9aff;
+}
+
+.btn-secondary {
+    background: #333;
+    color: #ccc;
+    border: 1px solid #555;
+    border-radius: 6px;
+    padding: 8px 16px;
+    font-size: 13px;
+    cursor: pointer;
+}
+
+.hint-text {
+    font-size: 12px;
+    color: #777;
+    margin-top: 4px;
+}
+
+.status-error {
+    color: #ff4466;
+    font-size: 13px;
+    margin-top: 8px;
+}
+
+.status-warn {
+    color: #ffaa00;
+    font-size: 13px;
+    margin-top: 8px;
+}
+
+/* Chat screen */
+.chat-container {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    height: calc(100vh - 200px);
+    overflow-y: auto;
+    padding: 8px 0;
+}
+
+.chat-bubble {
+    max-width: 80%;
+    padding: 12px 16px;
+    border-radius: 16px;
+    font-size: 13px;
+    line-height: 1.5;
+    pre {
+        white-space: pre-wrap;
+        font-family: inherit;
+    }
+}
+
+.chat-bubble.user {
+    background: #3a7aff;
+    color: #fff;
+    align-self: flex-end;
+    border-bottom-right-radius: 4px;
+}
+
+.chat-bubble.bot {
+    background: #2a2a3e;
+    color: #e0e0e0;
+    align-self: flex-start;
+    border-bottom-left-radius: 4px;
+}
+
+.chat-input-row {
+    display: flex;
+    gap: 8px;
+    padding: 12px 0;
+}
+
+.chat-input-row .input {
+    flex: 1;
+}
+
+/* Symbol table */
+.symbol-table {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.symbol-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 6px 12px;
+    background: #2a2a3e;
+    border-radius: 4px;
+    font-size: 13px;
+}
+
+.symbol-name {
+    color: #5a9eff;
+}
+
+.symbol-meta {
+    color: #777;
+    font-size: 12px;
+}
+
+/* Recipe list */
+.recipe-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.recipe {
+    background: #2a2a3e;
+    border-radius: 6px;
+    padding: 10px 14px;
+    font-size: 12px;
+    font-family: 'Fira Code', monospace;
+}
+
+/* Bottom nav */
+.bottom-nav {
+    display: flex;
+    justify-content: space-around;
+    background: #1a1a2e;
+    border-top: 1px solid #2a2a3e;
+    padding: 10px 0;
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+}
+
+.nav-btn {
+    background: none;
+    border: none;
+    color: #666;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: 4px 8px;
+}
+
+.nav-btn.active {
+    color: #5a9eff;
+}
+
+.nav-icon {
+    font-size: 18px;
+}
+
+.nav-label {
+    font-size: 11px;
+}
