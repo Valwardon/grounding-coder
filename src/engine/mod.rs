@@ -3,6 +3,7 @@ pub mod budget;
 pub mod corrector;
 pub mod error;
 pub mod recipes;
+pub mod research;
 pub mod symbols;
 pub mod tasks;
 pub mod verifier;
@@ -13,7 +14,8 @@ pub use budget::RetryBudget;
 pub use corrector::CorrectionPipeline;
 pub use error::{CompileError, ErrorClassifier, ErrorKind};
 pub use recipes::RecipeLog;
-pub use symbols::SymbolTable;
+pub use research::ResearchOracle;
+pub use symbols::{SymbolTable, CodeDef};
 pub use tasks::{SubTask, StructuredIntent, IntentAction, IntentDefinition, IntentTest, TaskDecomposer, TaskKind};
 pub use verifier::CodeVerifier;
 pub use writer::CodeWriter;
@@ -28,31 +30,19 @@ use parking_lot::RwLock;
 /// over from there: it resolves symbols, writes code, verifies
 /// with the compiler, and self-corrects via recipe lookup.
 pub struct CodeBot {
-    /// The project directory the bot operates on.
     project_dir: PathBuf,
-    /// Arena-backed graph of code symbols (files, functions, types, imports).
-    /// This is grounded's `SemanticContext` repurposed: instead of a semantic
-    /// graph of concepts, it's a graph of code symbols with typed edges.
     pub arena: Arc<RwLock<CodeArena>>,
-    /// The symbol table — grounded's `KnowledgeStore` repurposed.
-    /// Embeds codebase index + Android/API knowledge at compile time.
-    /// Acts as the bot's "perfect knowledge" source.
     symbol_table: SymbolTable,
-    /// Energy-bounded retry budget — grounded's `CuriosityBudget` repurposed.
-    /// Bounds correction attempts so the bot never spins infinitely.
     budget: RetryBudget,
-    /// Deterministic error→fix recipe database — grounded's episodic memory repurposed.
     recipes: RecipeLog,
-    /// The 5-phase correction pipeline — grounded's SelfHealingPipeline repurposed.
     corrector: CorrectionPipeline,
-    /// The verifier — grounded's VerificationLoop repurposed.
-    /// Runs cargo check/test/clippy + Android build.
     verifier: CodeVerifier,
-    /// Task decomposer — grounded's GoalFormationEngine repurposed.
-    /// Breaks structured intents into concrete sub-tasks.
     decomposer: TaskDecomposer,
-    /// Code writer — composes code from known patterns (never generates in a vacuum).
     writer: CodeWriter,
+    /// Research oracle — fetches verified definitions from docs.rs, Android SDK docs, etc.
+    /// The bot's "curiosity harvester" repurposed: it can discover new symbols
+    /// from authoritative sources, verify them with the compiler, and cache them.
+    researcher: ResearchOracle,
 }
 
 /// Result of a completed coding task.
@@ -88,6 +78,7 @@ impl CodeBot {
         let verifier = CodeVerifier::new(project_path.clone());
         let decomposer = TaskDecomposer::new();
         let writer = CodeWriter::new(project_path.clone());
+        let researcher = ResearchOracle::new(20);
 
         let mut bot = CodeBot {
             project_dir: project_path,
@@ -99,6 +90,7 @@ impl CodeBot {
             verifier,
             decomposer,
             writer,
+            researcher,
         };
 
         // Bootstrap: scan the project and build the code symbol graph.
@@ -125,8 +117,45 @@ impl CodeBot {
     /// Here it maps to:
     ///   TaskDecomposer → RetryBudget → SymbolBinder → CodeVerifier → CorrectionPipeline
     pub async fn run_task(&mut self, intent_json: &str) -> Result<TaskResult, String> {
+        // Step 0: Parse intent and research unknown symbols
+        // The LLM translator outputs structured intent. Before we decompose
+        // into tasks, we research any unknown symbols via the ResearchOracle —
+        // fetching from verified sources (docs.rs, Android SDK docs).
+        let intent: StructuredIntent = serde_json::from_str(intent_json)
+            .map_err(|e| format!("Failed to parse intent: {}", e))?;
+
+        // Collect all referenced symbols that the bot doesn't know yet
+        let mut unknown_symbols: Vec<String> = Vec::new();
+        for ref_name in &intent.references {
+            let sym = ref_name.to_lowercase();
+            if !self.symbol_table.is_known(&sym) && self.arena.read().lookup(ref_name).is_none() {
+                unknown_symbols.push(ref_name.clone());
+            }
+        }
+        if let Some(def) = &intent.define {
+            for ref_name in &def.references {
+                let sym = ref_name.to_lowercase();
+                if !self.symbol_table.is_known(&sym) && self.arena.read().lookup(ref_name).is_none() {
+                    unknown_symbols.push(ref_name.clone());
+                }
+            }
+        }
+
+        // Research unknown symbols from verified sources
+        for sym in &unknown_symbols {
+            let lang = if intent.language.to_lowercase().contains("rust") { "rust" } else { &intent.language };
+            if let Some(def) = self.researcher.research(sym, lang).await {
+                let qname = def.qname.clone();
+                let source_url = def.source_url.clone();
+                let code_def = def.into_code_def();
+                self.symbol_table.index(&qname, code_def);
+                log::info!("Researched symbol: {} from {}", sym, source_url);
+            } else {
+                log::warn!("Could not research symbol: {} — no verified source found", sym);
+            }
+        }
+
         // Step 1: TaskDecomposer breaks the intent into sub-tasks
-        // (grounded's GoalFormationEngine: "what do I need to resolve?")
         let tasks = self.decomposer.decompose(intent_json, &self.arena.read());
 
         let mut changes = Vec::new();
