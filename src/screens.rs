@@ -1,108 +1,60 @@
 use dioxus::prelude::*;
-use crate::engine::{CodeBot, TaskResult};
-
-#[component]
-fn Field(label: String, value: String, oninput: EventHandler<String>) -> Element {
-    rsx! {
-        div { class: "field",
-            label { class: "field-label", "{label}" }
-            input {
-                class: "input",
-                value: "{value}",
-                oninput: move |e| oninput(e.value()),
-            }
-        }
-    }
-}
-
-#[component]
-fn FieldObscure(label: String, value: String, oninput: EventHandler<String>) -> Element {
-    rsx! {
-        div { class: "field",
-            label { class: "field-label", "{label}" }
-            input {
-                class: "input",
-                r#type: "password",
-                value: "{value}",
-                oninput: move |e| oninput(e.value()),
-            }
-        }
-    }
-}
-
-#[component]
-fn FieldMultiline(label: String, value: String, oninput: EventHandler<String>) -> Element {
-    rsx {
-        div { class: "field",
-            label { class: "field-label", "{label}" }
-            textarea {
-                class: "input",
-                value: "{value}",
-                oninput: move |e| oninput(e.value()),
-                rows: "6",
-            }
-        }
-    }
-}
-
-#[component]
-fn Group(title: String) -> Element {
-    rsx! {
-        div { class: "group-title", "{title}" }
-    }
-}
+use crate::engine::{CodeBot, CodeSymbol};
 
 #[component]
 pub fn Chat() -> Element {
     let mut input = use_signal(|| String::new());
     let mut history = use_signal(|| Vec::<(String, bool)>::new());
-    let mut status = use_signal(|| "Ready.".to_string());
     let mut working = use_signal(|| false);
-
-    let mut settings = use_signal(|| crate::llm::load_config_default());
-
-    let on_send = move |_| {
-        let prompt = input();
-        if prompt.is_empty() || working() {
-            return;
-        }
-        working.set(true);
-        history.modify(|h| h.push((prompt.clone(), true)));
-        let p = prompt;
-        let cfg = settings();
-        spawn(async move {
-            let msg = run_task_deterministic(&p, &cfg).await;
-            history.modify(|h| h.push((msg, false)));
-            working.set(false);
-        });
-    };
-
-    let messages = history().iter().rev().take(50).rev();
+    let mut settings = use_signal(crate::llm::load_config_default);
 
     rsx! {
         div { class: "screen",
             div { class: "screen-header",
                 h2 { "Chat" }
-                span { class: "subtitle", status() }
+                span { class: "subtitle", "LLM is unverified NL→intent only; all code is engine-verified" }
             }
             div { class: "chat-container",
-                for (msg, is_user) in messages {
-                    div { class: if is_user { "chat-bubble user" } else { "chat-bubble bot" },
-                        pre { white_space: "pre-wrap", "{msg}" }
+                if history().is_empty() {
+                    div { class: "chat-empty",
+                        "Ask the bot to write code for your Android project."
+                    }
+                }
+                for (msg, is_user) in history().iter() {
+                    div { class: if *is_user { "chat-bubble user" } else { "chat-bubble bot" },
+                        pre { "{msg}" }
                     }
                 }
                 if working() {
-                    div { class: "chat-bubble bot", "Working... (deterministic engine)" }
+                    div { class: "chat-bubble bot", "Working... (deterministic engine running)" }
                 }
             }
             div { class: "chat-input-row",
                 input {
                     class: "input",
-                    placeholder: "Ask the bot to write code (e.g., 'Add a button that vibrates the phone')",
+                    placeholder: "e.g., Add a button that vibrates the phone on click",
                     value: "{input}",
-                    oninput: move |e| input.set(e.value()),
+                    oninput: move |e| input.set(e.value().clone()),
                 }
-                button { class: "btn-primary", onclick: on_send, "Send" }
+                button {
+                    class: "btn-primary",
+                    onclick: move |_| {
+                        let prompt = input();
+                        let cfg = settings();
+                        if prompt.is_empty() || working() {
+                            return;
+                        }
+                        working.set(true);
+                        history.write().push((prompt.clone(), true));
+                        input.set(String::new());
+                        spawn(async move {
+                            let result = run_task_deterministic(&prompt, &cfg).await;
+                            history.write().push((result, false));
+                            working.set(false);
+                        });
+                    },
+                    "Send"
+                }
             }
         }
     }
@@ -120,72 +72,65 @@ pub fn Settings() -> Element {
                 span { class: "subtitle", "API & Project Configuration" }
             }
             div { class: "card-block",
-                Group { title: String::from("LLM Translator (Unverified Layer)") }
-                FieldObscure {
-                    label: "OpenRouter API Key".to_string(),
-                    value: settings().openrouter_key.clone().unwrap_or_default(),
-                    oninput: move |v| {
-                        let mut s = settings();
-                        s.openrouter_key = if v.is_empty() { None } else { Some(v) };
-                        settings.set(s);
-                    },
-                }
-                Field {
-                    label: "Model".to_string(),
-                    value: settings().model.clone(),
-                    oninput: move |v| {
-                        let mut s = settings();
-                        s.model = v;
-                        settings.set(s);
-                    },
-                }
-                Field {
-                    label: "Base URL".to_string(),
-                    value: settings().base_url.clone(),
-                    oninput: move |v| {
-                        let mut s = settings();
-                        s.base_url = v;
-                        settings.set(s);
-                    },
-                }
-                Field {
-                    label: "GitHub Token (optional)".to_string(),
-                    value: settings().github_key.clone().unwrap_or_default(),
-                    oninput: move |v| {
-                        let mut s = settings();
-                        s.github_key = if v.is_empty() { None } else { Some(v) };
-                        settings.set(s);
-                    },
-                }
-            }
-
-            div { class: "card-block",
-                Group { title: String::from("Engine Project") }
-                Field {
-                    label: "Project Path".to_string(),
-                    value: settings().model.clone(), // reuse model field for now
-                    oninput: move |v| {
-                        let mut s = settings();
-                        s.model = v; // placeholder
-                        settings.set(s);
-                    },
-                }
-                div { class: "hint-text",
-                    "The deterministic engine operates on this directory. \
-                    It will scan for .rs/.kt/.java files and build a code symbol graph."
-                }
-            }
-
-            div { class: "card-block",
-                button { class: "btn-primary", onclick: move |_| {
-                    if let Ok(path) = crate::llm::config_path() {
-                        let _ = crate::llm::save_config(&settings(), &path);
-                        status.set("Settings saved.".to_string());
-                    } else {
-                        status.set("Failed to save settings.".to_string());
+                div { class: "group-title", "LLM Translator (Unverified Layer)" }
+                div { class: "field",
+                    label { class: "field-label", "OpenRouter API Key" }
+                    input {
+                        class: "input",
+                        r#type: "password",
+                        placeholder: "sk-...",
+                        value: "{settings().openrouter_key.clone().unwrap_or_default()}",
+                        oninput: move |e| {
+                            let mut s = settings();
+                            s.openrouter_key = if e.value().is_empty() { None } else { Some(e.value()) };
+                            settings.set(s);
+                        },
                     }
-                }, "Save Settings" }
+                }
+                div { class: "field",
+                    label { class: "field-label", "Model" }
+                    input {
+                        class: "input",
+                        value: "{settings().model}",
+                        oninput: move |e| {
+                            let mut s = settings();
+                            s.model = e.value();
+                            settings.set(s);
+                        },
+                    }
+                }
+                div { class: "field",
+                    label { class: "field-label", "Project Path" }
+                    input {
+                        class: "input",
+                        value: ".",
+                        oninput: move |_| {},
+                    }
+                }
+                div { class: "field",
+                    label { class: "field-label", "Max Retries" }
+                    input {
+                        class: "input",
+                        value: "5",
+                        oninput: move |_| {},
+                    }
+                }
+            }
+            div { class: "card-block",
+                button {
+                    class: "btn-primary",
+                    onclick: move |_| {
+                        if let Ok(path) = crate::llm::config_path() {
+                            let _ = crate::llm::save_config(&settings(), &path);
+                            status.set("Settings saved.".to_string());
+                        }
+                    },
+                    "Save Settings"
+                }
                 span { " {status()}" }
+            }
+            div { class: "hint-text",
+                "⚠ The LLM is an unverified layer. It only translates natural language to structured intent JSON. All code is generated and verified deterministically by the engine."
             }
         }
     }
@@ -193,42 +138,32 @@ pub fn Settings() -> Element {
 
 #[component]
 pub fn Symbols() -> Element {
-    let mut symbols = use_signal(|| Vec::<(String, crate::engine::CodeSymbol)>::new());
+    let mut symbols = use_signal(|| Vec::<(String, CodeSymbol)>::new());
     let mut status = use_signal(|| String::new());
 
     use_effect(move || {
-        status.set("Scanning...".to_string());
-        let project = ".";
         spawn(async move {
-            let bot = CodeBot::new(project, 5);
+            let bot = CodeBot::new(".", 5);
             let syms = bot.symbols();
             symbols.set(syms);
             status.set(format!("Indexed {} symbols.", symbols().len()));
         });
-        || {}
     });
-
-    let rows: Element = if symbols().is_empty() {
-        rsx! { div { "No symbols found. Open a project directory." } }
-    } else {
-        let rows = symbols().iter().take(100).map(|(label, sym)| {
-            rsx! {
-                div { class: "symbol-row",
-                    span { class: "symbol-name", "{label}" }
-                    span { class: "symbol-meta", "[{sym.kind}] @ {sym.location()}" }
-                }
-            }
-        });
-        rsx! { {rows} }
-    };
 
     rsx! {
         div { class: "screen",
             div { class: "screen-header",
                 h2 { "Code Symbols" }
-                span { class: "subtitle", status() }
+                span { class: "subtitle", "{status()}" }
             }
-            div { class: "symbol-table", rows }
+            div { class: "symbol-table",
+                for (label, sym) in symbols().iter().take(100) {
+                    div { class: "symbol-row",
+                        span { class: "symbol-name", "{label} [{sym.kind}]" }
+                        span { class: "symbol-meta", "@ {sym.location()}" }
+                    }
+                }
+            }
         }
     }
 }
@@ -239,32 +174,34 @@ pub fn Recipes() -> Element {
     let mut status = use_signal(|| String::new());
 
     use_effect(move || {
-        status.set("Loading...".to_string());
-        let project = ".";
         spawn(async move {
-            let bot = CodeBot::new(project, 5);
+            let bot = CodeBot::new(".", 5);
             let rs = bot.recipes();
             recipes.set(rs);
             status.set(format!("{} recipes in log.", recipes().len()));
         });
-        || {}
     });
 
     rsx! {
         div { class: "screen",
             div { class: "screen-header",
                 h2 { "Error → Fix Recipes" }
-                span { class: "subtitle", status() }
+                span { class: "subtitle", "{status()}" }
             }
             div { class: "recipe-list",
                 for r in recipes() {
                     div { class: "recipe", "{r}" }
+                }
+                if recipes().is_empty() {
+                    div { class: "hint-text", "No recipes learned yet. Recipes are added when the bot successfully fixes a compile error." }
                 }
             }
         }
     }
 }
 
+/// The deterministic path: LLM → intent JSON → engine.
+/// The LLM is NOT involved in code generation.
 async fn run_task_deterministic(prompt: &str, cfg: &crate::llm::ApiConfig) -> String {
     if cfg.openrouter_key.is_none() {
         return "ERROR: OpenRouter API key not set. Go to Settings.".to_string();
@@ -273,17 +210,21 @@ async fn run_task_deterministic(prompt: &str, cfg: &crate::llm::ApiConfig) -> St
     let llm_client = crate::llm::LlmClient::new(cfg.clone());
     match llm_client.translate(prompt).await {
         Ok(intent) => {
-            let intent_json = serde_json::to_string(&intent)
-                .map_err(|e| format!("SERIALIZE ERROR: {}", e))?;
-            let mut bot = CodeBot::new(&cfg.model, 5);
-            match bot.run_task(&intent_json).await {
-                Ok(result) => format!(
-                    "SUCCESS\nMessage: {}\nFiles changed: {}\nErrors fixed: {}",
-                    result.message, result.changes.len(), result.errors_fixed
-                ),
-                Err(e) => format!("ENGINE ERROR: {}", e),
+            match serde_json::to_string(&intent) {
+                Ok(intent_json) => {
+                    let mut bot = CodeBot::new(".", 5);
+                    match bot.run_task(&intent_json).await {
+                        Ok(result) => format!(
+                            "SUCCESS: {}\nFiles: {} | Errors fixed: {} | Budget: {} | Recipes: {}",
+                            result.message, result.changes.len(), result.errors_fixed,
+                            result.budget_used, result.recipes_learned
+                        ),
+                        Err(e) => format!("ENGINE: {}", e),
+                    }
+                }
+                Err(e) => format!("SERIALIZE: {}", e),
             }
         }
-        Err(e) => format!("LLM TRANSLATION ERROR: {}", e),
+        Err(e) => format!("LLM: {}", e),
     }
 }

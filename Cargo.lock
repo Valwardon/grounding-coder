@@ -2084,7 +2084,6 @@ dependencies = [
  "dioxus",
  "dirs 5.0.1",
  "env_logger",
- "libc",
  "log",
  "once_cell",
  "parking_lot",

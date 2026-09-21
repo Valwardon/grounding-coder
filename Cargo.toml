@@ -2,20 +2,17 @@
 name = "grounding-coder"
 version = "0.1.0"
 edition = "2024"
-description = "A deterministic, non-guessing coding agent. LLM is unverified NL→intent only."
+description = "A deterministic, non-guessing coding agent for Android. LLM is unverified NL→intent only; all code generation is driven by a deterministic engine."
 
 [lib]
 name = "grounding_coder"
 path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
 
 [[bin]]
 name = "gc"
 path = "src/bin/gc.rs"
-
-[[bin]]
-name = "gcui"
-path = "src/bin/gcui.rs"
-required-features = ["ui"]
+required-features = ["cli"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -34,8 +31,8 @@ chrono = { version = "0.4", features = ["serde"] }
 log = "0.4"
 env_logger = "0.11"
 
-# dioxus UI (for mobile/desktop) — only compiled with "ui" feature
-dioxus = { version = "0.7", features = ["mobile", "asset"], optional = true }
+# dioxus UI — only compiled with "ui" feature (Android/iOS mobile targets)
+dioxus = { version = "0.7", features = ["mobile"], optional = true }
 
 [features]
 default = ["cli"]
@@ -43,7 +40,6 @@ cli = []
 ui = ["dep:dioxus"]
 
 [target.'cfg(target_os = "android")'.dependencies]
-libc = "0.2"
 android-activity = { version = "0.6", features = ["native-activity"] }
 
 [profile.release]

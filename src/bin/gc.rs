@@ -1,5 +1,3 @@
-#![cfg(not(target_os = "android"))]
-
 use clap::{Parser, Subcommand};
 use grounding_coder::{CodeBot, llm};
 

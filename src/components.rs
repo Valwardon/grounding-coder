@@ -1,6 +1,6 @@
 use dioxus::prelude::*;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Screen {
     Chat,
     Settings,
@@ -11,17 +11,15 @@ pub enum Screen {
 const NAV_ITEMS: &[(&str, &str, Screen)] = &[
     ("chat", "Chat", Screen::Chat),
     ("tune", "Settings", Screen::Settings),
-    ("code", "Symbols", Screen::Symbols),
-    ("list", "Recipes", Screen::Recipes),
+    ("search", "Symbols", Screen::Symbols),
+    ("book", "Recipes", Screen::Recipes),
 ];
 
 #[component]
 pub fn App() -> Element {
     let mut tab = use_signal(|| Screen::Chat);
-    let css = asset!("/assets/main.css");
 
     rsx! {
-        document::Link { rel: "stylesheet", href: css }
         div { class: "app",
             div { class: "content",
                 match tab() {
@@ -32,7 +30,7 @@ pub fn App() -> Element {
                 }
             }
             nav { class: "bottom-nav",
-                for (i, (icon, label, screen)) in NAV_ITEMS.iter().enumerate() {
+                for (icon, label, screen) in NAV_ITEMS.iter() {
                     button {
                         class: "nav-btn",
                         class: if tab() == *screen { "nav-btn active" },
