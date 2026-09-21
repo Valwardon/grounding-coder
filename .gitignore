@@ -1,1 +1,4 @@
-/target
+target/
+*.apk
+*.aab
+.DS_Store
