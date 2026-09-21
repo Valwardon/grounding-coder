@@ -23,6 +23,19 @@ const ERROR_HISTORY_SIZE: usize = 8;
 /// Adapted from grounded's ERROR_PERSISTENCE_THRESHOLD.
 const UNRESOLVED_PERSISTENCE: u8 = 3;
 
+/// Requirements for the target runtime/platform
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeRequirements {
+    /// Minimum SDK version (Android)
+    pub min_sdk: Option<u32>,
+    /// Target SDK version (Android)
+    pub target_sdk: Option<u32>,
+    /// Android package identifier
+    pub package: Option<String>,
+    /// API level constraints
+    pub api_constraints: Vec<String>,
+}
+
 /// Types of sub-tasks the bot can form from a structured intent.
 /// These map directly to grounded's `GoalReason` variants but are specific
 /// to code: instead of "understand_node", we get "resolve_symbol", "write_fn", etc.
@@ -42,6 +55,10 @@ pub enum TaskKind {
     AddTest,
     /// Create a new file
     CreateFile,
+    /// Research unknown requirements
+    ResearchRequirements,
+    /// Create project manifest
+    CreateProjectManifest,
 }
 
 impl TaskKind {
@@ -265,6 +282,24 @@ pub struct StructuredIntent {
     pub imports: Vec<String>,
     /// Optional: test to write.
     pub test: Option<IntentTest>,
+    /// Project platform: "android", "desktop", "web"
+    pub platform: String,
+    /// Project architecture: "native", "cross-platform", "hybrid"
+    pub architecture: String,
+    /// Target runtime SDK (Android)
+    pub runtime: Option<RuntimeRequirements>,
+    /// Capability requirements (network, filesystem, background execution)
+    pub capabilities: Vec<String>,
+    /// Domains this code operates in
+    pub domains: Vec<String>,
+    /// Explicit constraints (security, performance, etc.)
+    pub constraints: Vec<String>,
+    /// Dependencies (crates, libraries, packages)
+    pub dependencies: Vec<String>,
+    /// Requirements hypothesis from LLM - what we don't know yet
+    pub unknown_requirements: Vec<String>,
+    /// Confidence level in the intent completeness (0.0-1.0)
+    pub confidence: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -440,27 +475,53 @@ impl TaskDecomposer {
             tasks.push(task);
         }
 
-        // 7. Form test tasks
-        if let Some(test) = &intent.test {
-            let priority = 0.3; // tests are lower priority
-            let mut task = SubTask::new(
-                TaskKind::AddTest,
-                format!("Add test: {}", test.name),
-                serde_json::json!({
-                    "name": test.name,
-                    "assertions": test.assertions,
-                    "code": test.code,
-                    "file": intent.file
-                }),
-                "intent_test".to_string(),
-            ).with_priority(priority)
-             .with_deadline(self.tick + 3000);
-            task.target_symbols = vec![test.name.clone()];
-            tasks.push(task);
-        }
+    // 7. Form research requirements tasks
+    if !intent.unknown_requirements.is_empty() {
+        let priority = BETA * (unresolved_refs as f64 / total_refs.max(1) as f64);
+        let mut task = SubTask::new(
+            TaskKind::ResearchRequirements,
+            format!("Research requirements: {}", intent.goal),
+            serde_json::json!({
+                "goal": intent.goal,
+                "unknown_requirements": intent.unknown_requirements,
+                "domains": intent.domains,
+                "platform": intent.platform,
+                "architecture": intent.architecture,
+                "capabilities": intent.capabilities,
+                "constraints": intent.constraints,
+                "dependencies": intent.dependencies,
+                "runtime": intent.runtime
+            }),
+            "intent_requirements".to_string(),
+        ).with_priority(priority.clamp(0.05, 1.0))
+         .with_deadline(self.tick + 3000);
+        tasks.push(task);
+    }
 
-        // 8. Sort by priority (descending) — like grounded's priority-based selection
-        tasks.sort_by(|a, b| b.priority.partial_cmp(&a.priority).unwrap_or(std::cmp::Ordering::Equal));
+    // 8. Form create project manifest tasks
+    if intent.platform == "android" || intent.architecture == "native" {
+        let priority = GAMMA * 0.8;
+        let mut task = SubTask::new(
+            TaskKind::CreateProjectManifest,
+            format!("Create project manifest for {} {}", intent.platform, intent.architecture),
+            serde_json::json!({
+                "platform": intent.platform,
+                "architecture": intent.architecture,
+                "runtime": intent.runtime,
+                "capabilities": intent.capabilities,
+                "domains": intent.domains,
+                "constraints": intent.constraints,
+                "dependencies": intent.dependencies,
+                "file": "Cargo.toml"
+            }),
+            "intent_manifest".to_string(),
+        ).with_priority(priority.clamp(0.05, 1.0))
+         .with_deadline(self.tick + 2000);
+        tasks.push(task);
+    }
+
+    // 9. Sort by priority (descending) — like grounded's priority-based selection
+    tasks.sort_by(|a, b| b.priority.partial_cmp(&a.priority).unwrap_or(std::cmp::Ordering::Equal));
 
         tasks
     }

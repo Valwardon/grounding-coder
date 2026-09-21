@@ -1,6 +1,6 @@
 [application]
 name = "grounding-coder"
-identifier = "com.grounding.codere"
+identifier = "com.grounding.coder"
 
 [android]
 package = "com.grounding.coder"

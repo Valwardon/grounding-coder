@@ -17,6 +17,7 @@ const NAV_ITEMS: &[(&str, &str, Screen)] = &[
 
 #[component]
 pub fn App() -> Element {
+    document::Stylesheet { href: asset!("/assets/main.css") }
     let mut tab = use_signal(|| Screen::Chat);
 
     rsx! {

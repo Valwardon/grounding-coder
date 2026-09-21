@@ -19,6 +19,7 @@ pub use symbols::{SymbolTable, CodeDef};
 pub use tasks::{SubTask, StructuredIntent, IntentAction, IntentDefinition, IntentTest, TaskDecomposer, TaskKind};
 pub use verifier::CodeVerifier;
 pub use writer::CodeWriter;
+pub use oracle::{KnowledgeOracle, KnowledgeAdapter, KnowledgeResult, CodeSymbolInfo, VerifiedFact, CodePattern};
 
 use std::path::PathBuf;
 use std::sync::Arc;
