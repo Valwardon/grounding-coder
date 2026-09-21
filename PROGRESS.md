@@ -50,5 +50,5 @@ dx build --platform android --release --features ui
 
 ## Deliverables
 - GitHub: https://github.com/Valwardon/grounding-coder
-- Release: https://github.com/Valwardon/grounding-coder/releases/tag/v0.1.0
+- Release: https://github.com/Valwardon/grounding-coder/releases/tag/v0.2.0 (updated)
 - APK: `app-debug.apk` (9.7MB) uploaded to release
