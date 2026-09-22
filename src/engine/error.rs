@@ -119,7 +119,10 @@ impl ErrorClassifier {
                     source_line = Some(lines[i + 3].to_string());
                 }
 
-                // Look for help/suggestion
+                // Look for help/suggestion, including rustc's proposed
+                // code insertions (`1 + use std::collections::HashMap;`).
+                // The insertion line is first-class evidence: it is the
+                // compiler telling us the exact bytes it wants.
                 let mut suggestion = None;
                 let mut j = i + 1;
                 while j < lines.len() && j < i + 20 {
@@ -132,6 +135,11 @@ impl ErrorClassifier {
                                 .trim()
                                 .to_string(),
                         );
+                    } else if let Some(inserted) = parse_suggestion_insert(lines[j]) {
+                        suggestion = Some(match suggestion {
+                            Some(prev) => format!("{} | suggested: {}", prev, inserted),
+                            None => format!("suggested: {}", inserted),
+                        });
                     }
                     if clean.starts_with("error[") || clean.starts_with("warning[") {
                         break;
@@ -199,11 +207,11 @@ impl ErrorClassifier {
 
 /// Parse `error[E0308]: mismatched types` or `warning[unused]: ...` header.
 fn parse_error_header(line: &str) -> Option<(String, String, bool)> {
-    // error[E0308]: message
+    // error[E0308]: message (the code inside brackets already has its E)
     if let Some(rest) = line.strip_prefix("error[")
         && let Some(close) = rest.find(']')
     {
-        let code = format!("E{}", &rest[..close]);
+        let code = rest[..close].to_string();
         let msg = rest[close + 1..].trim_start_matches(":").trim().to_string();
         return Some((code, msg, false));
     }
@@ -215,6 +223,22 @@ fn parse_error_header(line: &str) -> Option<(String, String, bool)> {
         return Some((code, msg, true));
     }
     None
+}
+
+/// Parse rustc's proposed code insertion: `12 + use std::foo::Bar;`.
+/// Returns the inserted code verbatim.
+fn parse_suggestion_insert(line: &str) -> Option<String> {
+    let trimmed = line.trim_start_matches('|').trim();
+    let mut parts = trimmed.splitn(2, '+');
+    let num = parts.next()?.trim();
+    if num.is_empty() || !num.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let code = parts.next()?.trim();
+    if code.is_empty() {
+        return None;
+    }
+    Some(code.to_string())
 }
 
 /// Parse `--> src/main.rs:10:15`

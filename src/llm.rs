@@ -12,13 +12,28 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// API key storage for the LLM translator.
+fn default_project_path() -> String {
+    ".".to_string()
+}
+
+fn default_max_retries() -> u32 {
+    5
+}
+
+/// API key storage for the LLM translator plus app settings.
+/// Extra fields carry `serde(default)` so older config files keep loading.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiConfig {
     pub openrouter_key: Option<String>,
     pub github_key: Option<String>,
     pub model: String,
     pub base_url: String,
+    /// Project directory the engine works in (device-local path).
+    #[serde(default = "default_project_path")]
+    pub project_path: String,
+    /// Max correction attempts per task (RetryBudget).
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
 }
 
 impl Default for ApiConfig {
@@ -28,6 +43,8 @@ impl Default for ApiConfig {
             github_key: None,
             model: "google/gemini-2.0-flash-001".to_string(),
             base_url: "https://openrouter.ai/api/v1".to_string(),
+            project_path: default_project_path(),
+            max_retries: default_max_retries(),
         }
     }
 }

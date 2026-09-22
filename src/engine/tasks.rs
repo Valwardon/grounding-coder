@@ -62,6 +62,9 @@ pub enum TaskKind {
     CreateProjectManifest,
     /// Add a verified definition (no LLM code allowed)
     AddDefinition,
+    /// Verify the project as-is and repair what the oracles flag.
+    /// Emitted when an intent carries no edits (e.g. "fix this repo").
+    VerifyOnly,
 }
 
 impl TaskKind {
@@ -77,6 +80,7 @@ impl TaskKind {
             TaskKind::ResearchRequirements => "research_requirements",
             TaskKind::CreateProjectManifest => "create_project_manifest",
             TaskKind::AddDefinition => "add_definition",
+            TaskKind::VerifyOnly => "verify_only",
             TaskKind::SynthesizeFunction => "synthesize_function",
         }
     }
@@ -544,6 +548,21 @@ impl TaskDecomposer {
             if let Some(task) = self.form_action_task(action, &intent) {
                 tasks.push(task);
             }
+        }
+
+        // Nothing to build but verification was asked for (or is the
+        // only sensible reading): run the oracles and repair loop.
+        if tasks.is_empty() {
+            tasks.push(
+                SubTask::new(
+                    TaskKind::VerifyOnly,
+                    "Verify project and repair flagged errors".to_string(),
+                    serde_json::json!({}),
+                    "verify_only".to_string(),
+                )
+                .with_priority(0.5)
+                .with_deadline(self.tick + 1000),
+            );
         }
 
         self.task_count += tasks.len() as u64;

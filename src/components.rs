@@ -3,31 +3,47 @@ use dioxus::prelude::*;
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Screen {
     Chat,
+    Code,
     Settings,
-    Symbols,
-    Recipes,
 }
 
 const NAV_ITEMS: &[(&str, &str, Screen)] = &[
-    ("chat", "Chat", Screen::Chat),
-    ("tune", "Settings", Screen::Settings),
-    ("search", "Symbols", Screen::Symbols),
-    ("book", "Recipes", Screen::Recipes),
+    ("💬", "Chat", Screen::Chat),
+    ("📄", "Code", Screen::Code),
+    ("⚙️", "Settings", Screen::Settings),
 ];
 
 #[component]
 pub fn App() -> Element {
     let mut tab = use_signal(|| Screen::Chat);
+    // Shared app state: settings persist to disk; last_changes + refresh
+    // let the Chat tab tell the Code tab what just landed on disk.
+    let settings = use_signal(crate::llm::load_config_default);
+    let mut last_changes = use_signal(Vec::<String>::new);
+    let mut refresh = use_signal(|| 0u64);
 
     rsx! {
         document::Stylesheet { href: asset!("/assets/main.css") }
         div { class: "app",
             div { class: "content",
                 match tab() {
-                    Screen::Chat => rsx! { crate::screens::Chat {} },
-                    Screen::Settings => rsx! { crate::screens::Settings {} },
-                    Screen::Symbols => rsx! { crate::screens::Symbols {} },
-                    Screen::Recipes => rsx! { crate::screens::Recipes {} },
+                    Screen::Chat => rsx! {
+                        crate::screens::Chat {
+                            settings,
+                            on_done: move |files: Vec<String>| {
+                                last_changes.set(files);
+                                refresh += 1;
+                            },
+                        }
+                    },
+                    Screen::Code => rsx! {
+                        crate::screens::Code {
+                            settings,
+                            last_changes,
+                            refresh,
+                        }
+                    },
+                    Screen::Settings => rsx! { crate::screens::Settings { settings } },
                 }
             }
             nav { class: "bottom-nav",

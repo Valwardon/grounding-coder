@@ -219,6 +219,15 @@ impl CodeWriter {
                         .to_string(),
                 );
             }
+            super::tasks::TaskKind::VerifyOnly => {
+                // No edits by design: the value is the verify+repair loop
+                // the caller runs after apply.
+                return Ok(EditPlan {
+                    task_id: task.id,
+                    edits: Vec::new(),
+                    evidence: Vec::new(),
+                });
+            }
             super::tasks::TaskKind::AddImport => {
                 let (edit, ev) =
                     self.plan_add_import(&target_file, &content, task, symbol_table)?;
@@ -743,6 +752,11 @@ impl CodeWriter {
                     // Use a dummy symbol table that knows std + current content.
                     let st = SymbolTable::new();
                     if let Ok((edit, _)) = self.plan_add_import(&file, &content, &task, &st) {
+                        // Already present: desired state holds (idempotent
+                        // success — repeat errors must not read as failure).
+                        if edit.replacement.is_empty() {
+                            return vec![file.to_string_lossy().to_string()];
+                        }
                         let plan = EditPlan {
                             task_id: 0,
                             edits: vec![edit],

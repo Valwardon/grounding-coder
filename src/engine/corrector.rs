@@ -166,7 +166,12 @@ impl CorrectionPipeline {
         // (grounded's "degrade gracefully to proximity edges" fallback)
         match error.kind {
             ErrorKind::MissingImport => {
-                // Try to infer the import from the symbol name
+                // Prefer the compiler's own suggested path; fall back to
+                // inferring from the symbol name (usuallyStill blocked
+                // downstream unless verifiable — never guessed).
+                if let Some(path) = suggested_import(error) {
+                    return Fix::AddImport(path);
+                }
                 inferred_import(error)
             }
             ErrorKind::TypeMismatch if error.suggestion.is_some() => {
@@ -198,15 +203,32 @@ impl CorrectionPipeline {
                     Fix::None
                 }
             }
-            ErrorKind::UnresolvedSymbol if error.suggestion.is_some() => Fix::ApplySuggestion {
-                file: error.file.clone(),
-                suggestion: error.suggestion.clone().unwrap(),
-            },
+            ErrorKind::UnresolvedSymbol => {
+                if let Some(path) = suggested_import(error) {
+                    Fix::AddImport(path)
+                } else if let Some(s) = error.suggestion.clone() {
+                    Fix::ApplySuggestion {
+                        file: error.file.clone(),
+                        suggestion: s,
+                    }
+                } else {
+                    Fix::None
+                }
+            }
             _ => Fix::None,
         }
     }
 
     fn recipe_to_fix(&self, recipe: &super::recipes::FixRecipe, error: &CompileError) -> Fix {
+        // A compiler-suggested `use` path outranks any recipe: it names
+        // exact bytes the compiler itself wants.
+        if matches!(
+            error.kind,
+            ErrorKind::UnresolvedSymbol | ErrorKind::MissingImport | ErrorKind::MissingFieldMethod
+        ) && let Some(path) = suggested_import(error)
+        {
+            return Fix::AddImport(path);
+        }
         match &recipe.fix {
             super::recipes::FixAction::ApplySuggestion { suggestion } => {
                 let s = if suggestion.is_empty() {
@@ -259,6 +281,57 @@ fn infer_import_from_error(error: &CompileError) -> String {
         return format!("use {};", symbol);
     }
     String::new()
+}
+
+/// Extract a `use` path from the compiler's own suggestion text.
+/// Returns the first plausible path, preferring `std::` ones.
+/// This is evidence, not inference: rustc named these exact bytes.
+fn suggested_import(error: &CompileError) -> Option<String> {
+    let text = error.suggestion.as_deref()?;
+    let mut found: Vec<String> = Vec::new();
+    // `use a::b::C;` shapes.
+    let mut i = 0;
+    while let Some(pos) = text[i..].find("use ") {
+        let start = i + pos + 4;
+        let mut end = start;
+        while end < text.len()
+            && (text.as_bytes()[end].is_ascii_alphanumeric()
+                || matches!(text.as_bytes()[end], b'_' | b':'))
+        {
+            end += 1;
+        }
+        if end > start {
+            let p = text[start..end].trim_end_matches(':').to_string();
+            if p.contains("::") && !found.contains(&p) {
+                found.push(p);
+            }
+        }
+        i = end.max(start + 1);
+    }
+    // Bare `std::...` tokens.
+    let mut j = 0;
+    while let Some(pos) = text[j..].find("std::") {
+        let start = j + pos;
+        let mut end = start;
+        while end < text.len()
+            && (text.as_bytes()[end].is_ascii_alphanumeric()
+                || matches!(text.as_bytes()[end], b'_' | b':'))
+        {
+            end += 1;
+        }
+        let p = text[start..end].trim_end_matches(':').to_string();
+        if !found.contains(&p) {
+            found.push(p);
+        }
+        j = end.max(start + 1);
+    }
+    // Verified-shape paths first; anything else still faces the
+    // planner's own std/symbol check downstream.
+    found
+        .iter()
+        .find(|p| p.starts_with("std::"))
+        .or_else(|| found.first())
+        .cloned()
 }
 
 fn inferred_import(error: &CompileError) -> Fix {
