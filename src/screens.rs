@@ -340,13 +340,12 @@ pub fn Settings(settings: Signal<ApiConfig>) -> Element {
                 button {
                     class: "btn-primary",
                     onclick: move |_| {
-                        if let Ok(path) = crate::llm::config_path() {
-                            match crate::llm::save_config(&settings(), &path) {
-                                Ok(()) => status.set("Settings saved.".to_string()),
+                        match crate::llm::config_path() {
+                            Ok(path) => match crate::llm::save_config(&settings(), &path) {
+                                Ok(()) => status.set(format!("Saved to {}", path)),
                                 Err(e) => status.set(format!("Save failed: {}", e)),
-                            }
-                        } else {
-                            status.set("Cannot locate config directory.".to_string());
+                            },
+                            Err(e) => status.set(format!("No writable config dir: {}", e)),
                         }
                     },
                     "Save Settings"
@@ -362,10 +361,17 @@ pub fn Settings(settings: Signal<ApiConfig>) -> Element {
                             let bot = CodeBot::new(&project, 5);
                             let syms = bot.symbols().len();
                             let recipes = bot.recipes().len();
-                            engine_info.set(format!(
-                                "Engine OK — {} symbols indexed, {} recipes learned.",
-                                syms, recipes
-                            ));
+                            engine_info.set(if syms <= 1 {
+                                format!(
+                                    "Engine OK — {} symbol in {}. Point Project Path at a source tree to index code.",
+                                    syms, project
+                                )
+                            } else {
+                                format!(
+                                    "Engine OK — {} symbols indexed in {}, {} recipes learned.",
+                                    syms, project, recipes
+                                )
+                            });
                         });
                     },
                     "Check Engine"

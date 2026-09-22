@@ -20,13 +20,25 @@ fn default_max_retries() -> u32 {
     5
 }
 
+fn default_model() -> String {
+    "google/gemini-2.0-flash-001".to_string()
+}
+
+fn default_base_url() -> String {
+    "https://openrouter.ai/api/v1".to_string()
+}
+
 /// API key storage for the LLM translator plus app settings.
 /// Extra fields carry `serde(default)` so older config files keep loading.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiConfig {
+    #[serde(default)]
     pub openrouter_key: Option<String>,
+    #[serde(default)]
     pub github_key: Option<String>,
+    #[serde(default = "default_model")]
     pub model: String,
+    #[serde(default = "default_base_url")]
     pub base_url: String,
     /// Project directory the engine works in (device-local path).
     #[serde(default = "default_project_path")]
@@ -41,8 +53,8 @@ impl Default for ApiConfig {
         ApiConfig {
             openrouter_key: None,
             github_key: None,
-            model: "google/gemini-2.0-flash-001".to_string(),
-            base_url: "https://openrouter.ai/api/v1".to_string(),
+            model: default_model(),
+            base_url: default_base_url(),
             project_path: default_project_path(),
             max_retries: default_max_retries(),
         }
@@ -414,13 +426,36 @@ pub fn has_api_key(config: &ApiConfig) -> bool {
 }
 
 /// Get the config file path for the current platform.
+///
+/// `dirs::config_dir()` returns `None` inside an Android app process (no
+/// XDG home), which used to surface as "Cannot locate config directory".
+/// Fall back through every plausible base dir, ending at the temp dir
+/// (always writable), and honor `GROUNDING_CONFIG` as an override.
+/// The resolved path is also shown in Settings so it never lies.
 pub fn config_path() -> Result<String, String> {
+    if let Ok(custom) = std::env::var("GROUNDING_CONFIG")
+        && !custom.trim().is_empty()
+    {
+        return Ok(custom);
+    }
     dirs::config_dir()
+        .or_else(dirs::data_dir)
+        .or_else(dirs::cache_dir)
+        .or_else(dirs::home_dir)
         .map(|p| {
             p.join("grounding-coder")
                 .join("config.json")
                 .to_string_lossy()
                 .to_string()
+        })
+        .or_else(|| {
+            Some(
+                std::env::temp_dir()
+                    .join("grounding-coder")
+                    .join("config.json")
+                    .to_string_lossy()
+                    .to_string(),
+            )
         })
         .ok_or_else(|| "Cannot determine config directory".to_string())
 }
@@ -430,10 +465,15 @@ pub fn load_config_default() -> ApiConfig {
     load_config(&config_path().unwrap_or_default())
 }
 
-/// Save config to file (e.g., for settings panel).
+/// Save config to file (e.g., for settings panel). Parent dirs are
+/// created — a missing app dir must never fail a save.
 pub fn save_config(config: &ApiConfig, path: &str) -> Result<(), String> {
     let json =
         serde_json::to_string_pretty(config).map_err(|e| format!("Serialize error: {}", e))?;
+    let p = std::path::Path::new(path);
+    if let Some(parent) = p.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("Mkdir error: {}", e))?;
+    }
     std::fs::write(path, json).map_err(|e| format!("Write error: {}", e))?;
     Ok(())
 }
