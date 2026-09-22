@@ -358,3 +358,55 @@ body {
 .nav-label {
     font-size: 11px;
 }
+
+/* Polish: first-paint theme (inlined at compile time) */
+html {
+    background: #0f0f1a;
+}
+
+.screen-header {
+    border-left: 3px solid #3a7aff;
+    padding-left: 12px;
+}
+
+.screen-header h2 {
+    color: #7db4ff;
+}
+
+.nav-btn.active {
+    color: #7db4ff;
+}
+
+.nav-btn.active .nav-icon {
+    filter: drop-shadow(0 0 6px rgba(90, 158, 255, 0.8));
+}
+
+.btn-primary {
+    background: linear-gradient(135deg, #3a7aff, #5a4aff);
+}
+
+.btn-primary:active {
+    filter: brightness(1.2);
+}
+
+.chat-bubble.bot {
+    border: 1px solid #2a2a3e;
+    border-left: 3px solid #3a7aff;
+}
+
+.chat-bubble.user {
+    border-right: 3px solid #7db4ff;
+}
+
+.chat-empty {
+    border: 1px dashed #2a2a3e;
+    border-radius: 12px;
+}
+
+.code-item.active {
+    background: #23233a;
+}
+
+.card-block {
+    border-top: 2px solid #2a2a3e;
+}

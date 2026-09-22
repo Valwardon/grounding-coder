@@ -22,8 +22,11 @@ pub fn App() -> Element {
     let mut last_changes = use_signal(Vec::<String>::new);
     let mut refresh = use_signal(|| 0u64);
 
+    // Theme is inlined at compile time: the Gradle build does not run the
+    // manganis asset pipeline, so a linked stylesheet 404s on-device and
+    // the app paints unstyled on white. This guarantees first paint.
     rsx! {
-        document::Stylesheet { href: asset!("/assets/main.css") }
+        style { {include_str!("../assets/main.css")} }
         div { class: "app",
             div { class: "content",
                 match tab() {
