@@ -75,9 +75,15 @@ pub struct LlmClient {
 
 impl LlmClient {
     pub fn new(config: ApiConfig) -> Self {
+        // Bounded: a hung mobile radio must surface as an error message,
+        // never an eternal spinner.
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(90))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         LlmClient {
             config: Arc::new(config),
-            client: reqwest::Client::new(),
+            client,
         }
     }
 

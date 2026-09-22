@@ -70,6 +70,11 @@ pub fn Chat(settings: Signal<ApiConfig>, on_done: EventHandler<Vec<String>>) -> 
 /// The deterministic path: LLM → intent JSON → engine.
 /// The LLM is NOT involved in code generation. Returns display text plus
 /// the files a successful run changed.
+///
+/// Hostile-OS armor: the project path is validated before anything runs,
+/// and the whole pipeline runs under panic recovery — on Android a Rust
+/// panic aborts the process with no message, so a panic must become chat
+/// text instead of death.
 async fn run_task_deterministic(prompt: &str, cfg: &ApiConfig) -> (String, Vec<String>) {
     if cfg.openrouter_key.is_none() {
         return (
@@ -77,7 +82,41 @@ async fn run_task_deterministic(prompt: &str, cfg: &ApiConfig) -> (String, Vec<S
             Vec::new(),
         );
     }
+    let project = std::path::Path::new(&cfg.project_path);
+    if !project.exists() {
+        return (
+            format!(
+                "ERROR: project path does not exist: {}. Fix it in Settings.",
+                cfg.project_path
+            ),
+            Vec::new(),
+        );
+    }
+    if !project.is_dir() {
+        return (
+            format!(
+                "ERROR: project path is not a directory: {}. Fix it in Settings.",
+                cfg.project_path
+            ),
+            Vec::new(),
+        );
+    }
+    let fut = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(run_task_inner(
+        prompt, cfg,
+    )));
+    match fut.await {
+        Ok(result) => result,
+        Err(_) => (
+            "ENGINE PANIC recovered: the engine hit an internal error instead of \
+             answering. Nothing was committed — snapshots roll back on failure. \
+             Report this prompt so the armor can become a proper fix."
+                .to_string(),
+            Vec::new(),
+        ),
+    }
+}
 
+async fn run_task_inner(prompt: &str, cfg: &ApiConfig) -> (String, Vec<String>) {
     let llm_client = crate::llm::LlmClient::new(cfg.clone());
     match llm_client.translate(prompt).await {
         Ok(intent) => match serde_json::to_string(&intent) {

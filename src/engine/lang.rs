@@ -1401,7 +1401,7 @@ fn has_source_files(dir: &Path, extensions: &[&str]) -> bool {
 
 fn collect_with(dir: &Path, extensions: &[&str]) -> Vec<String> {
     let mut out = Vec::new();
-    let mut stack = vec![dir.to_path_buf()];
+    let mut stack = vec![(dir.to_path_buf(), 0u8)];
     let ignore = [
         ".git",
         "target",
@@ -1413,20 +1413,28 @@ fn collect_with(dir: &Path, extensions: &[&str]) -> Vec<String> {
         ".venv",
         "venv",
     ];
-    while let Some(current) = stack.pop() {
+    // Capped: same OOM discipline as the symbol scan. Depth 8, 5000 files.
+    while let Some((current, depth)) = stack.pop() {
+        if out.len() >= 5000 {
+            break;
+        }
+        if depth > 8 {
+            continue;
+        }
         let Ok(entries) = std::fs::read_dir(&current) else {
             continue;
         };
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                if path
+                let name = path
                     .file_name()
-                    .is_none_or(|n| ignore.contains(&n.to_string_lossy().as_ref()))
-                {
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if name.starts_with('.') || ignore.contains(&name.as_str()) {
                     continue;
                 }
-                stack.push(path);
+                stack.push((path, depth + 1));
             } else if let Some(ext) = path.extension().and_then(|e| e.to_str())
                 && extensions.contains(&ext)
             {

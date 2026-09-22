@@ -57,14 +57,23 @@ impl CodeWriter {
     /// This builds the CodebaseIndex (grounded's runtime cache pattern).
     /// Extensions come from the language registry — any backend language
     /// is indexed, not just Rust-family ones.
+    /// Hard caps (depth/files/symbols): on Android an unbounded walk over
+    /// a huge tree means OOM death with no message. Big trees get a
+    /// partial index and keep running.
     pub fn scan_project(&self, project_dir: &Path) -> Vec<super::arena::CodeSymbol> {
         let mut symbols = Vec::new();
 
-        for entry in walkdir::WalkDir::new(project_dir)
+        for (files_seen, entry) in walkdir::WalkDir::new(project_dir)
+            .max_depth(8)
             .into_iter()
             .filter_entry(|e| !Self::should_ignore(e))
             .flatten()
+            .enumerate()
         {
+            if files_seen >= 2000 || symbols.len() >= 20000 {
+                log::warn!("scan cap hit in {}", project_dir.display());
+                break;
+            }
             let path = entry.path();
             let known = path
                 .extension()
@@ -87,15 +96,12 @@ impl CodeWriter {
 
     fn should_ignore(entry: &walkdir::DirEntry) -> bool {
         let name = entry.file_name().to_string_lossy().to_string();
-        [
-            ".git",
-            "target",
-            "build",
-            ".gradle",
-            ".idea",
-            "node_modules",
-        ]
-        .contains(&name.as_str())
+        // Hidden dirs (.cache, .config, .dbus…) explode scans on-device
+        // and never hold project sources.
+        if name.starts_with('.') {
+            return true;
+        }
+        ["target", "build", ".gradle", ".idea", "node_modules"].contains(&name.as_str())
     }
 
     /// Extract code symbols from a source file.
@@ -533,16 +539,21 @@ impl CodeWriter {
         Ok(snapshots)
     }
 
-    /// Every Rust source under the project — transaction coverage for files
-    /// the correction pipeline may touch outside the plan.
+    /// Every source under the project — transaction coverage for files
+    /// the correction pipeline may touch outside the plan. Capped like
+    /// every other walk: snapshot-all must never OOM the transaction.
     pub fn project_source_files(&self) -> Vec<PathBuf> {
         let mut out = Vec::new();
         let src = self.project_dir.join("src");
         for entry in walkdir::WalkDir::new(&src)
+            .max_depth(8)
             .into_iter()
             .filter_entry(|e| !Self::should_ignore(e))
             .flatten()
         {
+            if out.len() >= 2000 {
+                break;
+            }
             let path = entry.path().to_path_buf();
             if path.extension().is_some_and(|e| e == "rs") {
                 out.push(path);
