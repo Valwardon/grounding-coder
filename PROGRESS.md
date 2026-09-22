@@ -112,5 +112,53 @@ cargo test --all-features
 ## Next Steps
 - [ ] Build Android APK
 - [ ] Push APK as release on GitHub
-- [ ] Integration tests for EditPlan
-- [ ] End-to-end safety suite (tests/end_to_end.rs)
+- [x] Integration tests for EditPlan (`tests/editplan.rs` — 4 tests)
+- [x] End-to-end safety suite (`tests/end_to_end.rs` — 2 tests)
+- [ ] GitHub actor (push files / releases via API)
+- [ ] APK pipeline wired to engine outputs
+- [ ] Solana sniper demo (watcher project → APK → GitHub)
+
+## v0.3 — The Engine Proves Itself (2026-09-22)
+
+HEAD `9b32fdb` did not compile (37 errors) despite claiming green gates.
+Rebuilt to green, then hardened and extended across four phases. 21 tests,
+all passing; `cargo check`, `clippy -D warnings`, `fmt --check` clean.
+
+### Phase 1 — Contract synthesis (`src/engine/synthesize.rs`)
+- Intent carries input/output examples as pure data; LLM code rejected.
+- Candidates built ONLY from a verified std ingredient index; compiler +
+  generated contract tests judge; losers roll back.
+- Proof: `word_counts(text) -> HashMap<String, usize>` — real logic.
+
+### Phase 2 — Structs + fallible functions
+- Struct family: fields + method-op vocabulary (`new`/`add_assign`/`get`).
+  Proof: `Counter` with multi-step state contracts.
+- Parse family: `(&str) -> Result<Int, String>` with Ok/Err contracts.
+  Proof: `parse_port` incl. `Err("invalid digit…")` case.
+
+### Phase 3 — Multi-file atomic transactions
+- Plan-all → snapshot-all → execute; re-plan fresh at execution so byte
+  offsets never go stale across tasks.
+- New modules created + `mod` wired in the same EditPlan; missing files
+  snapshot as created, rollback deletes.
+- Proof: `src/geometry.rs` created + wired; a later failing task rolls back
+  an earlier clean one byte-identical. Two real bugs found by tests and
+  fixed: cross-plan staleness, missing NoSafeFix rollback.
+
+### Phase 4 — Polyglot backends (`src/engine/lang.rs`)
+- `LanguageBackend` trait: conventions + oracle + std inventory per language.
+- Hand-tuned: Rust, Python (`py_compile`+pytest), C (`gcc`), Kotlin,
+  HTML (tag-balance oracle over `html.parser`).
+- Data-driven: built-in registry (Go, Node) + project `.grounding.toml`
+  `[language]` tables — new languages need zero engine changes.
+- Proofs: Python import, registry-JS import, invented `zz` language via
+  TOML, honest `GO_MISSING` block, `def`/`func` symbol indexing.
+
+### The dentist test (random challenge)
+Prompt: *"a home page for a dentist office in Miami, Florida, in HTML"*.
+Result: `SUCCESS` → `index.html` for Bright Smile Dental (services, Little
+Havana blurb, phone, footer address), structure verified by the HTML oracle.
+No Rust involved at any step — intent → page family → escaped template →
+parser verify → commit. A hostile `<script>alert(1)</script>` payload
+renders as inert `&lt;script&gt;` text. Empty title BLOCKED with no file.
+Run it: `cargo run --example build_page -- /tmp/dentist-site /tmp/dentist-intent.json`.

@@ -213,14 +213,7 @@ async fn run_task_deterministic(prompt: &str, cfg: &crate::llm::ApiConfig) -> St
             Ok(intent_json) => {
                 let mut bot = CodeBot::new(".", 5);
                 match bot.run_task(&intent_json).await {
-                    Ok(result) => format!(
-                        "SUCCESS: {}\nFiles: {} | Errors fixed: {} | Budget: {} | Recipes: {}",
-                        result.message,
-                        result.changes.len(),
-                        result.errors_fixed,
-                        result.budget_used,
-                        result.recipes_learned
-                    ),
+                    Ok(outcome) => format!("{}", outcome),
                     Err(e) => format!("ENGINE: {}", e),
                 }
             }

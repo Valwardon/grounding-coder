@@ -2,10 +2,12 @@ pub mod arena;
 pub mod budget;
 pub mod corrector;
 pub mod error;
+pub mod lang;
 pub mod plan;
 pub mod recipes;
 pub mod research;
 pub mod symbols;
+pub mod synthesize;
 pub mod tasks;
 pub mod verifier;
 pub mod writer;
@@ -21,8 +23,10 @@ pub use plan::{EditPlan, Evidence, SourceEdit, TaskState};
 pub use recipes::RecipeLog;
 pub use research::ResearchOracle;
 pub use symbols::{CodeDef, SymbolTable};
+pub use synthesize::{ContractCase, SynthRequest, Synthesizer};
 pub use tasks::{
-    EditIntent, IntentAction, IntentDefinition, IntentTest, StructuredIntent, SubTask, TaskDecomposer, TaskKind,
+    EditIntent, FieldDef, IntentAction, IntentDefinition, IntentTest, MethodDef, SectionDef,
+    StructuredIntent, SubTask, TaskDecomposer, TaskKind, TestCase,
 };
 pub use verifier::CodeVerifier;
 pub use writer::{CodeWriter, FileSnapshot};
@@ -90,9 +94,7 @@ pub enum AgentOutcome {
         diagnostics: Vec<CompileError>,
     },
     /// Task failed with a reason
-    Failed {
-        reason: String,
-    },
+    Failed { reason: String },
 }
 
 /// Reasons a task can be blocked.
@@ -104,6 +106,56 @@ pub enum BlockReason {
     NoSafeFix,
     VerificationToolUnavailable,
     StaleEdit,
+}
+
+impl std::fmt::Display for BlockReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            BlockReason::UnknownSymbol => "UnknownSymbol",
+            BlockReason::NoVerifiedPattern => "NoVerifiedPattern",
+            BlockReason::UnsupportedAction => "UnsupportedAction",
+            BlockReason::NoSafeFix => "NoSafeFix",
+            BlockReason::VerificationToolUnavailable => "VerificationToolUnavailable",
+            BlockReason::StaleEdit => "StaleEdit",
+        };
+        write!(f, "{}", s)
+    }
+}
+
+impl std::fmt::Display for AgentOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AgentOutcome::Success(r) => write!(f, "{}", r),
+            AgentOutcome::Blocked {
+                reason,
+                diagnostics,
+            } => {
+                writeln!(f, "Result: BLOCKED ({})", reason)?;
+                for d in diagnostics {
+                    writeln!(f, "  {} {}:{} {}", d.code, d.file, d.line, d.message)?;
+                }
+                Ok(())
+            }
+            AgentOutcome::Failed { reason } => write!(f, "Result: FAILURE\nMessage: {}", reason),
+        }
+    }
+}
+
+/// A terminal honest refusal with one diagnostic.
+fn blocked_outcome(reason: BlockReason, code: &str, message: String) -> AgentOutcome {
+    AgentOutcome::Blocked {
+        reason,
+        diagnostics: vec![CompileError {
+            code: code.to_string(),
+            message,
+            file: String::new(),
+            line: 0,
+            col: 0,
+            suggestion: None,
+            source_line: None,
+            kind: crate::engine::error::ErrorKind::Other,
+        }],
+    }
 }
 
 impl CodeBot {
@@ -170,16 +222,23 @@ impl CodeBot {
                 unknown_symbols.push(sym.clone());
             }
         }
-        for sym in &intent.define {
-            if let Some(d) = sym {
-                if !self.symbol_table.is_known(&d.qname) {
-                    unknown_symbols.push(d.qname.clone());
+        for d in intent.define.iter().flatten() {
+            if !self.symbol_table.is_known(&d.name) {
+                unknown_symbols.push(d.name.clone());
+            }
+            for r in &d.references {
+                if !self.symbol_table.is_known(r) {
+                    unknown_symbols.push(r.clone());
                 }
             }
         }
         for sym in unknown_symbols {
-            if let Some(source_url) = self.researcher.research(&sym) {
-                log::info!("Resolving unknown symbol {} via {}", sym, source_url);
+            let lang = intent
+                .language
+                .clone()
+                .unwrap_or_else(|| "rust".to_string());
+            if let Some(found) = self.researcher.research(&sym, &lang).await {
+                log::info!("Resolving unknown symbol {} via {}", sym, found.source_url);
             } else {
                 log::warn!(
                     "Could not research symbol: {} — no verified source found",
@@ -196,37 +255,139 @@ impl CodeBot {
         let mut budget_used = 0u32;
         let mut recipes_learned = 0u32;
 
+        // Research tasks were already attempted in Step 0 — they touch no
+        // files, so filter them here and let concrete edits proceed.
+        let mut active = Vec::new();
         for task in tasks {
-            log::info!("Task: {} ({})", task.description, task.kind);
+            log::info!(
+                "TASK\n  {}\n  kind={} id={}",
+                task.description,
+                task.kind,
+                task.id
+            );
+            log::info!(
+                "GROUNDING\n  required={:?}\n  targets={:?}\n  payload={}",
+                task.required_symbols,
+                task.target_symbols,
+                task.payload
+            );
+            if matches!(
+                task.kind,
+                crate::engine::tasks::TaskKind::ResearchRequirements
+                    | crate::engine::tasks::TaskKind::ResolveSymbol
+                    | crate::engine::tasks::TaskKind::CreateProjectManifest
+            ) {
+                log::info!(
+                    "RESULT\n  SKIPPED research task {}\n  reason=already_attempted_in_step_0",
+                    task.id
+                );
+                continue;
+            }
+            active.push(task);
+        }
 
-            // === TRANSACTIONAL LOOP ===
-            // 1. Plan: generate an EditPlan with precise edits
+        // Phase A: prove EVERYTHING plannable before touching disk, and
+        // collect the file list. Any planning failure blocks with nothing
+        // applied — atomicity by construction.
+        //
+        // Plans hold byte offsets against pristine files, so they are used
+        // here only for the file list. Phase C re-plans each task fresh
+        // against current disk state (planning is deterministic).
+        let mut all_files = self.writer.project_source_files();
+        for task in &active {
+            let files: Vec<PathBuf> =
+                if task.kind == crate::engine::tasks::TaskKind::SynthesizeFunction {
+                    match self.writer.plan_synthesis(task) {
+                        Ok(plans) => plans
+                            .iter()
+                            .flat_map(|p| p.edits.iter().map(|e| e.file.clone()))
+                            .collect(),
+                        Err(e) => {
+                            return Ok(blocked_outcome(
+                                BlockReason::NoVerifiedPattern,
+                                "SYNTH_ERROR",
+                                e,
+                            ));
+                        }
+                    }
+                } else {
+                    match self.writer.plan(task, &self.symbol_table) {
+                        Ok(plan) => plan.edits.iter().map(|e| e.file.clone()).collect(),
+                        Err(e) => {
+                            return Ok(blocked_outcome(
+                                BlockReason::NoVerifiedPattern,
+                                "PLAN_ERROR",
+                                e,
+                            ));
+                        }
+                    }
+                };
+            all_files.extend(files);
+        }
+
+        // Phase B: one global snapshot over every planned file plus all
+        // project sources (corrections can't escape the transaction).
+        let global = match self.writer.snapshot_many(&all_files) {
+            Ok(s) => s,
+            Err(e) => {
+                return Ok(AgentOutcome::Failed {
+                    reason: format!("Failed to create snapshot: {}", e),
+                });
+            }
+        };
+
+        // Phase C: execute in order, re-planning each task fresh so byte
+        // offsets always match current disk state. ANY terminal failure
+        // rolls back the whole run — a multi-file feature either lands
+        // complete or not at all.
+        for task in active {
+            // Synthesis tasks try each candidate body in order —
+            // first fully-verified candidate commits, exhaustion blocks.
+            if task.kind == crate::engine::tasks::TaskKind::SynthesizeFunction {
+                let plans = match self.writer.plan_synthesis(&task) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        let _ = self.writer.rollback(&global);
+                        return Ok(blocked_outcome(
+                            BlockReason::NoVerifiedPattern,
+                            "SYNTH_ERROR",
+                            e,
+                        ));
+                    }
+                };
+                match self.run_synthesis_plans(&plans).await {
+                    Ok(AgentOutcome::Success(r)) => {
+                        changes.extend(r.changes.clone());
+                        errors_fixed += r.errors_fixed;
+                        budget_used += r.budget_used;
+                        recipes_learned += r.recipes_learned;
+                        continue;
+                    }
+                    Ok(blocked_or_failed) => {
+                        let _ = self.writer.rollback(&global);
+                        return Ok(blocked_or_failed);
+                    }
+                    Err(e) => {
+                        let _ = self.writer.rollback(&global);
+                        return Ok(blocked_outcome(
+                            BlockReason::NoVerifiedPattern,
+                            "SYNTH_ERROR",
+                            e,
+                        ));
+                    }
+                }
+            }
+            // Re-plan against current disk (offsets from Phase A are stale
+            // once earlier tasks have applied).
             let plan = match self.writer.plan(&task, &self.symbol_table) {
                 Ok(p) => p,
                 Err(e) => {
-                    return Ok(AgentOutcome::Blocked {
-                        reason: BlockReason::NoVerifiedPattern,
-                        diagnostics: vec![CompileError {
-                            code: "PLAN_ERROR".to_string(),
-                            message: e,
-                            file: String::new(),
-                            line: 0,
-                            col: 0,
-                            suggestion: None,
-                            source_line: None,
-                            kind: crate::engine::error::ErrorKind::Other,
-                        }],
-                    });
-                }
-            };
-
-            // 2. Snapshot: capture current state before applying edits
-            let snapshot = match self.writer.snapshot(&plan) {
-                Ok(s) => s,
-                Err(e) => {
-                    return Ok(AgentOutcome::Failed {
-                        reason: format!("Failed to create snapshot: {}", e),
-                    });
+                    let _ = self.writer.rollback(&global);
+                    return Ok(blocked_outcome(
+                        BlockReason::NoVerifiedPattern,
+                        "PLAN_ERROR",
+                        e,
+                    ));
                 }
             };
 
@@ -234,8 +395,8 @@ impl CodeBot {
             let files = match self.writer.apply_plan(&plan) {
                 Ok(f) => f,
                 Err(e) => {
-                    // Rollback on failure
-                    let _ = self.writer.rollback(&snapshot);
+                    // Rollback everything on failure
+                    let _ = self.writer.rollback(&global);
                     return Ok(AgentOutcome::Failed {
                         reason: format!("Failed to apply plan: {}", e),
                     });
@@ -244,12 +405,18 @@ impl CodeBot {
 
             // 4. Verify: run the compiler/tests
             let verdict = self.verifier.verify().await;
+            log::info!(
+                "VERIFICATION\n  clean={}\n  errors={}\n  warnings={}",
+                verdict.is_clean(),
+                verdict.errors.len(),
+                verdict.warnings.len()
+            );
 
             if verdict.is_clean() {
                 // 5a. Commit: changes are clean, commit the transaction
-                self.writer.commit(&snapshot)?;
-                changes.extend(files);
-                log::info!("Verification passed - committed");
+                self.writer.commit(&global)?;
+                changes.extend(files.clone());
+                log::info!("RESULT\n  SUCCESS\n  files={:?}", files);
                 continue;
             }
 
@@ -272,8 +439,10 @@ impl CodeBot {
                         any_fixed = true;
                     } else {
                         // No recipe found and can't synthesize fix — the bot
-                        // KNOWS it doesn't know. It reports this honestly
-                        // instead of guessing. (grounded's "honesty principle")
+                        // KNOWS it doesn't know. Roll back the whole run so
+                        // no unproven bytes remain, then report honestly
+                        // instead of guessing.
+                        let _ = self.writer.rollback(&global);
                         return Ok(AgentOutcome::Blocked {
                             reason: BlockReason::NoSafeFix,
                             diagnostics: vec![error.clone()],
@@ -285,7 +454,7 @@ impl CodeBot {
                 budget_used += 1;
                 if !self.budget.consume(1.0, 0.0, 0.0) {
                     // Rollback before returning - budget exhausted
-                    let _ = self.writer.rollback(&snapshot);
+                    let _ = self.writer.rollback(&global);
                     return Ok(AgentOutcome::Blocked {
                         reason: BlockReason::NoSafeFix,
                         diagnostics: vec![CompileError {
@@ -308,7 +477,7 @@ impl CodeBot {
 
                 if !any_fixed {
                     // Rollback - fixes applied but verification is not clean
-                    let _ = self.writer.rollback(&snapshot);
+                    let _ = self.writer.rollback(&global);
                     return Ok(AgentOutcome::Failed {
                         reason: format!(
                             "Fixes applied but verification is not clean after {} attempt(s).",
@@ -337,6 +506,65 @@ impl CodeBot {
                 errors_fixed, recipes_learned, budget_used, self.budget.total
             ),
         }))
+    }
+
+    /// Try each synthesis candidate: snapshot → apply → verify →
+    /// commit on first fully-clean candidate, rollback otherwise.
+    /// Behavior is judged by the contract test, not just compilation.
+    /// Plans are prebuilt by the caller (Phase A); terminal failure here
+    /// leaves nothing applied — the caller rolls back the global snapshot.
+    async fn run_synthesis_plans(&self, plans: &[EditPlan]) -> Result<AgentOutcome, String> {
+        let mut last_errors = Vec::new();
+        for (i, plan) in plans.iter().enumerate() {
+            log::info!("SYNTH candidate {}/{}", i + 1, plans.len());
+            let snapshot = self.writer.snapshot(plan)?;
+            match self.writer.apply_plan(plan) {
+                Ok(files) => {
+                    let verdict = self.verifier.verify().await;
+                    log::info!(
+                        "VERIFICATION candidate {}\n  clean={}\n  errors={}",
+                        i + 1,
+                        verdict.is_clean(),
+                        verdict.errors.len()
+                    );
+                    if verdict.is_clean() {
+                        self.writer.commit(&snapshot)?;
+                        log::info!("RESULT\n  SUCCESS candidate {}", i + 1);
+                        return Ok(AgentOutcome::Success(TaskResult {
+                            success: true,
+                            changes: files,
+                            errors_fixed: 0,
+                            budget_used: i as u32,
+                            recipes_learned: 0,
+                            message: format!(
+                                "Synthesized and verified candidate {}/{}.",
+                                i + 1,
+                                plans.len()
+                            ),
+                        }));
+                    }
+                    last_errors = verdict.errors;
+                    let _ = self.writer.rollback(&snapshot);
+                }
+                Err(e) => {
+                    let _ = self.writer.rollback(&snapshot);
+                    last_errors = vec![CompileError {
+                        code: "APPLY_ERROR".to_string(),
+                        message: e,
+                        file: String::new(),
+                        line: 0,
+                        col: 0,
+                        suggestion: None,
+                        source_line: None,
+                        kind: crate::engine::error::ErrorKind::Other,
+                    }];
+                }
+            }
+        }
+        Ok(AgentOutcome::Blocked {
+            reason: BlockReason::NoSafeFix,
+            diagnostics: last_errors,
+        })
     }
 
     /// Run as a persistent background daemon.

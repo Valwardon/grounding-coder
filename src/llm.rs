@@ -58,25 +58,26 @@ impl LlmClient {
         let system = concat!(
             "You translate natural language into a structured JSON intent. ",
             "You are an unverified layer ONLY. Do NOT write code. ",
+            "NEVER include `code` fields — only metadata. ",
             "Output ONLY a JSON object (no markdown fences). ",
             "Required fields and types:\n",
-            "- goal: string (what the human wants)\n",
-            "- file: string (target file path relative to project root)\n",
-            "- language: \"kotlin\" | \"rust\" | etc.\n",
-            "- actions: array of { action: string, params: object }\n",
-            "- references: array of strings — every symbol fully qualified (e.g. android.widget.Button, solenoid::Part)\n",
-            "- define: null or { name: string, kind: string, code: string, references: [string] }\n",
+            "- goal: string\n",
+            "- file: string | null (target file relative to project root, e.g. \"src/lib.rs\")\n",
+            "- language: \"rust\" | \"kotlin\" | etc.\n",
+            "- actions: array of {\"Action\": {\"action\": string, \"params\": [string], \"references\": [string]}} or {\"Research\": {\"topic\": string, \"reason\": string}}\n",
+            "- references: array of strings fully qualified (e.g. \"std::collections::HashMap\")\n",
+            "- define: array of null or { name: string, kind: string, references: [string], signature?: string, cases?: [{input: string, expected: string}], fields?: [{name: string, type: string}], methods?: [{name: string, self: \"none\"|\"ref\"|\"mut\", params: [\"n: Type\"], ret?: string, op: \"new\"|\"add_assign\"|\"get\", field?: string, amount?: string}], title?: string, sections?: [{heading: string, body: string}], footer?: string } — NO code; cases/sections are literal values only; kind \"struct\" with fields+methods synthesizes behavior; kind \"page\" with title+sections+footer synthesizes a webpage\n",
             "- imports: array of strings\n",
-            "- test: null or { name: string, assertions: [string], code: string }\n",
+            "- test: array of { name: string, assertions: [string] } — NO code\n",
             "- platform: \"android\" | \"desktop\" | \"web\"\n",
-            "- architecture: \"native\" | \"cross-platform\" | \"hybrid\"\n",
-            "- runtime: null or { min_sdk?: number, target_sdk?: number, package?: string, api_constraints: [string] }\n",
-            "- capabilities: array of strings (network, filesystem, background execution, ...)\n",
-            "- domains: array of strings\n",
-            "- constraints: array of strings\n",
-            "- dependencies: array of strings\n",
-            "- unknown_requirements: array of strings\n",
-            "- confidence: number (0.0-1.0)\n"
+            "- architecture: string\n",
+            "- runtime: string\n",
+            "- capabilities: [string]\n",
+            "- domains: [string]\n",
+            "- constraints: [string]\n",
+            "- dependencies: [string]\n",
+            "- unknown_requirements: [string] — list what you do NOT know\n",
+            "- confidence: number 0.0-1.0\n"
         );
 
         let resp = self
@@ -91,6 +92,7 @@ impl LlmClient {
             )
             .json(&serde_json::json!({
                 "model": &self.config.model,
+                "response_format": {"type": "json_object"},
                 "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": prompt}
@@ -109,9 +111,270 @@ impl LlmClient {
             .ok_or("No content in response")?;
 
         let cleaned = strip_json_fences(content);
-        serde_json::from_str::<StructuredIntent>(&cleaned)
-            .map_err(|e| format!("Intent parse error: {}", e))
+        // Models often wrap JSON in prose — extract the first {...} block.
+        let candidate = extract_json_object(&cleaned).unwrap_or_else(|| cleaned.clone());
+        // 1. Strict path: model followed the schema.
+        if let Ok(intent) = serde_json::from_str::<StructuredIntent>(&candidate) {
+            return Ok(intent);
+        }
+        // 2. Repair path: accept any JSON (or prose) and normalize it into a
+        //    grounded intent. Only metadata is extracted — any `code` the
+        //    model emitted is dropped here and would be rejected downstream
+        //    anyway by the planner-only boundary.
+        let value: serde_json::Value =
+            serde_json::from_str(&candidate).unwrap_or(serde_json::Value::Null);
+        Ok(normalize_intent(&value, prompt))
     }
+}
+
+/// Build a grounded intent from an arbitrary model output + the original prompt.
+///
+/// Safety contract:
+/// - NEVER carries model-provided `code` into the intent.
+/// - Imports/references are restricted to patterns found verbatim in the
+///   model output or prompt that match `std::...` / `use ...` shapes or a
+///   small keyword table (HashMap, HashSet, Vec, ...).
+/// - Anything unrecognized becomes `unknown_requirements`, never a guess.
+fn normalize_intent(v: &serde_json::Value, prompt: &str) -> StructuredIntent {
+    let mut imports: Vec<String> = Vec::new();
+    let mut references: Vec<String> = Vec::new();
+
+    // Pull structured fields when present (imports/references/file/etc.).
+    if let Some(arr) = v.get("imports").and_then(|x| x.as_array()) {
+        for x in arr.iter().filter_map(|x| x.as_str()) {
+            imports.push(x.to_string());
+        }
+    }
+    if let Some(arr) = v.get("references").and_then(|x| x.as_array()) {
+        for x in arr.iter().filter_map(|x| x.as_str()) {
+            references.push(x.to_string());
+        }
+    }
+
+    // Scan all strings in the model output for `use X;` / `std::...` shapes.
+    let mut texts: Vec<String> = Vec::new();
+    collect_strings(v, &mut texts);
+    texts.push(prompt.to_string());
+    for t in &texts {
+        for cap in scan_use_paths(t) {
+            if !imports.contains(&cap) {
+                imports.push(cap.clone());
+            }
+            if !references.contains(&cap) {
+                references.push(cap);
+            }
+        }
+    }
+
+    // Keyword table for the boring path (verified std symbols only).
+    let lower = texts.join(" ").to_lowercase();
+    let table = [
+        ("hashmap", "std::collections::HashMap"),
+        ("hashset", "std::collections::HashSet"),
+        ("btreemap", "std::collections::BTreeMap"),
+    ];
+    for (kw, path) in table {
+        if lower.contains(kw) && !imports.contains(&path.to_string()) {
+            imports.push(path.to_string());
+            references.push(path.to_string());
+        }
+    }
+    imports.sort();
+    imports.dedup();
+    references.sort();
+    references.dedup();
+
+    // Target file: explicit field wins, else scan for src/... in output+prompt.
+    let mut file: Option<String> = v
+        .get("file")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string());
+    if file.is_none() {
+        file = texts.iter().find_map(|t| scan_src_file(t));
+    }
+    if file.is_none() && (!imports.is_empty() || lower.contains("src/lib")) {
+        file = Some("src/lib.rs".to_string());
+    }
+
+    let language = v
+        .get("language")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            if file.as_deref().is_some_and(|f| f.ends_with(".rs")) || lower.contains("rust") {
+                Some("rust".to_string())
+            } else if file.as_deref().is_some_and(|f| f.ends_with(".kt")) {
+                Some("kotlin".to_string())
+            } else {
+                None
+            }
+        });
+
+    let goal = v
+        .get("goal")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| prompt.to_string());
+
+    StructuredIntent {
+        platform: v
+            .get("platform")
+            .and_then(|x| x.as_str())
+            .unwrap_or("desktop")
+            .to_string(),
+        architecture: v
+            .get("architecture")
+            .and_then(|x| x.as_str())
+            .unwrap_or("native")
+            .to_string(),
+        runtime: Default::default(),
+        capabilities: Default::default(),
+        domains: Default::default(),
+        constraints: Default::default(),
+        dependencies: Default::default(),
+        unknown_requirements: if imports.is_empty() {
+            vec![format!("unresolved request: {}", truncate(prompt, 160))]
+        } else {
+            Vec::new()
+        },
+        goal,
+        file,
+        language,
+        imports,
+        confidence: 0.5,
+        actions: Vec::new(),
+        define: Vec::new(),
+        test: Vec::new(),
+        references,
+    }
+}
+
+fn collect_strings(v: &serde_json::Value, out: &mut Vec<String>) {
+    match v {
+        serde_json::Value::String(s) => out.push(s.clone()),
+        serde_json::Value::Array(a) => {
+            for x in a {
+                collect_strings(x, out);
+            }
+        }
+        serde_json::Value::Object(m) => {
+            for (k, x) in m {
+                // Skip anything that looks like emitted code.
+                if k.eq_ignore_ascii_case("code") {
+                    continue;
+                }
+                collect_strings(x, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn scan_use_paths(t: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let bytes = t.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Match `use <path>` where path looks like a::b::C.
+        if t[i..].starts_with("use ") || t[i..].starts_with("use\t") {
+            let mut j = i + 4;
+            while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
+                j += 1;
+            }
+            let start = j;
+            while j < bytes.len()
+                && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_' || bytes[j] == b':')
+            {
+                j += 1;
+            }
+            if j > start {
+                let p = t[start..j].trim_end_matches(':').to_string();
+                if p.contains("::") && !out.contains(&p) {
+                    out.push(p);
+                }
+            }
+            i = j;
+        } else if t[i..].starts_with("std::") {
+            let mut j = i;
+            while j < bytes.len()
+                && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_' || bytes[j] == b':')
+            {
+                j += 1;
+            }
+            let p = t[i..j].trim_end_matches(':').to_string();
+            if !out.contains(&p) {
+                out.push(p);
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+fn scan_src_file(t: &str) -> Option<String> {
+    let mut i = 0;
+    while let Some(pos) = t[i..].find("src/") {
+        let start = i + pos;
+        let mut j = start;
+        while j < t.len()
+            && !t[j..].chars().next().is_some_and(|c| {
+                c.is_whitespace() || matches!(c, '"' | '\'' | '`' | ')' | ',' | ';')
+            })
+        {
+            j += 1;
+        }
+        let p = t[start..j]
+            .trim_end_matches(['.', ',', ';', ':', '"', '\''])
+            .to_string();
+        if p.ends_with(".rs") || p.ends_with(".kt") || p.ends_with(".java") {
+            return Some(p);
+        }
+        i = j.max(start + 4);
+    }
+    None
+}
+
+fn truncate(s: &str, n: usize) -> String {
+    if s.len() <= n {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..n])
+    }
+}
+
+/// Extract the first balanced {...} JSON object from a response.
+/// Returns None if no plausible object is found.
+fn extract_json_object(s: &str) -> Option<String> {
+    let start = s.find('{')?;
+    let mut depth = 0usize;
+    let mut in_str = false;
+    let mut esc = false;
+    for (i, c) in s[start..].char_indices() {
+        if in_str {
+            if esc {
+                esc = false;
+            } else if c == '\\' {
+                esc = true;
+            } else if c == '"' {
+                in_str = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => in_str = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(s[start..start + i + 1].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Strip markdown code fences (```json ... ```) around the LLM's JSON reply.

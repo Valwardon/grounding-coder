@@ -1,12 +1,19 @@
 # grounding-coder
 
-A **deterministic, non-guessing coding agent**. The LLM is only an unverified natural-language→intent translator. All actual coding, verification, and correction is driven by grounded's deterministic engine patterns — no guessing, no hallucination.
+A **deterministic, non-guessing coding agent — in any language it can check**.
+The LLM is only an unverified natural-language→intent translator. All actual
+coding, verification, and correction is driven by a deterministic engine:
+no guessing, no hallucination.
 
 ## Core Principle
 
 > The compiler is the oracle. Tests are the truth. The codebase is the answer key.
 
-The LLM generates hypotheses (intent). The deterministic engine verifies every hypothesis against hard oracles (cargo check, tests, codebase patterns) and corrects failures using a recipe log — never guessing.
+The LLM generates hypotheses (intent). The deterministic engine verifies every
+hypothesis against hard oracles (compilers, interpreters, test runners,
+structure checkers) and corrects failures using a recipe log — never guessing.
+Anything it cannot prove, it refuses honestly (`BLOCKED`) with the file left
+byte-identical.
 
 ## Architecture
 
@@ -15,99 +22,119 @@ Human (messy language)
   │
   ▼
 LLM via OpenRouter ──── UNVERIFIED ────► structured intent JSON
-  │
+  │                                        (metadata + literal values only,
+  │                                         NEVER code)
   ▼
-Intent validation
+Intent validation + normalization
   │
   ▼
 Research / resolve symbols
   │
   ▼
+Language backend (Rust / Python / C / Kotlin / JS / HTML / *.grounding.toml)
+  │
+  ▼
 Deterministic EditPlan
+  [exact file] [exact byte range] [expected old text] [new text] [evidence]
   │
   ▼
-Pre-edit snapshot
+Global snapshot (all planned files + all sources)
   │
   ▼
-Apply ONLY precise edits
+Apply ONLY precise edits (stale-check every range)
   │
   ▼
-cargo check / gradle build
+Oracle verify (compiler / tests / parser per language)
   │
-  ├── clean → success
+  ├── clean → commit
   │
-  └── errors
-        ↓
-   structured diagnostic
-       ↓
-   known recipe?
-      / \
-    yes  no
-     ↓    ↓
-   exact    STOP
-   edit     honestly
-     ↓
-   verify again
+  └── dirty → CorrectionPipeline (bounded) → re-verify
+                ├── fixed → commit
+                └── unfixable → ROLLBACK EVERYTHING → BLOCKED honestly
 ```
 
 ## Critical Invariant
 
-> The agent may only modify bytes identified by a structured edit whose target and replacement are justified by project state, compiler diagnostics, or a verified recipe.
+> The agent may only modify bytes identified by a structured edit whose
+> target and replacement are justified by project state, compiler
+> diagnostics, or a verified recipe. LLM-provided code is rejected on sight.
 
-## Grounding Coder 0.2 — Castle + Project Intelligence
+## What It Can Do (v0.3, proven by tests)
 
-Version 0.2 introduces the Castle + Project Intelligence architecture, fixing the white screen crash and making the execution path evidence-driven and transactional.
+- **Real functions from contracts** — `word_counts(text) -> HashMap<String, usize>`
+  synthesized from input/output examples, verified by compiler + generated
+  contract tests. (`tests/synthesize.rs`)
+- **Stateful structs** — `Counter` with `new`/`incr`/`incr_by`/`value` built
+  from a verified method-op vocabulary; multi-step state contracts pass.
+- **Fallible functions** — `parse_port(s) -> Result<u16, String>` with `Ok`
+  and `Err` cases both verified.
+- **Multi-file atomic features** — new `src/geometry.rs` module created and
+  `mod geometry;` wired into `lib.rs` in one transaction. If any task fails
+  after others applied, every file rolls back byte-identical.
+- **Any language with a checker** — Rust, Python (`py_compile`+pytest), C
+  (`gcc`), Kotlin, JavaScript (registry data + `node --check`), HTML
+  (tag-balance oracle), Go (honest `GO_MISSING` without toolchain), plus any
+  language at all via a project `.grounding.toml` `[language]` table.
+- **Web pages from content slots** — title/sections/footer as pure data,
+  engine-owned escaped template, parser oracle. Hostile
+  `<script>alert(1)</script>` content renders as inert text.
 
-### Key Features:
+## Proof, Not Promises
 
-#### ✅ Enhanced Intent Understanding
-- **Requirements Hypothesis**: LLM can indicate what it doesn't know via `unknown_requirements` field
-- **Project Context**: StructuredIntent now includes platform, architecture, runtime, capabilities, domains, constraints, and dependencies
-- **Confidence Scoring**: LLM can provide confidence levels for intent completeness
+21 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
+`fmt --check` clean:
 
-#### ✅ Knowledge Management
-- **CastleStore**: Engineering knowledge base with compressed verified facts, symbols, patterns, and self-pruning
-- **KnowledgeOracle**: Unified interface for knowledge adapters (Rust, Android, Solana, GitHub)
-- **Relevance-Based Retrieval**: Retrieves only necessary knowledge, not entire documentation
-- **Self-Pruning**: Automatically removes low-utility, stale, or contradicted knowledge
+| Suite | Tests | What it proves |
+|---|---|---|
+| `editplan` | 4 | byte-range apply, stale rejection, invalid-range rejection, LLM-code rejection |
+| `end_to_end` | 2 | boring import path commits; unknown symbols block honestly |
+| `synthesize` | 7 | word_counts, Counter struct, parse_port, new-module wiring, cross-task rollback, unknown-op block, unsupported-shape block |
+| `polyglot` | 5 | Python import, unknown-import block, registry-JS import, TOML-defined language, missing-toolchain block |
+| `webpage` | 3 | homepage build, script-escape safety, empty-title block |
 
-#### ✅ Android Project Intelligence
-- **Project Workspace**: Real project selection mechanism instead of assuming "."
-- **Project Manifest**: Comprehensive project metadata including platform, capabilities, domains, constraints
-- **Android Capabilities**: Registry of device capabilities (network, filesystem, background execution, notifications, location, camera, audio, vibration)
-- **Runtime Configuration**: SDK versions, package info, activities, permissions
+### The dentist test
 
-#### ✅ Multi-Platform Verification
-- **Rust Verification**: `cargo check`, `cargo test`, `cargo clippy`
-- **Android Verification**: Gradle build, Android lint, resource validation, NDK compatibility
-- **Platform-Aware**: Different verification oracles for Rust and Android projects
+A random challenge — *"a home page for a dentist office in Miami, Florida,
+in HTML"* — produced `/tmp/dentist-site/index.html` via `SUCCESS`: Bright
+Smile Dental with services, Little Havana blurb, phone, and footer address,
+structure verified by the HTML oracle. No Rust was involved at any step:
+intent → page family → escaped template → parser verify → commit. That run
+is what proved the engine is a coding bot, not a Rust bot.
 
-### New Components:
+Run it yourself:
 
-#### Android Modules
-- `src/android/runtime.rs` — Android runtime with SDK info and capabilities
-- `src/android/capabilities.rs` — Project capability registry
-- `src/android/project.rs` — Project manifest and workspace management
+```bash
+cargo run --example build_page -- /tmp/dentist-site /tmp/dentist-intent.json
+```
 
-#### Knowledge Management
-- `src/knowledge/castle.rs` — CastleStore engineering knowledge base
-- `src/knowledge/facts.rs` — Verified facts and code patterns
-- `src/knowledge/sources.rs` — Source cache with compression
+## Language Backends
 
-#### Knowledge Adapters
-- `src/oracle/rust.rs` — RustOracle (crates.io, docs.rs)
-- `src/oracle/android.rs` — AndroidOracle (Android SDK, AndroidX)
-- `src/oracle/solana.rs` — SolanaOracle (Solana docs, examples)
-- `src/oracle/github.rs` — GitHubOracle (repositories, code search)
+Per language there are exactly three things — edit conventions, an oracle
+command, a std inventory — behind the `LanguageBackend` trait
+(`src/engine/lang.rs`). New languages arrive as:
 
-### Build & Run
+1. a hand-tuned struct (rich multi-stage oracles: Rust, Python, C, HTML), or
+2. pure data — a registry entry, or a project `.grounding.toml`:
+   ```toml
+   [language]
+   name = "zz"
+   extensions = ["zz"]
+   import_template = "need {p};"
+   import_prefixes = ["need "]
+   std_exact = ["std/io"]
+   verify_cmd = ["zzc", "--check"]
+   ```
+Unknown languages with no spec refuse honestly instead of guessing.
+
+## Build & Run
 
 ```bash
 cargo build
 cargo run --bin gc -- --help
+cargo run --bin gc -- chat "Add HashMap support to src/lib.rs" --project /tmp/demo
 ```
 
-### Android APK
+## Android APK
 
 The APK is built from the checked-in Gradle project in `android/` (mirrors the scaffold the Dioxus CLI generates), producing `dist/grounding-coder.apk`.
 
@@ -126,9 +153,7 @@ cp android/app/build/outputs/apk/debug/app-debug.apk dist/grounding-coder.apk
 
 Requirements: Android SDK + NDK (`ANDROID_HOME`), JDK 17, Gradle 8.x, and the `aarch64-linux-android` Rust target. `dx bundle --android` works on hosts where the Dioxus CLI runs natively.
 
-### Quality Gates
-
-All checks run green in CI and locally:
+## Quality Gates
 
 ```bash
 cargo check --all-features
@@ -137,47 +162,23 @@ cargo fmt --check
 cargo test --all-features
 ```
 
-### Deliverables
+## Components
+
+- `src/engine/synthesize.rs` — deterministic synthesizer: verified ingredient
+  index, composition families (map-accumulation, struct ops, fallible parse,
+  web pages), contract-test renderer
+- `src/engine/lang.rs` — language backends: trait + Rust/Python/C/Kotlin/HTML
+  impls + data-driven registry + `.grounding.toml` loading
+- `src/engine/plan.rs` — `EditPlan` with `expected_old` stale-checks
+- `src/engine/writer.rs` — planner-only `CodeWriter`, module wiring,
+  creation-safe snapshots
+- `src/engine/mod.rs` — plan-all → snapshot-all → execute transaction loop
+- `src/oracle/` — knowledge adapters (Rust, Android, Solana, GitHub)
+- `src/knowledge/` — CastleStore engineering memory
+- `examples/build_page.rs` — drive the engine as a library
+
+## Deliverables
+
 - **GitHub:** https://github.com/Valwardon/grounding-coder
 - **Release:** https://github.com/Valwardon/grounding-coder/releases/tag/v0.2.0
 - **APK:** `grounding-coder.apk` (arm64) uploaded to release
-
-### Architecture Changes v0.2
-
-The Grounding Coder 0.2 implements a significant architectural upgrade:
-
-**Before (v0.1.0):**
-- Tiny intent schema with only goal, file, language, actions, references, define, imports, test
-- ResearchOracle limited to external sources (docs.rs, Android SDK docs)
-- No project context or capabilities awareness
-- Single verification oracle (cargo check/test/clippy)
-- **write()/apply() could replace entire target files — bypassing determinism guarantees**
-
-**After (v0.2.0):**
-- Rich intent schema with platform, architecture, runtime, capabilities, domains, constraints, dependencies, and unknown_requirements
-- CastleStore with compressed engineering memory
-- Project workspace and manifest system
-- Multiple platform-aware verification oracles
-- Relevance-based knowledge retrieval
-- Self-pruning knowledge base
-- **Critical fix**: Transactional execution with snapshot/apply/verify/rollback loop
-- **Write enforcement**: agent may only modify bytes identified by structured edit backed by evidence
-- **BlockReason** for honest refusal when no safe fix exists
-- **TaskState** machine for explicit state tracking
-
-### Fixes in v0.2
-
-1. **White screen crash**: Fixed by implementing all abstract methods in MainActivity.kt
-2. **Architectural**: Replaced unsafe whole-file writes with EditPlan + exact byte-range edits
-3. **Transactional**: Every task follows snapshot → apply → verify → commit/rollback
-4. **Honesty principle**: Agent reports "I don't know" via BlockReason instead of guessing
-5. **EditIntent enum**: Explicit operations instead of serde_json::Value escape hatch
-6. **StructuredIntent**: unknown_requirements field for LLM to indicate uncertainty
-
-### v0.2 Migration Notes
-
-- The old `write()` and `apply()` methods are deprecated but kept for backward compatibility
-- All new code should use `plan()` + `apply_plan()` pattern
-- Tasks now follow the transactional loop: snapshot → apply → verify → commit/rollback
-- If verification fails, the system rolls back to the pre-edit state
-- BlockReason variants provide honest refusal when no safe fix exists

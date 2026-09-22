@@ -10,5 +10,4 @@ pub mod components;
 #[cfg(feature = "ui")]
 pub mod screens;
 
-pub use engine::CodeBot;
-pub use engine::TaskResult;
+pub use engine::{AgentOutcome, BlockReason, CodeBot, TaskResult};

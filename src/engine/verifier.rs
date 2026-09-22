@@ -43,6 +43,8 @@ pub struct CodeVerifier {
     project_dir: PathBuf,
     /// Whether this is a Rust project (uses cargo) or Android (uses gradle)
     project_type: ProjectType,
+    /// Project-local language specs from `.grounding.toml`.
+    extra: Vec<super::lang::LanguageSpec>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -54,9 +56,11 @@ enum ProjectType {
 impl CodeVerifier {
     pub fn new(project_dir: PathBuf) -> Self {
         let project_type = detect_project_type(&project_dir);
+        let extra = super::lang::load_extra(&project_dir);
         CodeVerifier {
             project_dir,
             project_type,
+            extra,
         }
     }
 
@@ -65,9 +69,19 @@ impl CodeVerifier {
     /// The bot does NOT trust the LLM's or its own code generator.
     /// It trusts ONLY this verification.
     pub async fn verify(&self) -> VerificationResult {
-        match self.project_type {
-            ProjectType::Rust => self.verify_rust(),
-            ProjectType::Android => self.verify_android(),
+        use super::lang::LanguageBackend;
+        // Polyglot dispatch: project layout picks the backend, and the
+        // backend IS the oracle. Rust/Kotlin keep their mature paths.
+        let backend = super::lang::backend_for_project(&self.project_dir, &self.extra);
+        match backend.language() {
+            "python" => super::lang::PythonBackend.verify(&self.project_dir),
+            "c" => super::lang::CBackend.verify(&self.project_dir),
+            "rust" | "kotlin" => match self.project_type {
+                ProjectType::Rust => self.verify_rust(),
+                ProjectType::Android => self.verify_android(),
+            },
+            // Registry and `.grounding.toml` languages verify themselves.
+            _ => backend.verify(&self.project_dir),
         }
     }
 

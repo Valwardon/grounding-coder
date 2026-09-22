@@ -26,8 +26,49 @@ pub struct SourceEdit {
     pub start: usize,
     /// Byte offset where the replacement ends (exclusive)
     pub end: usize,
+    /// Text we expect to find at [start,end) — verified before apply.
+    /// Empty for pure inserts.
+    #[serde(default)]
+    pub expected_old: String,
     /// The replacement text
     pub replacement: String,
+}
+
+impl std::fmt::Display for SourceEdit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "EDIT")?;
+        writeln!(f, "  file: {}", self.file.display())?;
+        writeln!(f, "  range: [{}, {})", self.start, self.end)?;
+        writeln!(f, "  expected_old: {:?}", truncate(&self.expected_old, 160))?;
+        writeln!(f, "  replacement: {:?}", truncate(&self.replacement, 320))
+    }
+}
+
+impl std::fmt::Display for EditPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(
+            f,
+            "EditPlan task={} edits={}",
+            self.task_id,
+            self.edits.len()
+        )?;
+        for e in &self.edits {
+            write!(f, "{}", e)?;
+        }
+        writeln!(f, "EVIDENCE")?;
+        for ev in &self.evidence {
+            writeln!(f, "  {:?}", ev)?;
+        }
+        Ok(())
+    }
+}
+
+fn truncate(s: &str, n: usize) -> String {
+    if s.len() <= n {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..n])
+    }
 }
 
 /// Evidence that justifies an edit.
@@ -51,10 +92,7 @@ pub enum Evidence {
         col: u32,
     },
     /// The edit uses a verified symbol definition
-    VerifiedSymbol {
-        qname: String,
-        source: String,
-    },
+    VerifiedSymbol { qname: String, source: String },
 }
 
 /// The state machine for a task execution.
