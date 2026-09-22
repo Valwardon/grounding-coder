@@ -17,23 +17,46 @@ Human (messy language)
 LLM via OpenRouter ──── UNVERIFIED ────► structured intent JSON
   │
   ▼
-CodeArena ──► CodebaseIndex ──► CodeVerifier
-  │               │              (cargo check/test/clippy)
-  │               │                    │
-  │               ▼                    │ FAIL
-  │          SymbolBinder          ▼
-  │          (resolve refs)    ErrorCorrectionPipeline
-  │                               (5-phase: classify → recipe → apply → verify → record)
-  │                                   │
-  │                              RecipeLog (error→fix DB)
-  │                                   │
-  └─────────── CodeWriter ◄──────────┘
-             (compose from patterns)
+Intent validation
+  │
+  ▼
+Research / resolve symbols
+  │
+  ▼
+Deterministic EditPlan
+  │
+  ▼
+Pre-edit snapshot
+  │
+  ▼
+Apply ONLY precise edits
+  │
+  ▼
+cargo check / gradle build
+  │
+  ├── clean → success
+  │
+  └── errors
+        ↓
+   structured diagnostic
+       ↓
+   known recipe?
+      / \
+    yes  no
+     ↓    ↓
+   exact    STOP
+   edit     honestly
+     ↓
+   verify again
 ```
+
+## Critical Invariant
+
+> The agent may only modify bytes identified by a structured edit whose target and replacement are justified by project state, compiler diagnostics, or a verified recipe.
 
 ## Grounding Coder 0.2 — Castle + Project Intelligence
 
-Version 0.2 introduces the Castle + Project Intelligence architecture:
+Version 0.2 introduces the Castle + Project Intelligence architecture, fixing the white screen crash and making the execution path evidence-driven and transactional.
 
 ### Key Features:
 
@@ -119,7 +142,7 @@ cargo test --all-features
 - **Release:** https://github.com/Valwardon/grounding-coder/releases/tag/v0.2.0
 - **APK:** `grounding-coder.apk` (arm64) uploaded to release
 
-### Architecture Changes
+### Architecture Changes v0.2
 
 The Grounding Coder 0.2 implements a significant architectural upgrade:
 
@@ -128,6 +151,7 @@ The Grounding Coder 0.2 implements a significant architectural upgrade:
 - ResearchOracle limited to external sources (docs.rs, Android SDK docs)
 - No project context or capabilities awareness
 - Single verification oracle (cargo check/test/clippy)
+- **write()/apply() could replace entire target files — bypassing determinism guarantees**
 
 **After (v0.2.0):**
 - Rich intent schema with platform, architecture, runtime, capabilities, domains, constraints, dependencies, and unknown_requirements
@@ -136,3 +160,24 @@ The Grounding Coder 0.2 implements a significant architectural upgrade:
 - Multiple platform-aware verification oracles
 - Relevance-based knowledge retrieval
 - Self-pruning knowledge base
+- **Critical fix**: Transactional execution with snapshot/apply/verify/rollback loop
+- **Write enforcement**: agent may only modify bytes identified by structured edit backed by evidence
+- **BlockReason** for honest refusal when no safe fix exists
+- **TaskState** machine for explicit state tracking
+
+### Fixes in v0.2
+
+1. **White screen crash**: Fixed by implementing all abstract methods in MainActivity.kt
+2. **Architectural**: Replaced unsafe whole-file writes with EditPlan + exact byte-range edits
+3. **Transactional**: Every task follows snapshot → apply → verify → commit/rollback
+4. **Honesty principle**: Agent reports "I don't know" via BlockReason instead of guessing
+5. **EditIntent enum**: Explicit operations instead of serde_json::Value escape hatch
+6. **StructuredIntent**: unknown_requirements field for LLM to indicate uncertainty
+
+### v0.2 Migration Notes
+
+- The old `write()` and `apply()` methods are deprecated but kept for backward compatibility
+- All new code should use `plan()` + `apply_plan()` pattern
+- Tasks now follow the transactional loop: snapshot → apply → verify → commit/rollback
+- If verification fails, the system rolls back to the pre-edit state
+- BlockReason variants provide honest refusal when no safe fix exists

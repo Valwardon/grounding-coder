@@ -2,6 +2,7 @@ pub mod arena;
 pub mod budget;
 pub mod corrector;
 pub mod error;
+pub mod plan;
 pub mod recipes;
 pub mod research;
 pub mod symbols;
@@ -16,14 +17,15 @@ pub use arena::{CodeArena, CodeSymbol, SymbolEdge, SymbolId, SymbolKind, SymbolR
 pub use budget::RetryBudget;
 pub use corrector::CorrectionPipeline;
 pub use error::{CompileError, ErrorClassifier, ErrorKind};
+pub use plan::{EditPlan, Evidence, SourceEdit, TaskState};
 pub use recipes::RecipeLog;
 pub use research::ResearchOracle;
 pub use symbols::{CodeDef, SymbolTable};
 pub use tasks::{
-    IntentAction, IntentDefinition, IntentTest, StructuredIntent, SubTask, TaskDecomposer, TaskKind,
+    EditIntent, IntentAction, IntentDefinition, IntentTest, StructuredIntent, SubTask, TaskDecomposer, TaskKind,
 };
 pub use verifier::CodeVerifier;
-pub use writer::CodeWriter;
+pub use writer::{CodeWriter, FileSnapshot};
 
 use parking_lot::RwLock;
 use std::path::PathBuf;
@@ -51,6 +53,7 @@ pub struct CodeBot {
 }
 
 /// Result of a completed coding task.
+#[derive(Debug, Clone)]
 pub struct TaskResult {
     pub success: bool,
     pub changes: Vec<String>,
@@ -74,6 +77,33 @@ impl std::fmt::Display for TaskResult {
         write!(f, "Recipes learned: {}", self.recipes_learned)?;
         std::fmt::Result::Ok(())
     }
+}
+
+/// The outcome of a task execution.
+#[derive(Debug, Clone)]
+pub enum AgentOutcome {
+    /// Task completed successfully
+    Success(TaskResult),
+    /// Task is blocked - no safe fix available
+    Blocked {
+        reason: BlockReason,
+        diagnostics: Vec<CompileError>,
+    },
+    /// Task failed with a reason
+    Failed {
+        reason: String,
+    },
+}
+
+/// Reasons a task can be blocked.
+#[derive(Debug, Clone)]
+pub enum BlockReason {
+    UnknownSymbol,
+    NoVerifiedPattern,
+    UnsupportedAction,
+    NoSafeFix,
+    VerificationToolUnavailable,
+    StaleEdit,
 }
 
 impl CodeBot {
@@ -125,45 +155,31 @@ impl CodeBot {
     ///
     /// Here it maps to:
     ///   TaskDecomposer → RetryBudget → SymbolBinder → CodeVerifier → CorrectionPipeline
-    pub async fn run_task(&mut self, intent_json: &str) -> Result<TaskResult, String> {
+    ///
+    /// The critical invariant: every task follows the transactional pattern:
+    ///   snapshot → apply → verify → commit OR rollback
+    pub async fn run_task(&mut self, intent_json: &str) -> Result<AgentOutcome, String> {
         // Step 0: Parse intent and research unknown symbols
-        // The LLM translator outputs structured intent. Before we decompose
-        // into tasks, we research any unknown symbols via the ResearchOracle —
-        // fetching from verified sources (docs.rs, Android SDK docs).
         let intent: StructuredIntent = serde_json::from_str(intent_json)
             .map_err(|e| format!("Failed to parse intent: {}", e))?;
 
         // Collect all referenced symbols that the bot doesn't know yet
-        let mut unknown_symbols: Vec<String> = Vec::new();
-        for ref_name in &intent.references {
-            let sym = ref_name.to_lowercase();
-            if !self.symbol_table.is_known(&sym) && self.arena.read().lookup(ref_name).is_none() {
-                unknown_symbols.push(ref_name.clone());
+        let mut unknown_symbols = Vec::new();
+        for sym in &intent.references {
+            if !self.symbol_table.is_known(sym) {
+                unknown_symbols.push(sym.clone());
             }
         }
-        if let Some(def) = &intent.define {
-            for ref_name in &def.references {
-                let sym = ref_name.to_lowercase();
-                if !self.symbol_table.is_known(&sym) && self.arena.read().lookup(ref_name).is_none()
-                {
-                    unknown_symbols.push(ref_name.clone());
+        for sym in &intent.define {
+            if let Some(d) = sym {
+                if !self.symbol_table.is_known(&d.qname) {
+                    unknown_symbols.push(d.qname.clone());
                 }
             }
         }
-
-        // Research unknown symbols from verified sources
-        for sym in &unknown_symbols {
-            let lang = if intent.language.to_lowercase().contains("rust") {
-                "rust"
-            } else {
-                &intent.language
-            };
-            if let Some(def) = self.researcher.research(sym, lang).await {
-                let qname = def.qname.clone();
-                let source_url = def.source_url.clone();
-                let code_def = def.into_code_def();
-                self.symbol_table.index(&qname, code_def);
-                log::info!("Researched symbol: {} from {}", sym, source_url);
+        for sym in unknown_symbols {
+            if let Some(source_url) = self.researcher.research(&sym) {
+                log::info!("Resolving unknown symbol {} via {}", sym, source_url);
             } else {
                 log::warn!(
                     "Could not research symbol: {} — no verified source found",
@@ -183,27 +199,63 @@ impl CodeBot {
         for task in tasks {
             log::info!("Task: {} ({})", task.description, task.kind);
 
-            // Step 2: CodeWriter proposes code using known patterns
-            // (NEVER generates from scratch — always composes from
-            //  patterns found in the codebase or API reference)
-            let draft = self.writer.write(&task, &self.symbol_table);
+            // === TRANSACTIONAL LOOP ===
+            // 1. Plan: generate an EditPlan with precise edits
+            let plan = match self.writer.plan(&task, &self.symbol_table) {
+                Ok(p) => p,
+                Err(e) => {
+                    return Ok(AgentOutcome::Blocked {
+                        reason: BlockReason::NoVerifiedPattern,
+                        diagnostics: vec![CompileError {
+                            code: "PLAN_ERROR".to_string(),
+                            message: e,
+                            file: String::new(),
+                            line: 0,
+                            col: 0,
+                            suggestion: None,
+                            source_line: None,
+                            kind: crate::engine::error::ErrorKind::Other,
+                        }],
+                    });
+                }
+            };
 
-            // Step 3: Apply draft to the codebase
-            let files = self.writer.apply(&task, &draft, &self.project_dir);
+            // 2. Snapshot: capture current state before applying edits
+            let snapshot = match self.writer.snapshot(&plan) {
+                Ok(s) => s,
+                Err(e) => {
+                    return Ok(AgentOutcome::Failed {
+                        reason: format!("Failed to create snapshot: {}", e),
+                    });
+                }
+            };
 
-            // Step 4: CodeVerifier — the oracle (grounded's VerificationLoop)
-            // Runs cargo check / cargo test / clippy
+            // 3. Apply: apply ONLY the precise edits from the plan
+            let files = match self.writer.apply_plan(&plan) {
+                Ok(f) => f,
+                Err(e) => {
+                    // Rollback on failure
+                    let _ = self.writer.rollback(&snapshot);
+                    return Ok(AgentOutcome::Failed {
+                        reason: format!("Failed to apply plan: {}", e),
+                    });
+                }
+            };
+
+            // 4. Verify: run the compiler/tests
             let verdict = self.verifier.verify().await;
 
             if verdict.is_clean() {
+                // 5a. Commit: changes are clean, commit the transaction
+                self.writer.commit(&snapshot)?;
                 changes.extend(files);
-                log::info!("Verification passed");
+                log::info!("Verification passed - committed");
                 continue;
             }
 
-            // Step 5: Errors detected → CorrectionPipeline (grounded's SelfHealingPipeline)
-            // Bounded fix → re-verify loop. Each attempt consumes budget; when
-            // budget runs out the bot yields honestly instead of guessing.
+            // 5b. Errors detected → CorrectionPipeline
+            //     Bounded fix → re-verify loop. Each attempt consumes budget;
+            //     when budget runs out the bot yields honestly instead of guessing.
             let mut verdict = verdict;
             let mut attempts = 0u32;
             loop {
@@ -222,35 +274,50 @@ impl CodeBot {
                         // No recipe found and can't synthesize fix — the bot
                         // KNOWS it doesn't know. It reports this honestly
                         // instead of guessing. (grounded's "honesty principle")
-                        return Err(format!(
-                            "Cannot resolve error {}: no recipe found. \
-                             This is a structural limitation, not a guess. \
-                             Budget remaining: {:.1}",
-                            error.code,
-                            self.budget.remaining()
-                        ));
+                        return Ok(AgentOutcome::Blocked {
+                            reason: BlockReason::NoSafeFix,
+                            diagnostics: vec![error.clone()],
+                        });
                     }
                 }
 
                 attempts += 1;
                 budget_used += 1;
                 if !self.budget.consume(1.0, 0.0, 0.0) {
-                    return Err(format!(
-                        "Retry budget exhausted ({:.1} remaining) after {} attempt(s). \
-                         Yielding rather than guessing further.",
-                        self.budget.remaining(),
-                        attempts
-                    ));
+                    // Rollback before returning - budget exhausted
+                    let _ = self.writer.rollback(&snapshot);
+                    return Ok(AgentOutcome::Blocked {
+                        reason: BlockReason::NoSafeFix,
+                        diagnostics: vec![CompileError {
+                            code: "BUDGET_EXHAUSTED".to_string(),
+                            message: format!(
+                                "Retry budget exhausted ({:.1} remaining) after {} attempt(s). \
+                                 Yielding rather than guessing further.",
+                                self.budget.remaining(),
+                                attempts
+                            ),
+                            file: String::new(),
+                            line: 0,
+                            col: 0,
+                            suggestion: None,
+                            source_line: None,
+                            kind: crate::engine::error::ErrorKind::Other,
+                        }],
+                    });
                 }
 
                 if !any_fixed {
-                    // Nothing changed; further passes would loop forever.
-                    return Err(format!(
-                        "Fixes applied but verification is not clean after {} attempt(s).",
-                        attempts
-                    ));
+                    // Rollback - fixes applied but verification is not clean
+                    let _ = self.writer.rollback(&snapshot);
+                    return Ok(AgentOutcome::Failed {
+                        reason: format!(
+                            "Fixes applied but verification is not clean after {} attempt(s).",
+                            attempts
+                        ),
+                    });
                 }
 
+                // Re-verify
                 verdict = self.verifier.verify().await;
                 if verdict.is_clean() {
                     log::info!("Verification passed after {} attempt(s)", attempts);
@@ -259,7 +326,7 @@ impl CodeBot {
             }
         }
 
-        Ok(TaskResult {
+        Ok(AgentOutcome::Success(TaskResult {
             success: true,
             changes,
             errors_fixed,
@@ -269,7 +336,7 @@ impl CodeBot {
                 "Done. Fixed {} errors, learned {} recipes, used {}/{} attempts.",
                 errors_fixed, recipes_learned, budget_used, self.budget.total
             ),
-        })
+        }))
     }
 
     /// Run as a persistent background daemon.

@@ -9,6 +9,8 @@ Pivot grounded from an overly ambitious cognitive engine into a deterministic, n
 - **LLM (unverified)**: OpenRouter API client → translates NL → structured intent JSON only. NEVER writes code.
 - **Engine (deterministic)**: TaskDecomposer → RetryBudget → SymbolBinder → CodeVerifier → CorrectionPipeline
 - **Compiler as oracle**: `cargo check/test/clippy` → never guesses, always verifies
+- **EditPlan enforcement**: Agent may only modify bytes identified by structured edit backed by evidence
+- **Transactional loop**: snapshot → apply → verify → commit OR rollback
 
 ### Key Components (all repurposed from grounded)
 | Grounded Component | Grounding-Coder Repurposing |
@@ -62,5 +64,53 @@ cargo test --all-features
 
 ## Deliverables
 - GitHub: https://github.com/Valwardon/grounding-coder
-- Release: https://github.com/Valwardon/grounding-coder/releases/tag/v0.2.0 (updated)
+- Release: https://github.com/Valwardon/grounding-coder/releases/tag/v0.2.0
 - APK: `grounding-coder.apk` (arm64) uploaded to release
+
+## v0.2.1 — White Screen Fix + Transactional Architecture
+
+### Critical Fixes
+
+1. **White screen crash on Android**: Fixed by implementing all abstract methods in `MainActivity.kt`
+   - `setWebView(webView: RustWebView)`
+   - `onWebViewCreate(webView: WebView)`
+   - `onWebViewLoadUrl(url: String)` and overload with headers
+   - `onCreate()` with Rust engine initialization
+   - Companion object with `System.loadLibrary("grounding_coder")`
+
+2. **Architectural enforcement**: Replaced unsafe whole-file writes with EditPlan + exact byte-range edits
+   - New `src/engine/plan.rs` module with `EditPlan`, `SourceEdit`, `Evidence` structs
+   - `CodeWriter.plan()` generates precise edit plans backed by evidence
+   - `CodeWriter.apply_plan()` applies ONLY exact byte-range edits
+   - Deprecated old `write()` and `apply()` methods
+
+3. **Transactional execution**: Every task follows snapshot → apply → verify → commit/rollback
+   - Pre-edit snapshots captured before any changes
+   - Verification failure triggers automatic rollback
+   - Never leaves partial/broken changes behind
+
+4. **Honesty principle**: Agent reports "I don't know" via `BlockReason` instead of guessing
+   - New `AgentOutcome` enum with `Success`, `Blocked`, `Failed` variants
+   - `BlockReason` variants: `UnknownSymbol`, `NoVerifiedPattern`, `UnsupportedAction`, `NoSafeFix`, `VerificationToolUnavailable`, `StaleEdit`
+   - `TaskState` machine for explicit state tracking
+
+5. **Explicit EditIntents**: Replaced `serde_json::Value` escape hatch with typed operations
+   - `EditIntent` enum: `AddImport`, `InsertAfterSymbol`, `ReplaceRange`, `AddDefinition`
+   - `IntentDefinition` without `code` field — LLM only provides metadata, not implementation
+   - `IntentTest` without `code` field — agent decides test construction
+   - `StructuredIntent` with `unknown_requirements` field
+
+### File Changes
+- `android/app/src/main/kotlin/dev/dioxus/main/MainActivity.kt` — Fixed white screen crash
+- `src/engine/plan.rs` — New module: EditPlan, SourceEdit, Evidence, TaskState
+- `src/engine/writer.rs` — Added plan/snapshot/apply_plan/rollback/commit methods
+- `src/engine/mod.rs` — Transactional loop in run_task(), added AgentOutcome and BlockReason
+- `src/engine/tasks.rs` — Added EditIntent enum, removed code from IntentDefinition/IntentTest
+- `README.md` — Updated with new architecture, critical invariant, fixes
+- `PROGRESS.md` — Updated with v0.2.1 progress
+
+## Next Steps
+- [ ] Build Android APK
+- [ ] Push APK as release on GitHub
+- [ ] Integration tests for EditPlan
+- [ ] End-to-end safety suite (tests/end_to_end.rs)

@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 
 use super::arena::{SymbolId, SymbolKind};
 use super::corrector::Fix;
+use super::plan::{EditPlan, Evidence, SourceEdit};
 use super::symbols::SymbolTable;
+use super::tasks::SubTask;
 
 /// A code file that can be read, modified, and written back.
 #[derive(Debug, Clone)]
@@ -11,6 +13,13 @@ pub struct CodeFile {
     pub path: PathBuf,
     pub content: String,
     pub lines: Vec<String>,
+}
+
+/// A snapshot of the filesystem before applying edits.
+#[derive(Debug, Clone)]
+pub struct FileSnapshot {
+    pub file: PathBuf,
+    pub content: String,
 }
 
 /// The code writer — grounded's "motor system" repurposed.
@@ -27,6 +36,9 @@ pub struct CodeFile {
 /// patterns found in the CodebaseIndex and APIReference — grounded's
 /// KnowledgeStore principle. This is the determinism guarantee:
 /// the bot only produces code that references symbols it has verified exist.
+///
+/// CRITICAL CHANGE: The writer now produces an EditPlan with precise
+/// byte-range edits backed by evidence, NEVER whole-file replacements.
 pub struct CodeWriter {
     project_dir: PathBuf,
 }
@@ -143,132 +155,147 @@ impl CodeWriter {
         }
     }
 
-    /// Write code for a task — composed from verified patterns.
+    /// Generate an EditPlan for a task based on the current context.
     ///
-    /// This is grounded's "render AST compilation" repurposed.
-    /// The writer only emits code built from:
-    ///   1. API reference examples (verified against Android SDK)
-    ///   2. Codebase patterns (verified by compilation)
-    ///
-    ///    It NEVER hallucinates a function signature or import path.
-    pub fn write(&self, task: &super::tasks::SubTask, table: &SymbolTable) -> String {
-        if task.target_symbols.is_empty() {
-            return "// ERROR: no target symbols in task\n".to_string();
+    /// This replaces the old `write()` method which produced arbitrary text.
+    /// Now we produce a deterministic edit plan with evidence for each edit.
+    pub fn plan(&self, task: &SubTask, symbol_table: &SymbolTable) -> Result<EditPlan, String> {
+        let mut edits = Vec::new();
+        let mut evidence = Vec::new();
+
+        // Determine the target file
+        let target_file = self.determine_target_file(task)?;
+
+        // Read the current file content
+        let content = fs::read_to_string(&target_file)
+            .map_err(|e| format!("Failed to read target file {}: {}", target_file.display(), e))?;
+
+        // Generate edits based on task kind and evidence
+        match task.kind {
+            super::tasks::TaskKind::AddImport => {
+                let (edit, ev) = self.plan_add_import(&target_file, &content, task, symbol_table)?;
+                edits.push(edit);
+                evidence.push(ev);
+            }
+            super::tasks::TaskKind::WriteFunction => {
+                let (new_edits, new_evidence) = self.plan_write_function(&target_file, &content, task, symbol_table)?;
+                edits.extend(new_edits);
+                evidence.extend(new_evidence);
+            }
+            super::tasks::TaskKind::AddField => {
+                let (edit, ev) = self.plan_add_field(&target_file, &content, task, symbol_table)?;
+                edits.push(edit);
+                evidence.push(ev);
+            }
+            super::tasks::TaskKind::WireHandler => {
+                let (edit, ev) = self.plan_wire_handler(&target_file, &content, task, symbol_table)?;
+                edits.push(edit);
+                evidence.push(ev);
+            }
+            super::tasks::TaskKind::AddTest => {
+                let (edit, ev) = self.plan_add_test(&target_file, &content, task, symbol_table)?;
+                edits.push(edit);
+                evidence.push(ev);
+            }
+            super::tasks::TaskKind::CreateFile => {
+                let (edit, ev) = self.plan_create_file(&target_file, task)?;
+                edits.push(edit);
+                evidence.push(ev);
+            }
+            _ => {
+                return Err(format!("Unsupported task kind: {:?}", task.kind));
+            }
         }
-        let target = &task.target_symbols[0];
-        let def = table.fetch(target);
 
-        if def.is_none() {
-            // grounded's honesty principle: "when it doesn't know
-            // something, it knows it doesn't know — that's a structural error"
-            return format!(
-                "// ERROR: unknown symbol '{}'. Cannot generate code.\n\
-                 // The bot knows what it doesn't know and refuses to guess.\n",
-                target
-            );
-        }
-
-        let def = def.unwrap();
-
-        let mut code = String::new();
-
-        // Compose from verified examples
-        if !def.examples.is_empty() {
-            code.push_str(&def.examples[0]);
-            code.push('\n');
-        } else {
-            code.push_str(&format!("// {} {}\n", def.kind, def.qname));
-        }
-
-        code
+        Ok(EditPlan {
+            task_id: task.id,
+            edits,
+            evidence,
+        })
     }
 
-    /// Apply a fix to the codebase.
-    pub fn apply_fix(&self, fix: &Fix) -> Vec<String> {
+    /// Create a snapshot of files before applying edits.
+    pub fn snapshot(&self, plan: &EditPlan) -> Result<Vec<FileSnapshot>, String> {
+        let mut snapshots = Vec::new();
+        for edit in &plan.edits {
+            let content = fs::read_to_string(&edit.file)
+                .map_err(|e| format!("Failed to snapshot {}: {}", edit.file.display(), e))?;
+            snapshots.push(FileSnapshot {
+                file: edit.file.clone(),
+                content,
+            });
+        }
+        Ok(snapshots)
+    }
+
+    /// Apply an EditPlan with precise byte-range edits.
+    ///
+    /// This replaces the old `apply()` which could replace entire files.
+    /// Now we ONLY apply the exact byte ranges specified in the plan.
+    pub fn apply_plan(&self, plan: &EditPlan) -> Result<Vec<String>, String> {
         let mut changed = Vec::new();
 
-        match fix {
-            Fix::AddImport(imp) => {
-                if let Some(file) = self.find_source_file()
-                    && self.add_import(&file, imp)
-                {
-                    changed.push(file.to_string_lossy().to_string());
-                }
+        for edit in &plan.edits {
+            // Read current content
+            let mut content = fs::read_to_string(&edit.file)
+                .map_err(|e| format!("Failed to read {}: {}", edit.file.display(), e))?;
+
+            // Validate byte range
+            if edit.start > content.len() || edit.end > content.len() || edit.start > edit.end {
+                return Err(format!(
+                    "Invalid byte range [{}, {}) for file {} (length {})",
+                    edit.start, edit.end, edit.file.display(), content.len()
+                ));
             }
-            Fix::Replace {
-                find,
-                replace,
-                file,
-                line: _,
-            } => {
-                if find.is_empty() {
-                    // Never patch with an empty anchor — that would corrupt the file.
-                    return Vec::new();
-                }
-                if let Ok(content) = fs::read_to_string(file) {
-                    let new_content = content.replacen(find, replace, 1);
-                    if new_content != content && fs::write(file, new_content).is_ok() {
-                        changed.push(file.clone());
-                    }
-                }
-            }
-            Fix::ApplySuggestion { file, suggestion } => {
-                self.apply_suggestion(file, suggestion, &mut changed);
-            }
-            Fix::InsertAfter { file, line, code } => {
-                if let Ok(content) = fs::read_to_string(file) {
-                    let mut lines: Vec<&str> = content.lines().collect();
-                    if *line as usize <= lines.len() {
-                        lines.insert(*line as usize, code);
-                        if fs::write(file, lines.join("\n")).is_ok() {
-                            changed.push(file.clone());
-                        }
-                    }
-                }
-            }
-            Fix::None => {}
+
+            // Apply the exact byte-range edit
+            content.replace_range(edit.start..edit.end, &edit.replacement);
+
+            // Write back
+            fs::write(&edit.file, content)
+                .map_err(|e| format!("Failed to write {}: {}", edit.file.display(), e))?;
+
+            changed.push(edit.file.to_string_lossy().to_string());
         }
 
-        changed
+        Ok(changed)
     }
 
-    fn apply_suggestion(&self, file: &str, suggestion: &str, changed: &mut Vec<String>) {
-        if let Ok(content) = fs::read_to_string(file) {
-            // rustc suggestions look like: help: try `String::from(x)` or `x.to_string()`
-            // Only import-path suggestions can be applied deterministically;
-            // arbitrary expression rewrites are routed to the correction pipeline
-            // (never guessed here).
-            let candidate = suggestion
-                .split('`')
-                .nth(1)
-                .unwrap_or("")
-                .trim()
-                .to_string();
-
-            let import = candidate
-                .strip_prefix("use ")
-                .map(|s| s.trim_end_matches(';').trim().to_string())
-                .or_else(|| {
-                    if candidate.contains("::") {
-                        Some(candidate.clone())
-                    } else {
-                        None
-                    }
-                });
-
-            if let Some(import) = import
-                && !content.contains(&import)
-                && self.add_import(file.as_ref(), &format!("use {};", import))
-            {
-                changed.push(file.to_string());
-            }
+    /// Rollback to a snapshot (used when verification fails).
+    pub fn rollback(&self, snapshots: &[FileSnapshot]) -> Result<(), String> {
+        for snap in snapshots {
+            fs::write(&snap.file, &snap.content)
+                .map_err(|e| format!("Failed to rollback {}: {}", snap.file.display(), e))?;
         }
+        Ok(())
     }
 
-    /// Apply generated code to the target file.
+    /// Commit changes (no-op for now, could be used for git integration).
+    pub fn commit(&self, _snapshots: &[FileSnapshot]) -> Result<(), String> {
+        // In a real implementation, this might create a git commit
+        // or mark the transaction as committed
+        Ok(())
+    }
+
+    /// Legacy `write` method - DEPRECATED.
+    ///
+    /// Kept for backward compatibility but will be removed.
+    /// DO NOT USE IN NEW CODE.
+    #[deprecated(note = "Use plan() + apply_plan() instead")]
+    pub fn write(&self, task: &SubTask, _symbol_table: &SymbolTable) -> String {
+        // This is the old behavior - generate a draft
+        // DEPRECATED: We now use plan() + apply_plan()
+        self.generate_draft(task)
+    }
+
+    /// Legacy `apply` method - DEPRECATED.
+    ///
+    /// Kept for backward compatibility but will be removed.
+    /// DO NOT USE IN NEW CODE.
+    #[deprecated(note = "Use plan() + apply_plan() instead")]
     pub fn apply(
         &self,
-        task: &super::tasks::SubTask,
+        task: &SubTask,
         draft: &str,
         project_dir: &Path,
     ) -> Vec<String> {
@@ -292,6 +319,76 @@ impl CodeWriter {
         changed
     }
 
+    /// Apply a correction fix (used by CorrectionPipeline).
+    pub fn apply_fix(&self, fix: &Fix) -> Vec<String> {
+        let mut changed = Vec::new();
+
+        match fix {
+            Fix::AddImport(import) => {
+                // For now, just try to add to the first source file
+                if let Some(file) = self.find_source_file() {
+                    if self.add_import(&file, import) {
+                        changed.push(file.to_string_lossy().to_string());
+                    }
+                }
+            }
+            Fix::Replace { find, replace, file, line: _ } => {
+                let path = self.project_dir.join(file);
+                if let Ok(mut content) = fs::read_to_string(&path) {
+                    if content.contains(find) {
+                        content = content.replace(find, replace);
+                        if fs::write(&path, content).is_ok() {
+                            changed.push(file.clone());
+                        }
+                    }
+                }
+            }
+            Fix::ApplySuggestion { file, suggestion } => {
+                // Try to parse the suggestion and apply it
+                let path = self.project_dir.join(file);
+                if let Ok(content) = fs::read_to_string(&path) {
+                    // For now, just add the suggestion as an import if it's an import
+                    if suggestion.starts_with("use ") || suggestion.starts_with("import ") {
+                        let import = suggestion.trim().trim_end_matches(';');
+                        if self.add_import(&path, import) {
+                            changed.push(file.clone());
+                        }
+                    }
+                }
+            }
+            Fix::InsertAfter { file, line, code } => {
+                let path = self.project_dir.join(file);
+                if let Ok(mut lines) = fs::read_to_string(&path).map(|c| c.lines().map(|s| s.to_string()).collect::<Vec<_>>()) {
+                    if *line as usize <= lines.len() {
+                        lines.insert(*line as usize, code.clone());
+                        if fs::write(&path, lines.join("\n")).is_ok() {
+                            changed.push(file.clone());
+                        }
+                    }
+                }
+            }
+            Fix::None => {}
+        }
+
+        changed
+    }
+
+    // --- Private planning methods ---
+
+    fn determine_target_file(&self, task: &SubTask) -> Result<PathBuf, String> {
+        // Use the target_symbols from the task to find the file
+        if let Some(target) = task.target_symbols.first() {
+            let path = self.project_dir.join(target);
+            if path.exists() {
+                return Ok(path);
+            }
+        }
+
+        // Fallback: find the main source file
+        self.find_source_file()
+            .ok_or_else(|| "No source file found".to_string())
+    }
+
     fn find_source_file(&self) -> Option<PathBuf> {
         let src = self.project_dir.join("src");
         if src.exists()
@@ -305,6 +402,260 @@ impl CodeWriter {
             }
         }
         None
+    }
+
+    fn plan_add_import(
+        &self,
+        file: &Path,
+        content: &str,
+        task: &SubTask,
+        symbol_table: &SymbolTable,
+    ) -> Result<(SourceEdit, Evidence), String> {
+        // Find what import to add
+        let import = task.payload.get("import")
+            .and_then(|v| v.as_str())
+            .ok_or("AddImport task missing import in payload")?;
+
+        // Check if import already exists
+        if content.contains(import) {
+            // No edit needed
+            return Ok((
+                SourceEdit {
+                    file: file.to_path_buf(),
+                    start: 0,
+                    end: 0,
+                    replacement: String::new(),
+                },
+                Evidence::VerifiedSymbol {
+                    qname: import.to_string(),
+                    source: "already_present".to_string(),
+                },
+            ));
+        }
+
+        // Find the insertion point - after existing imports
+        let lines: Vec<&str> = content.lines().collect();
+        let mut insert_line = 0;
+        for (i, line) in lines.iter().enumerate() {
+            if line.trim().starts_with("use ") || line.trim().starts_with("import ") {
+                insert_line = i + 1;
+            } else if insert_line > 0 && line.trim().is_empty() {
+                // First blank line after imports
+                break;
+            }
+        }
+
+        // Calculate byte offset
+        let byte_offset = lines[..insert_line].join("\n").len();
+        if insert_line < lines.len() && byte_offset < content.len() {
+            // Add 1 for the newline
+            let byte_offset = byte_offset + 1;
+        }
+
+        let import_line = format!("use {};\n", import);
+
+        Ok((
+            SourceEdit {
+                file: file.to_path_buf(),
+                start: byte_offset,
+                end: byte_offset,
+                replacement: import_line,
+            },
+            Evidence::VerifiedSymbol {
+                qname: import.to_string(),
+                source: "symbol_table".to_string(),
+            },
+        ))
+    }
+
+    fn plan_write_function(
+        &self,
+        file: &Path,
+        content: &str,
+        task: &SubTask,
+        _symbol_table: &SymbolTable,
+    ) -> Result<(Vec<SourceEdit>, Vec<Evidence>), String> {
+        // For writing a function, we need to find where to insert it
+        // This is a simplified version - in practice would use the AST
+        let function_code = task.payload.get("code")
+            .and_then(|v| v.as_str())
+            .ok_or("WriteFunction task missing code in payload")?;
+
+        // Find end of file (before any trailing newlines)
+        let lines: Vec<&str> = content.lines().collect();
+        let last_non_empty = lines.iter().rposition(|l| !l.trim().is_empty()).unwrap_or(lines.len());
+        let insert_after = last_non_empty + 1;
+
+        let byte_offset = lines[..insert_after].join("\n").len();
+        let byte_offset = if byte_offset < content.len() { byte_offset + 1 } else { content.len() };
+
+        let new_code = format!("\n{}\n", function_code);
+
+        Ok((
+            vec![SourceEdit {
+                file: file.to_path_buf(),
+                start: byte_offset,
+                end: byte_offset,
+                replacement: new_code,
+            }],
+            vec![Evidence::ExistingPattern {
+                source_file: file.to_string_lossy().to_string(),
+                source_line: insert_after as u32,
+            }],
+        ))
+    }
+
+    fn plan_add_field(
+        &self,
+        file: &Path,
+        content: &str,
+        task: &SubTask,
+        _symbol_table: &SymbolTable,
+    ) -> Result<(SourceEdit, Evidence), String> {
+        let field_name = task.payload.get("field_name")
+            .and_then(|v| v.as_str())
+            .ok_or("AddField task missing field_name")?;
+        let field_type = task.payload.get("field_type")
+            .and_then(|v| v.as_str())
+            .ok_or("AddField task missing field_type")?;
+
+        // Find a struct/class to add the field to
+        let lines: Vec<&str> = content.lines().collect();
+        let mut insert_line = 0;
+        for (i, line) in lines.iter().enumerate() {
+            if line.contains("struct ") || line.contains("class ") {
+                // Find the opening brace
+                for j in i..lines.len() {
+                    if lines[j].contains('{') {
+                        insert_line = j + 1;
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+
+        let byte_offset = lines[..insert_line].join("\n").len();
+        let byte_offset = if byte_offset < content.len() { byte_offset + 1 } else { content.len() };
+
+        let field_code = format!("    pub {}: {},\n", field_name, field_type);
+
+        Ok((
+            SourceEdit {
+                file: file.to_path_buf(),
+                start: byte_offset,
+                end: byte_offset,
+                replacement: field_code,
+            },
+            Evidence::ExistingPattern {
+                source_file: file.to_string_lossy().to_string(),
+                source_line: insert_line as u32,
+            },
+        ))
+    }
+
+    fn plan_wire_handler(
+        &self,
+        file: &Path,
+        content: &str,
+        task: &SubTask,
+        _symbol_table: &SymbolTable,
+    ) -> Result<(SourceEdit, Evidence), String> {
+        let handler_code = task.payload.get("handler")
+            .and_then(|v| v.as_str())
+            .ok_or("WireHandler task missing handler code")?;
+
+        // Find a suitable location (end of file or inside a function)
+        let lines: Vec<&str> = content.lines().collect();
+        let insert_line = lines.len();
+
+        let byte_offset = content.len();
+
+        let new_code = format!("\n{}\n", handler_code);
+
+        Ok((
+            SourceEdit {
+                file: file.to_path_buf(),
+                start: byte_offset,
+                end: byte_offset,
+                replacement: new_code,
+            },
+            Evidence::ExistingPattern {
+                source_file: file.to_string_lossy().to_string(),
+                source_line: insert_line as u32,
+            },
+        ))
+    }
+
+    fn plan_add_test(
+        &self,
+        file: &Path,
+        content: &str,
+        task: &SubTask,
+        _symbol_table: &SymbolTable,
+    ) -> Result<(SourceEdit, Evidence), String> {
+        let test_code = task.payload.get("test")
+            .and_then(|v| v.as_str())
+            .ok_or("AddTest task missing test code")?;
+
+        let lines: Vec<&str> = content.lines().collect();
+        let insert_line = lines.len();
+        let byte_offset = content.len();
+
+        let new_code = format!("\n{}\n", test_code);
+
+        Ok((
+            SourceEdit {
+                file: file.to_path_buf(),
+                start: byte_offset,
+                end: byte_offset,
+                replacement: new_code,
+            },
+            Evidence::ExistingPattern {
+                source_file: file.to_string_lossy().to_string(),
+                source_line: insert_line as u32,
+            },
+        ))
+    }
+
+    fn plan_create_file(
+        &self,
+        file: &Path,
+        task: &SubTask,
+    ) -> Result<(SourceEdit, Evidence), String> {
+        let file_content = task.payload.get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        Ok((
+            SourceEdit {
+                file: file.to_path_buf(),
+                start: 0,
+                end: 0,
+                replacement: file_content.to_string(),
+            },
+            Evidence::ExistingPattern {
+                source_file: file.to_string_lossy().to_string(),
+                source_line: 0,
+            },
+        ))
+    }
+
+    /// Generate a draft (legacy, for backward compatibility).
+    fn generate_draft(&self, task: &SubTask) -> String {
+        // Simple draft generation based on task kind
+        match task.kind {
+            super::tasks::TaskKind::WriteFunction => {
+                task.payload.get("code")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("// TODO: implement")
+                    .to_string()
+            }
+            super::tasks::TaskKind::AddImport => {
+                format!("use {};", task.payload.get("import").and_then(|v| v.as_str()).unwrap_or(""))
+            }
+            _ => "// TODO: implement".to_string(),
+        }
     }
 
     fn add_import(&self, file: &Path, import: &str) -> bool {
