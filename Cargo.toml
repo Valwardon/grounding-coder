@@ -1,6 +1,6 @@
 [package]
 name = "grounding-coder"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "A deterministic, non-guessing coding agent for Android. LLM is unverified NL→intent only; all code generation is driven by a deterministic engine."
 
@@ -13,6 +13,11 @@ crate-type = ["rlib", "cdylib"]
 name = "gc"
 path = "src/bin/gc.rs"
 required-features = ["cli"]
+
+[[bin]]
+name = "android_main"
+path = "src/android_main.rs"
+required-features = ["ui"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }

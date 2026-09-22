@@ -1,6 +1,5 @@
 // Fact management for CastleStore
-use std::collections::HashMap;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerifiedFact {
@@ -59,7 +58,9 @@ pub enum PatternType {
     Performance,
 }
 
-pub fn extract_facts_from_researched(researched: &[crate::engine::research::ResearchedDef]) -> Vec<VerifiedFact> {
+pub fn extract_facts_from_researched(
+    researched: &[crate::engine::research::ResearchedDef],
+) -> Vec<VerifiedFact> {
     let mut facts = Vec::new();
 
     for def in researched {
@@ -87,7 +88,8 @@ pub fn extract_facts_from_researched(researched: &[crate::engine::research::Rese
         }
 
         if def.kind == "function" || def.kind == "trait" {
-            fact.examples.push(format!("// Example usage: Not available"));
+            fact.examples
+                .push("// Example usage: Not available".to_string());
         }
 
         facts.push(fact);
@@ -96,7 +98,9 @@ pub fn extract_facts_from_researched(researched: &[crate::engine::research::Rese
     facts
 }
 
-pub fn extract_symbols_from_researched(researched: &[crate::engine::research::ResearchedDef]) -> Vec<CodeSymbolInfo> {
+pub fn extract_symbols_from_researched(
+    researched: &[crate::engine::research::ResearchedDef],
+) -> Vec<CodeSymbolInfo> {
     let mut symbols = Vec::new();
 
     for def in researched {
@@ -118,7 +122,9 @@ pub fn extract_symbols_from_researched(researched: &[crate::engine::research::Re
     symbols
 }
 
-pub fn extract_patterns_from_researched(researched: &[crate::engine::research::ResearchedDef]) -> Vec<CodePattern> {
+pub fn extract_patterns_from_researched(
+    researched: &[crate::engine::research::ResearchedDef],
+) -> Vec<CodePattern> {
     let mut patterns = Vec::new();
 
     for def in researched {
@@ -130,7 +136,7 @@ pub fn extract_patterns_from_researched(researched: &[crate::engine::research::R
         };
 
         let pattern = CodePattern {
-            name: format!("{}", def.qname),
+            name: def.qname.to_string(),
             description: def.description.clone(),
             language: def.language.clone(),
             pattern_type,

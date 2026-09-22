@@ -56,9 +56,20 @@ pub struct SymbolTable {
 /// Here we embed the most common Android/Kotlin/Rust APIs so the bot
 /// can reason about them deterministically.
 ///
+/// A single embedded foundation entry: (qname, language, kind, module,
+/// signature, example snippets).
+type FoundationApi = (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static [&'static str],
+);
+
 /// Key principle: every definition here is VERIFIED against the actual
 /// Android SDK docs. No guessing.
-const FOUNDATION_APIS: &[(&str, &str, &str, &str, &str, &[&str])] = &[
+const FOUNDATION_APIS: &[FoundationApi] = &[
     // (qname, language, kind, module, signature, examples)
     (
         "android.widget.Button",
@@ -66,7 +77,11 @@ const FOUNDATION_APIS: &[(&str, &str, &str, &str, &str, &[&str])] = &[
         "class",
         "android.widget",
         "constructor(context: Context); setText(text: String); setOnClickListener(listener: View.OnClickListener)",
-        &["val button = Button(context)", "button.setText(\"Click me\")", "button.setOnClickListener { /* handle click */ }"],
+        &[
+            "val button = Button(context)",
+            "button.setText(\"Click me\")",
+            "button.setOnClickListener { /* handle click */ }",
+        ],
     ),
     (
         "android.widget.LinearLayout",
@@ -74,7 +89,11 @@ const FOUNDATION_APIS: &[(&str, &str, &str, &str, &str, &[&str])] = &[
         "class",
         "android.widget",
         "constructor(context: Context); addView(child: View); setOrientation(orientation: Int)",
-        &["val layout = LinearLayout(context)", "layout.orientation = LinearLayout.VERTICAL", "layout.addView(button)"],
+        &[
+            "val layout = LinearLayout(context)",
+            "layout.orientation = LinearLayout.VERTICAL",
+            "layout.addView(button)",
+        ],
     ),
     (
         "android.widget.TextView",
@@ -90,7 +109,7 @@ const FOUNDATION_APIS: &[(&str, &str, &str, &str, &str, &[&str])] = &[
         "interface",
         "android.view",
         "abstract; addView(child: View)",
-        &["class MyContainer : ViewGroup"]
+        &["class MyContainer : ViewGroup"],
     ),
     (
         "android.view.View",
@@ -98,7 +117,7 @@ const FOUNDATION_APIS: &[(&str, &str, &str, &str, &str, &[&str])] = &[
         "class",
         "android.view",
         "abstract; setOnClickListener(listener: View.OnClickListener)",
-        &["val view: View = findViewById(R.id.my_view)"]
+        &["val view: View = findViewById(R.id.my_view)"],
     ),
     (
         "android.view.View.OnClickListener",
@@ -106,7 +125,7 @@ const FOUNDATION_APIS: &[(&str, &str, &str, &str, &str, &[&str])] = &[
         "interface",
         "android.view",
         "fun onClick(v: View?)",
-        &["object : View.OnClickListener { override fun onClick(v: View?) {} }"]
+        &["object : View.OnClickListener { override fun onClick(v: View?) {} }"],
     ),
     (
         "android.view.LayoutInflater",
@@ -114,7 +133,10 @@ const FOUNDATION_APIS: &[(&str, &str, &str, &str, &str, &[&str])] = &[
         "class",
         "android.view",
         "fun inflate(resource: Int, parent: ViewGroup?, attachToRoot: Boolean): View",
-        &["val inflater = LayoutInflater.from(context)", "val view = inflater.inflate(R.layout.item, parent, false)"]
+        &[
+            "val inflater = LayoutInflater.from(context)",
+            "val view = inflater.inflate(R.layout.item, parent, false)",
+        ],
     ),
     (
         "android.os.Vibrator",
@@ -122,7 +144,10 @@ const FOUNDATION_APIS: &[(&str, &str, &str, &str, &str, &[&str])] = &[
         "class",
         "android.os",
         "fun vibrate(vibrationEffect: VibrationEffect); fun vibrate(milliseconds: Long)",
-        &["val vib = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator", "vib.vibrate(500)"]
+        &[
+            "val vib = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator",
+            "vib.vibrate(500)",
+        ],
     ),
     (
         "android.Manifest.permission.VIBRATE",
@@ -130,7 +155,7 @@ const FOUNDATION_APIS: &[(&str, &str, &str, &str, &str, &[&str])] = &[
         "const",
         "android.Manifest.permission",
         "String = \"android.permission.VIBRATE\"",
-        &["<uses-permission android:name=\"android.permission.VIBRATE\" />"]
+        &["<uses-permission android:name=\"android.permission.VIBRATE\" />"],
     ),
     (
         "android.app.Activity",
@@ -138,7 +163,9 @@ const FOUNDATION_APIS: &[(&str, &str, &str, &str, &str, &[&str])] = &[
         "class",
         "android.app",
         "fun setContentView(view: View); fun setContentView(layoutResID: Int); fun findViewById(id: Int): T",
-        &["class MainActivity : AppCompatActivity() { override fun onCreate(savedInstanceState: Bundle?) { super.onCreate(savedInstanceState); setContentView(R.layout.activity_main) } }"]
+        &[
+            "class MainActivity : AppCompatActivity() { override fun onCreate(savedInstanceState: Bundle?) { super.onCreate(savedInstanceState); setContentView(R.layout.activity_main) } }",
+        ],
     ),
     (
         "android.content.Context",
@@ -146,7 +173,7 @@ const FOUNDATION_APIS: &[(&str, &str, &str, &str, &str, &[&str])] = &[
         "class",
         "android.content",
         "fun getSystemService(name: String): Any?",
-        &["val vibrator = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator"]
+        &["val vibrator = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator"],
     ),
     (
         "androidx.appcompat.app.AppCompatActivity",
@@ -154,15 +181,9 @@ const FOUNDATION_APIS: &[(&str, &str, &str, &str, &str, &[&str])] = &[
         "class",
         "androidx.appcompat.app",
         "extends Activity; fun onCreate(savedInstanceState: Bundle?)",
-        &["class MainActivity : AppCompatActivity() { override fun onCreate(savedInstanceState: Bundle?) { super.onCreate(savedInstanceState) } }"]
-    ),
-    (
-        "android.view.View.OnClickListener",
-        "kotlin",
-        "interface",
-        "android.view",
-        "fun onClick(v: View?)",
-        &["button.setOnClickListener { }"]
+        &[
+            "class MainActivity : AppCompatActivity() { override fun onCreate(savedInstanceState: Bundle?) { super.onCreate(savedInstanceState) } }",
+        ],
     ),
     (
         "android.widget.Toast",
@@ -170,7 +191,7 @@ const FOUNDATION_APIS: &[(&str, &str, &str, &str, &str, &[&str])] = &[
         "class",
         "android.widget",
         "fun makeText(context: Context, text: CharSequence, duration: Int): Toast; fun show()",
-        &["Toast.makeText(context, \"Hello\", Toast.LENGTH_SHORT).show()"]
+        &["Toast.makeText(context, \"Hello\", Toast.LENGTH_SHORT).show()"],
     ),
     (
         "android.widget.EditText",
@@ -178,7 +199,10 @@ const FOUNDATION_APIS: &[(&str, &str, &str, &str, &str, &[&str])] = &[
         "class",
         "android.widget",
         "getText(): Editable; setText(text: String)",
-        &["val input = findViewById<EditText>(R.id.input)", "val text = input.text.toString()"]
+        &[
+            "val input = findViewById<EditText>(R.id.input)",
+            "val text = input.text.toString()",
+        ],
     ),
     (
         "android.widget.RecyclerView",
@@ -186,7 +210,7 @@ const FOUNDATION_APIS: &[(&str, &str, &str, &str, &str, &[&str])] = &[
         "class",
         "android.widget",
         "setAdapter(adapter: Adapter<*>?)",
-        &["recyclerView.adapter = MyAdapter(data)"]
+        &["recyclerView.adapter = MyAdapter(data)"],
     ),
     // Kotlin standard library
     (
@@ -195,7 +219,7 @@ const FOUNDATION_APIS: &[(&str, &str, &str, &str, &str, &[&str])] = &[
         "class",
         "kotlin",
         "fun length: Int; fun substring(start: Int): String; fun toByteArray(): ByteArray",
-        &["val s: String = \"hello\"", "s.length", "s.substring(0, 3)"]
+        &["val s: String = \"hello\"", "s.length", "s.substring(0, 3)"],
     ),
     (
         "kotlin.Int",
@@ -203,7 +227,7 @@ const FOUNDATION_APIS: &[(&str, &str, &str, &str, &str, &[&str])] = &[
         "primitive",
         "kotlin",
         "typealias Int = i32",
-        &["val x: Int = 42"]
+        &["val x: Int = 42"],
     ),
     (
         "kotlin.Unit",
@@ -211,7 +235,7 @@ const FOUNDATION_APIS: &[(&str, &str, &str, &str, &str, &[&str])] = &[
         "object",
         "kotlin",
         "the unit type (like void / nil)",
-        &["fun doThing(): Unit { }"]
+        &["fun doThing(): Unit { }"],
     ),
     // Rust std
     (
@@ -220,7 +244,7 @@ const FOUNDATION_APIS: &[(&str, &str, &str, &str, &str, &[&str])] = &[
         "struct",
         "std::string",
         "fn new(): String; fn from(s: &str): String; fn push_str(s: &str)",
-        &["let s = String::from(\"hello\")", "s.push_str(\" world\")"]
+        &["let s = String::from(\"hello\")", "s.push_str(\" world\")"],
     ),
     (
         "std::option::Option",
@@ -228,7 +252,7 @@ const FOUNDATION_APIS: &[(&str, &str, &str, &str, &str, &[&str])] = &[
         "enum",
         "std::option",
         "Some(T), None",
-        &["let x: Option<i32> = Some(5)"]
+        &["let x: Option<i32> = Some(5)"],
     ),
     (
         "std::result::Result",
@@ -236,7 +260,7 @@ const FOUNDATION_APIS: &[(&str, &str, &str, &str, &str, &[&str])] = &[
         "enum",
         "std::result",
         "Ok(T), Err(E)",
-        &["fn foo() -> Result<i32, String> { Ok(42) }"]
+        &["fn foo() -> Result<i32, String> { Ok(42) }"],
     ),
     (
         "std::vec::Vec",
@@ -244,7 +268,7 @@ const FOUNDATION_APIS: &[(&str, &str, &str, &str, &str, &[&str])] = &[
         "struct",
         "std::vec",
         "fn new(): Vec<T>; fn push(v: T); fn len(): usize",
-        &["let v: Vec<i32> = Vec::new()", "v.push(1)"]
+        &["let v: Vec<i32> = Vec::new()", "v.push(1)"],
     ),
     (
         "std::sync::Arc",
@@ -252,7 +276,7 @@ const FOUNDATION_APIS: &[(&str, &str, &str, &str, &str, &[&str])] = &[
         "struct",
         "std::sync",
         "fn new(data: T): Arc<T>; fn clone(&self): Arc<T>",
-        &["let data = Arc::new(42)", "let cloned = Arc::clone(&data)"]
+        &["let data = Arc::new(42)", "let cloned = Arc::clone(&data)"],
     ),
     (
         "std::fs::File",
@@ -260,7 +284,7 @@ const FOUNDATION_APIS: &[(&str, &str, &str, &str, &str, &[&str])] = &[
         "struct",
         "std::fs",
         "fn open(path: P): io::Result<File>; fn create(path: P): io::Result<File>",
-        &["let f = File::open(\"path/to/file\")?"]
+        &["let f = File::open(\"path/to/file\")?"],
     ),
     (
         "std::io::Read",
@@ -268,14 +292,20 @@ const FOUNDATION_APIS: &[(&str, &str, &str, &str, &str, &[&str])] = &[
         "trait",
         "std::io",
         "fn read(&mut self, buf: &mut [u8]): io::Result<usize>",
-        &["let mut buf = [0u8; 1024]; f.read(&mut buf)?"]
+        &["let mut buf = [0u8; 1024]; f.read(&mut buf)?"],
     ),
 ];
+
+impl Default for SymbolTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl SymbolTable {
     pub fn new() -> Self {
         let mut definitions = HashMap::new();
-        let mut cache = HashMap::new();
+        let cache = HashMap::new();
 
         // Populate from embedded foundation APIs (like grounded's KnowledgeStore)
         for def in FOUNDATION_APIS {
@@ -316,10 +346,11 @@ impl SymbolTable {
         }
 
         // Fundamental language primitives — no definition needed
-        let primitives = ["int", "bool", "float", "str", "string", "i32", "i64",
-                         "f32", "f64", "u32", "u64", "usize", "isize",
-                         "void", "unit", "null", "true", "false", "self",
-                         "context", "this", "unit"];
+        let primitives = [
+            "int", "bool", "float", "str", "string", "i32", "i64", "f32", "f64", "u32", "u64",
+            "usize", "isize", "void", "unit", "null", "true", "false", "self", "context", "this",
+            "unit",
+        ];
 
         if primitives.contains(&sym.as_str()) {
             return None; // fundamental — no further resolution needed
@@ -344,9 +375,11 @@ impl SymbolTable {
         self.cache.insert(qname.to_lowercase(), def);
     }
 
-    /// Check if a symbol is fully resolvable (has a definition).
+    /// Check if a symbol is fully resolvable (has a real definition).
+    /// Unknown symbols surface as a placeholder `kind == "unknown"`, so a
+    /// placeholder is not "known" — the bot must not guess about it.
     pub fn is_known(&self, symbol: &str) -> bool {
-        self.fetch(symbol).is_some()
+        self.fetch(symbol).is_some_and(|def| def.kind != "unknown")
     }
 
     /// Find all symbols in a module namespace.

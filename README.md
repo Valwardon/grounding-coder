@@ -86,15 +86,38 @@ cargo run --bin gc -- --help
 
 ### Android APK
 
+The APK is built from the checked-in Gradle project in `android/` (mirrors the scaffold the Dioxus CLI generates), producing `dist/grounding-coder.apk`.
+
 ```bash
-dx build --platform android --release --features ui
-# APK: target/dx/gc/release/android/app/app/build/outputs/apk/debug/app-debug.apk
+# 1. Build the Android cdylib (requires the Android Rust target + NDK toolchain)
+cargo build --release --target aarch64-linux-android --features ui --lib
+
+# 2. Assemble the APK (requires JDK 17, Android SDK at ANDROID_HOME)
+cp target/aarch64-linux-android/release/libgrounding_coder.so \
+   android/app/src/main/jniLibs/arm64-v8a/
+gradle -p android :app:assembleDebug
+cp android/app/build/outputs/apk/debug/app-debug.apk dist/grounding-coder.apk
+
+# APK: dist/grounding-coder.apk  (~7.0 MB, arm64-v8a, debug-signed)
+```
+
+Requirements: Android SDK + NDK (`ANDROID_HOME`), JDK 17, Gradle 8.x, and the `aarch64-linux-android` Rust target. `dx bundle --android` works on hosts where the Dioxus CLI runs natively.
+
+### Quality Gates
+
+All checks run green in CI and locally:
+
+```bash
+cargo check --all-features
+cargo clippy --all-targets --all-features   # zero warnings
+cargo fmt --check
+cargo test --all-features
 ```
 
 ### Deliverables
 - **GitHub:** https://github.com/Valwardon/grounding-coder
 - **Release:** https://github.com/Valwardon/grounding-coder/releases/tag/v0.2.0
-- **APK:** `app-debug.apk` (9.7MB) uploaded to release
+- **APK:** `grounding-coder.apk` (arm64) uploaded to release
 
 ### Architecture Changes
 

@@ -9,21 +9,25 @@ pub mod tasks;
 pub mod verifier;
 pub mod writer;
 
+pub use crate::oracle::{
+    CodePattern, CodeSymbolInfo, KnowledgeAdapter, KnowledgeOracle, KnowledgeResult, VerifiedFact,
+};
 pub use arena::{CodeArena, CodeSymbol, SymbolEdge, SymbolId, SymbolKind, SymbolRelation};
 pub use budget::RetryBudget;
 pub use corrector::CorrectionPipeline;
 pub use error::{CompileError, ErrorClassifier, ErrorKind};
 pub use recipes::RecipeLog;
 pub use research::ResearchOracle;
-pub use symbols::{SymbolTable, CodeDef};
-pub use tasks::{SubTask, StructuredIntent, IntentAction, IntentDefinition, IntentTest, TaskDecomposer, TaskKind};
+pub use symbols::{CodeDef, SymbolTable};
+pub use tasks::{
+    IntentAction, IntentDefinition, IntentTest, StructuredIntent, SubTask, TaskDecomposer, TaskKind,
+};
 pub use verifier::CodeVerifier;
 pub use writer::CodeWriter;
-pub use oracle::{KnowledgeOracle, KnowledgeAdapter, KnowledgeResult, CodeSymbolInfo, VerifiedFact, CodePattern};
 
+use parking_lot::RwLock;
 use std::path::PathBuf;
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 /// The deterministic coding engine — zero LLM, zero guessing.
 /// The LLM (if used) is an unverified layer that only translates
@@ -58,7 +62,11 @@ pub struct TaskResult {
 
 impl std::fmt::Display for TaskResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "Result: {}", if self.success { "SUCCESS" } else { "FAILURE" })?;
+        writeln!(
+            f,
+            "Result: {}",
+            if self.success { "SUCCESS" } else { "FAILURE" }
+        )?;
         writeln!(f, "Message: {}", self.message)?;
         writeln!(f, "Changes: {} files", self.changes.len())?;
         writeln!(f, "Errors fixed: {}", self.errors_fixed)?;
@@ -75,7 +83,7 @@ impl CodeBot {
         let symbol_table = SymbolTable::new();
         let budget = RetryBudget::new(max_retries as f64);
         let recipes = RecipeLog::new();
-        let corrector = CorrectionPipeline::new(budget.clone(), recipes.clone());
+        let corrector = CorrectionPipeline::new(recipes.clone());
         let verifier = CodeVerifier::new(project_path.clone());
         let decomposer = TaskDecomposer::new();
         let writer = CodeWriter::new(project_path.clone());
@@ -136,7 +144,8 @@ impl CodeBot {
         if let Some(def) = &intent.define {
             for ref_name in &def.references {
                 let sym = ref_name.to_lowercase();
-                if !self.symbol_table.is_known(&sym) && self.arena.read().lookup(ref_name).is_none() {
+                if !self.symbol_table.is_known(&sym) && self.arena.read().lookup(ref_name).is_none()
+                {
                     unknown_symbols.push(ref_name.clone());
                 }
             }
@@ -144,7 +153,11 @@ impl CodeBot {
 
         // Research unknown symbols from verified sources
         for sym in &unknown_symbols {
-            let lang = if intent.language.to_lowercase().contains("rust") { "rust" } else { &intent.language };
+            let lang = if intent.language.to_lowercase().contains("rust") {
+                "rust"
+            } else {
+                &intent.language
+            };
             if let Some(def) = self.researcher.research(sym, lang).await {
                 let qname = def.qname.clone();
                 let source_url = def.source_url.clone();
@@ -152,7 +165,10 @@ impl CodeBot {
                 self.symbol_table.index(&qname, code_def);
                 log::info!("Researched symbol: {} from {}", sym, source_url);
             } else {
-                log::warn!("Could not research symbol: {} — no verified source found", sym);
+                log::warn!(
+                    "Could not research symbol: {} — no verified source found",
+                    sym
+                );
             }
         }
 
@@ -186,27 +202,59 @@ impl CodeBot {
             }
 
             // Step 5: Errors detected → CorrectionPipeline (grounded's SelfHealingPipeline)
-            // 5 phases: classify → recipe lookup → apply → re-verify → record
-            for error in &verdict.errors {
-                let original_budget = self.budget.remaining();
-                let correction = self.corrector.try_correct(error, &self.arena.read(), &self.writer);
+            // Bounded fix → re-verify loop. Each attempt consumes budget; when
+            // budget runs out the bot yields honestly instead of guessing.
+            let mut verdict = verdict;
+            let mut attempts = 0u32;
+            loop {
+                let mut any_fixed = false;
+                for error in &verdict.errors {
+                    let correction =
+                        self.corrector
+                            .try_correct(error, &self.arena.read(), &self.writer);
 
-                if correction.fixed {
-                    errors_fixed += 1;
-                    budget_used += 1;
-                    self.budget.consume(1.0, 0.0, 0.0); // simple unit cost
-                    recipes_learned += correction.new_recipes;
-                    changes.extend(correction.files_changed);
-                } else {
-                    // No recipe found and can't synthesize fix — the bot
-                    // KNOWS it doesn't know. It reports this honestly
-                    // instead of guessing. (grounded's "honesty principle")
+                    if correction.fixed {
+                        errors_fixed += 1;
+                        recipes_learned += correction.new_recipes;
+                        changes.extend(correction.files_changed);
+                        any_fixed = true;
+                    } else {
+                        // No recipe found and can't synthesize fix — the bot
+                        // KNOWS it doesn't know. It reports this honestly
+                        // instead of guessing. (grounded's "honesty principle")
+                        return Err(format!(
+                            "Cannot resolve error {}: no recipe found. \
+                             This is a structural limitation, not a guess. \
+                             Budget remaining: {:.1}",
+                            error.code,
+                            self.budget.remaining()
+                        ));
+                    }
+                }
+
+                attempts += 1;
+                budget_used += 1;
+                if !self.budget.consume(1.0, 0.0, 0.0) {
                     return Err(format!(
-                        "Cannot resolve error {}: no recipe found. \
-                         This is a structural limitation, not a guess. \
-                         Budget remaining: {:.1}",
-                        error.code, original_budget
+                        "Retry budget exhausted ({:.1} remaining) after {} attempt(s). \
+                         Yielding rather than guessing further.",
+                        self.budget.remaining(),
+                        attempts
                     ));
+                }
+
+                if !any_fixed {
+                    // Nothing changed; further passes would loop forever.
+                    return Err(format!(
+                        "Fixes applied but verification is not clean after {} attempt(s).",
+                        attempts
+                    ));
+                }
+
+                verdict = self.verifier.verify().await;
+                if verdict.is_clean() {
+                    log::info!("Verification passed after {} attempt(s)", attempts);
+                    break;
                 }
             }
         }
@@ -226,7 +274,10 @@ impl CodeBot {
 
     /// Run as a persistent background daemon.
     pub async fn run_daemon(&self) {
-        log::info!("Grounding Coder daemon started in {}", self.project_dir.display());
+        log::info!(
+            "Grounding Coder daemon started in {}",
+            self.project_dir.display()
+        );
         // The daemon keeps running, waiting for structured intents.
         // The LLM (if used) feeds intents here via IPC/API.
         loop {

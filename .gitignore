@@ -1,4 +1,11 @@
 target/
 *.apk
 *.aab
+*.so
+jniLibs/
 .DS_Store
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.kotlin/

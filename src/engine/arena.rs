@@ -1,6 +1,6 @@
+use parking_lot::RwLock;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
-use parking_lot::RwLock;
 
 /// Unique identifier for a code symbol in the arena.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -15,24 +15,26 @@ impl SymbolId {
         SymbolId(COUNTER.fetch_add(1, Ordering::Relaxed))
     }
 
-    pub fn from_raw(u: u64) -> Self { SymbolId(u) }
+    pub fn from_raw(u: u64) -> Self {
+        SymbolId(u)
+    }
 }
 
 /// What kind of code symbol this node represents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SymbolKind {
-    File,       // Source file
-    Module,     // Rust module / Kotlin file / package
-    Struct,     // struct / class
-    Enum,       // enum / sealed class
-    Function,   // fn / fun
-    Import,     // use / import
-    Field,      // struct field
-    Const,      // constant
-    Trait,      // trait / interface
-    Macro,      // macro invocation
-    TypeParam,  // generic type parameter
-    Unknown,    // fallback for unparseable tokens
+    File,      // Source file
+    Module,    // Rust module / Kotlin file / package
+    Struct,    // struct / class
+    Enum,      // enum / sealed class
+    Function,  // fn / fun
+    Import,    // use / import
+    Field,     // struct field
+    Const,     // constant
+    Trait,     // trait / interface
+    Macro,     // macro invocation
+    TypeParam, // generic type parameter
+    Unknown,   // fallback for unparseable tokens
 }
 
 impl std::fmt::Display for SymbolKind {
@@ -96,9 +98,15 @@ pub enum SymbolRelation {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DataContract {
     /// Source is a definition, target is a usage (type compatibility required)
-    DefinitionUse { output_type: TypeShape, input_type: TypeShape },
+    DefinitionUse {
+        output_type: TypeShape,
+        input_type: TypeShape,
+    },
     /// Source calls target (callee must be callable from caller context)
-    Call { caller_scope: SymbolId, callee_def: SymbolId },
+    Call {
+        caller_scope: SymbolId,
+        callee_def: SymbolId,
+    },
     /// Source imports target (target must be public/exported)
     Import,
     /// No formal contract — relies on symbol resolution only
@@ -217,6 +225,7 @@ impl SymbolRelation {
 /// Cached path verification result (from grounded's CachedPath).
 /// Avoids re-verifying the same symbol dependency chains.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // metadata fields are stored for future equivalence checks
 struct CachedPath {
     source: SymbolId,
     dest: SymbolId,
@@ -234,6 +243,12 @@ pub struct CodeArena {
     path_cache: parking_lot::Mutex<[Option<CachedPath>; 16]>,
 }
 
+impl Default for CodeArena {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CodeArena {
     pub fn new() -> Self {
         let mut arena = CodeArena {
@@ -247,7 +262,8 @@ impl CodeArena {
             qname: "<null>".into(),
             kind: SymbolKind::Unknown,
             file_path: String::new(),
-            line: 0, col: 0,
+            line: 0,
+            col: 0,
             signature: String::new(),
             source: None,
             edges: Vec::new(),
@@ -258,7 +274,8 @@ impl CodeArena {
             qname: "<root>".into(),
             kind: SymbolKind::Module,
             file_path: String::new(),
-            line: 0, col: 0,
+            line: 0,
+            col: 0,
             signature: "project root".into(),
             source: None,
             edges: Vec::new(),
@@ -285,12 +302,16 @@ impl CodeArena {
 
     /// Find a symbol by qualified name.
     pub fn lookup(&self, qname: &str) -> Option<SymbolId> {
-        self.label_index.iter().find(|(l, _)| l == qname).map(|(_, id)| *id)
+        self.label_index
+            .iter()
+            .find(|(l, _)| l == qname)
+            .map(|(_, id)| *id)
     }
 
     /// Find a symbol by simple name (last component of qname).
     pub fn lookup_simple(&self, name: &str) -> Vec<SymbolId> {
-        self.label_index.iter()
+        self.label_index
+            .iter()
             .filter(|(l, _)| l == name || l.ends_with(name))
             .map(|(_, id)| *id)
             .collect()
@@ -300,14 +321,22 @@ impl CodeArena {
         self.nodes.get(id.0 as usize)
     }
 
-    pub fn len(&self) -> usize { self.nodes.len() }
+    pub fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
 
     pub fn all_symbols(&self) -> Vec<(String, CodeSymbol)> {
-        self.nodes.iter().enumerate()
+        self.nodes
+            .iter()
+            .enumerate()
             .filter(|(i, _)| *i > 0)
-            .filter_map(|(_, n)| {
+            .map(|(_, n)| {
                 let node = n.read();
-                Some((node.qname.clone(), node.clone()))
+                (node.qname.clone(), node.clone())
             })
             .collect()
     }
@@ -317,7 +346,10 @@ impl CodeArena {
         if source.0 as usize >= self.nodes.len() || target.0 as usize >= self.nodes.len() {
             return false;
         }
-        self.nodes[source.0 as usize].write().edges.push(SymbolEdge::new(relation, target));
+        self.nodes[source.0 as usize]
+            .write()
+            .edges
+            .push(SymbolEdge::new(relation, target));
         self.invalidate_cache();
         true
     }
@@ -327,7 +359,9 @@ impl CodeArena {
     /// edge contracts for energy conservation, we check symbol resolution
     /// chains (does this call chain type-check?).
     pub fn verify_path(&self, path: &[SymbolId]) -> Result<(), String> {
-        if path.len() < 2 { return Ok(()); }
+        if path.len() < 2 {
+            return Ok(());
+        }
 
         let source = path[0];
         let dest = path[path.len() - 1];
@@ -341,10 +375,8 @@ impl CodeArena {
             if node_id == SymbolId::ZERO {
                 return Err(format!("Dead node in path at position {}", i));
             }
-            if !seen.insert(node_id) {
-                if node_id != SymbolId::ROOT {
-                    return Err(format!("Cycle detected at node {}", node_id.0));
-                }
+            if !seen.insert(node_id) && node_id != SymbolId::ROOT {
+                return Err(format!("Cycle detected at node {}", node_id.0));
             }
 
             if i + 1 < path.len() {
@@ -361,7 +393,10 @@ impl CodeArena {
                     Some(e) => {
                         let contract = e.contract;
                         match contract {
-                            DataContract::DefinitionUse { output_type, input_type } => {
+                            DataContract::DefinitionUse {
+                                output_type,
+                                input_type,
+                            } => {
                                 if !Self::types_compatible(&output_type, &input_type) {
                                     return Err(format!(
                                         "Type mismatch: symbol {} produces {:?} but {} expects {:?}",
@@ -369,13 +404,14 @@ impl CodeArena {
                                     ));
                                 }
                             }
-                            DataContract::Call { caller_scope, callee_def } => {
-                                if caller_scope != node_id || callee_def != next_id {
-                                    return Err(format!(
-                                        "Call contract mismatch: {} -> {}",
-                                        node_id.0, next_id.0
-                                    ));
-                                }
+                            DataContract::Call {
+                                caller_scope,
+                                callee_def,
+                            } if (caller_scope != node_id || callee_def != next_id) => {
+                                return Err(format!(
+                                    "Call contract mismatch: {} -> {}",
+                                    node_id.0, next_id.0
+                                ));
                             }
                             _ => {}
                         }
@@ -404,12 +440,19 @@ impl CodeArena {
 
     fn cache_hit(&self, source: SymbolId, dest: SymbolId) -> bool {
         let cache = self.path_cache.lock();
-        cache.iter().any(|s| matches!(s, Some(cp) if cp.source == source && cp.dest == dest))
+        cache
+            .iter()
+            .any(|s| matches!(s, Some(cp) if cp.source == source && cp.dest == dest))
     }
 
     fn cache_store(&self, source: SymbolId, dest: SymbolId, rel_mask: u64, weight: f64) {
         let mut cache = self.path_cache.lock();
-        let entry = CachedPath { source, dest, relation_mask: rel_mask, weight };
+        let entry = CachedPath {
+            source,
+            dest,
+            relation_mask: rel_mask,
+            weight,
+        };
         for slot in cache.iter_mut() {
             if slot.is_none() {
                 *slot = Some(entry);
@@ -426,7 +469,9 @@ impl CodeArena {
 
     /// Find the shortest symbol dependency path from start to end.
     pub fn find_path(&self, start: SymbolId, end: SymbolId) -> Option<Vec<SymbolId>> {
-        if start == end { return Some(vec![start]); }
+        if start == end {
+            return Some(vec![start]);
+        }
         let mut visited = vec![false; self.nodes.len()];
         let mut queue = std::collections::VecDeque::new();
         let mut parent = vec![SymbolId::ZERO; self.nodes.len()];

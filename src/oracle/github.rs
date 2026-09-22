@@ -1,10 +1,5 @@
 // GitHub oracle for repository analysis and code examples
-use super::mod::KnowledgeAdapter;
-use super::mod::KnowledgeResult;
-use super::mod::CodeSymbolInfo;
-use super::mod::VerifiedFact;
-use super::mod::CodePattern;
-use super::mod::PatternType;
+use super::{CodeSymbolInfo, KnowledgeAdapter, KnowledgeResult, VerifiedFact};
 use reqwest::Client;
 use std::sync::Arc;
 
@@ -13,30 +8,42 @@ pub struct GitHubOracle {
     max_results: usize,
 }
 
+impl Default for GitHubOracle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GitHubOracle {
     pub fn new() -> Self {
         GitHubOracle {
-            client: Arc::new(Client::builder()
-                .user_agent("grounding-coder-github-oracle/0.1")
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .unwrap()),
+            client: Arc::new(
+                Client::builder()
+                    .user_agent("grounding-coder-github-oracle/0.1")
+                    .timeout(std::time::Duration::from_secs(30))
+                    .build()
+                    .unwrap(),
+            ),
             max_results: 10,
         }
     }
 
     /// Search GitHub repositories for a given query
     async fn search_repositories(&self, query: &str) -> Option<serde_json::Value> {
-        let url = format!("https://api.github.com/search/repositories?q={}&per_page={}", query, self.max_results);
-        match self.client.get(&url)
+        let url = format!(
+            "https://api.github.com/search/repositories?q={}&per_page={}",
+            query, self.max_results
+        );
+        match self
+            .client
+            .get(&url)
             .header("Accept", "application/vnd.github.v3+json")
-            .send().await {
+            .send()
+            .await
+        {
             Ok(response) => {
                 if response.status().is_success() {
-                    match response.json::<serde_json::Value>().await {
-                        Ok(data) => Some(data),
-                        Err(_) => None,
-                    }
+                    response.json::<serde_json::Value>().await.ok()
                 } else {
                     None
                 }
@@ -48,15 +55,16 @@ impl GitHubOracle {
     /// Get repository contents (simplified)
     async fn get_repo_contents(&self, owner: &str, repo: &str) -> Option<serde_json::Value> {
         let url = format!("https://api.github.com/repos/{}/{}?raw=true", owner, repo);
-        match self.client.get(&url)
+        match self
+            .client
+            .get(&url)
             .header("Accept", "application/vnd.github.v3+json")
-            .send().await {
+            .send()
+            .await
+        {
             Ok(response) => {
                 if response.status().is_success() {
-                    match response.json::<serde_json::Value>().await {
-                        Ok(data) => Some(data),
-                        Err(_) => None,
-                    }
+                    response.json::<serde_json::Value>().await.ok()
                 } else {
                     None
                 }
@@ -73,8 +81,8 @@ impl GitHubOracle {
 
         let mut symbols = Vec::new();
         let mut facts = Vec::new();
-        let mut patterns = Vec::new();
-        let mut source_urls = vec![format!("https://github.com/{}", name)];
+        let patterns = Vec::new();
+        let source_urls = vec![format!("https://github.com/{}", name)];
 
         // Create symbols based on repository name and description
         symbols.push(CodeSymbolInfo {
@@ -118,8 +126,8 @@ impl GitHubOracle {
 
         let mut symbols = Vec::new();
         let mut facts = Vec::new();
-        let mut patterns = Vec::new();
-        let mut source_urls = vec![format!("https://github.com/{}?raw=true", path)];
+        let patterns = Vec::new();
+        let source_urls = vec![format!("https://github.com/{}?raw=true", path)];
 
         if content_type == "file" {
             // Check file extension to determine content type
@@ -130,7 +138,7 @@ impl GitHubOracle {
                     language: "rust".to_string(),
                     kind: "file".to_string(),
                     module: "repo".to_string(),
-                    signature: format!("// Rust file in repository"),
+                    signature: "// Rust file in repository".to_string(),
                     source_urls: source_urls.clone(),
                     compiler_verified: false,
                     api_level: None,
@@ -154,7 +162,7 @@ impl GitHubOracle {
                     language: "kotlin".to_string(),
                     kind: "file".to_string(),
                     module: "repo".to_string(),
-                    signature: format!("// Kotlin/Java file in repository"),
+                    signature: "// Kotlin/Java file in repository".to_string(),
                     source_urls: source_urls.clone(),
                     compiler_verified: false,
                     api_level: None,
@@ -187,34 +195,44 @@ impl KnowledgeAdapter for GitHubOracle {
         "multi"
     }
 
-    async fn research(&self, symbol: &str) -> Option<KnowledgeResult> {
-        // Search for repositories
-        if let Some(repo_data) = self.search_repositories(symbol).await {
-            if let Some(items) = repo_data.get("items") {
+    fn research<'a>(
+        &'a self,
+        symbol: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<KnowledgeResult>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            // Search for repositories
+            if let Some(repo_data) = self.search_repositories(symbol).await
+                && let Some(items) = repo_data.get("items")
+            {
                 for repo in items.as_array()? {
                     if let Some(result) = self.parse_repository(repo) {
                         return Some(result);
                     }
                 }
             }
-        }
 
-        // If no exact match, try repository contents
-        if let Some(parts) = symbol.split('/').collect::<Vec<_>>().get(1..4) {
-            let owner = parts[0];
-            let repo = parts[1];
-            let path = parts[2..].join("/");
+            // If no exact match, try repository contents
+            let parts = symbol.split('/').collect::<Vec<_>>();
+            if let Some(parts) = parts.get(1..4) {
+                let owner = parts[0];
+                let repo = parts[1];
 
-            if let Some(file_data) = self.get_repo_contents(owner, repo).await {
-                return self.parse_repo_files(&file_data);
+                if let Some(file_data) = self.get_repo_contents(owner, repo).await {
+                    return self.parse_repo_files(&file_data);
+                }
             }
-        }
 
-        None
+            None
+        })
     }
 
     fn can_handle(&self, symbol: &str) -> bool {
         // Handle GitHub repository and file references
-        symbol.contains("/") && (symbol.contains(".rs") || symbol.contains(".java") || symbol.contains(".kt") || symbol.contains("/tree/"))
+        symbol.contains("/")
+            && (symbol.contains(".rs")
+                || symbol.contains(".java")
+                || symbol.contains(".kt")
+                || symbol.contains("/tree/"))
     }
 }

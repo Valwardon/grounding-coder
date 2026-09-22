@@ -41,7 +41,11 @@ fn main() {
     let rt = tokio::runtime::Runtime::new().expect("runtime");
     rt.block_on(async move {
         match cli.cmd {
-            Commands::Chat { prompt, project, budget } => {
+            Commands::Chat {
+                prompt,
+                project,
+                budget,
+            } => {
                 let config = llm::load_config_default();
                 if config.openrouter_key.is_none() {
                     eprintln!("OpenRouter API key not set. Use the UI to configure it.");
@@ -50,8 +54,8 @@ fn main() {
                 let llm_client = llm::LlmClient::new(config);
                 match llm_client.translate(&prompt).await {
                     Ok(intent) => {
-                        let intent_json = serde_json::to_string(&intent)
-                            .expect("intent should serialize");
+                        let intent_json =
+                            serde_json::to_string(&intent).expect("intent should serialize");
                         let mut bot = CodeBot::new(&project, budget);
                         match bot.run_task(&intent_json).await {
                             Ok(result) => println!("{}", result),

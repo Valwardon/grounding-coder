@@ -1,5 +1,5 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use serde::{Serialize, Deserialize};
 
 /// A fix recipe — grounded's episodic memory repurposed.
 ///
@@ -37,7 +37,12 @@ pub enum FixAction {
     /// Add a type annotation: `let x = ...` → `let x: Type = ...`
     AddTypeAnnotation { variable: String, ty: String },
     /// Insert code at a specific location (file, anchor line, offset)
-    InsertCode { file: String, anchor: String, offset: String, code: String },
+    InsertCode {
+        file: String,
+        anchor: String,
+        offset: String,
+        code: String,
+    },
     /// Remove an unused import
     RemoveImport { import: String },
     /// Change a type parameter
@@ -66,10 +71,21 @@ fn make_key(error_kind: &str, error_code: &str, pattern: Option<&str>) -> String
     format!("{}:{}:{}", error_kind, error_code, pattern.unwrap_or(""))
 }
 
+impl Default for RecipeLog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RecipeLog {
     pub fn new() -> Self {
         let path = dirs::data_dir()
-            .map(|p| p.join("grounding-coder").join("recipes.json").to_string_lossy().to_string())
+            .map(|p| {
+                p.join("grounding-coder")
+                    .join("recipes.json")
+                    .to_string_lossy()
+                    .to_string()
+            })
             .unwrap_or_else(|| "recipes.json".to_string());
 
         let mut log = RecipeLog {
@@ -88,10 +104,10 @@ impl RecipeLog {
         };
         log.seed_precompiled_recipes();
         // Try to load existing log
-        if let Ok(content) = std::fs::read_to_string(&log.path) {
-            if let Ok(recipes) = serde_json::from_str::<HashMap<String, FixRecipe>>(&content) {
-                log.recipes = recipes;
-            }
+        if let Ok(content) = std::fs::read_to_string(&log.path)
+            && let Ok(recipes) = serde_json::from_str::<HashMap<String, FixRecipe>>(&content)
+        {
+            log.recipes = recipes;
         }
         log
     }
@@ -100,12 +116,15 @@ impl RecipeLog {
     /// These are all VERIFIED fixes, not guesses.
     fn seed_precompiled_recipes(&mut self) {
         let seeds: Vec<FixRecipe> = vec![
-            // E0432: unresolved import — often a typo or wrong module
+            // E0432: unresolved import — defer to the compiler's suggestion
+            // (never auto-remove imports; that would be destructive guessing).
             FixRecipe {
                 error_kind: "unresolved_symbol".into(),
                 error_code: "E0432".into(),
                 context_pattern: Some("import".to_string()),
-                fix: FixAction::RemoveImport { import: "unused".to_string() }, // placeholder
+                fix: FixAction::ApplySuggestion {
+                    suggestion: "".to_string(),
+                },
                 success_count: 0,
                 attempt_count: 0,
             },
@@ -114,7 +133,9 @@ impl RecipeLog {
                 error_kind: "type_mismatch".into(),
                 error_code: "E0308".into(),
                 context_pattern: Some("expected `String`".to_string()),
-                fix: FixAction::WrapConversion { method: ".to_string()".to_string() },
+                fix: FixAction::WrapConversion {
+                    method: ".to_string()".to_string(),
+                },
                 success_count: 0,
                 attempt_count: 0,
             },
@@ -123,7 +144,9 @@ impl RecipeLog {
                 error_kind: "type_mismatch".into(),
                 error_code: "E0308".into(),
                 context_pattern: Some("expected `f64`".to_string()),
-                fix: FixAction::WrapConversion { method: " as f64".to_string() },
+                fix: FixAction::WrapConversion {
+                    method: " as f64".to_string(),
+                },
                 success_count: 0,
                 attempt_count: 0,
             },
@@ -132,7 +155,9 @@ impl RecipeLog {
                 error_kind: "unresolved_symbol".into(),
                 error_code: "E0425".into(),
                 context_pattern: None,
-                fix: FixAction::ApplySuggestion { suggestion: "".to_string() },
+                fix: FixAction::ApplySuggestion {
+                    suggestion: "".to_string(),
+                },
                 success_count: 0,
                 attempt_count: 0,
             },
@@ -141,14 +166,20 @@ impl RecipeLog {
                 error_kind: "missing_field_or_method".into(),
                 error_code: "E0599".into(),
                 context_pattern: None,
-                fix: FixAction::AddImport { import: "".to_string() }, // filled at runtime
+                fix: FixAction::AddImport {
+                    import: "".to_string(),
+                }, // filled at runtime
                 success_count: 0,
                 attempt_count: 0,
             },
         ];
 
         for recipe in seeds {
-            let key = make_key(&recipe.error_kind, &recipe.error_code, recipe.context_pattern.as_deref());
+            let key = make_key(
+                &recipe.error_kind,
+                &recipe.error_code,
+                recipe.context_pattern.as_deref(),
+            );
             self.recipes.insert(key, recipe);
         }
     }
@@ -156,8 +187,15 @@ impl RecipeLog {
     /// Look up a fix recipe for a compile error.
     /// Returns None if no recipe matches — the bot then reports
     /// "I don't know how to fix this" instead of guessing.
+    ///
+    /// Matching is deterministic and hierarchical:
+    ///   1. Exact key from the recorded (kind, code, suggestion) triple.
+    ///   2. Scan: a recipe matches when its kind matches AND (its error
+    ///      code is empty or equals the error's) AND (its context pattern
+    ///      is absent or appears verbatim in the error message).
+    ///      The most specific match (code + context) wins the scan.
     pub fn lookup(&self, error: &super::error::CompileError) -> Option<&FixRecipe> {
-        // Try exact match first (kind + code + context)
+        // Try exact match first (kind + code + suggestion pattern)
         if let Some(pattern) = &error.suggestion {
             let key = make_key(error.kind.as_str(), &error.code, Some(pattern));
             if let Some(r) = self.recipes.get(&key) {
@@ -165,19 +203,32 @@ impl RecipeLog {
             }
         }
 
-        // Try kind + code
-        let key = make_key(error.kind.as_str(), &error.code, None);
-        if let Some(r) = self.recipes.get(&key) {
-            return Some(r);
+        // Then scan: kind + code + context against the error message.
+        let mut best: Option<&FixRecipe> = None;
+        for recipe in self.recipes.values() {
+            if recipe.error_kind != error.kind.as_str() {
+                continue;
+            }
+            if !recipe.error_code.is_empty() && recipe.error_code != error.code {
+                continue;
+            }
+            if let Some(ctx) = &recipe.context_pattern
+                && !error.message.contains(ctx.as_str())
+            {
+                continue;
+            }
+            best = Some(match best {
+                Some(current) => {
+                    if recipe_specificity(recipe) >= recipe_specificity(current) {
+                        recipe
+                    } else {
+                        current
+                    }
+                }
+                None => recipe,
+            });
         }
-
-        // Try kind only
-        let key = make_key(error.kind.as_str(), "", None);
-        if let Some(r) = self.recipes.get(&key) {
-            return Some(r);
-        }
-
-        None
+        best
     }
 
     /// Record a successful (error → fix) pair.
@@ -192,7 +243,11 @@ impl RecipeLog {
             attempt_count: 1,
         };
 
-        let key = make_key(&recipe.error_kind, &recipe.error_code, recipe.context_pattern.as_deref());
+        let key = make_key(
+            &recipe.error_kind,
+            &recipe.error_code,
+            recipe.context_pattern.as_deref(),
+        );
         if let Some(existing) = self.recipes.get_mut(&key) {
             existing.success_count += 1;
             existing.attempt_count += 1;
@@ -203,12 +258,15 @@ impl RecipeLog {
     }
 
     pub fn list(&self) -> Vec<String> {
-        self.recipes.values()
+        self.recipes
+            .values()
             .filter(|r| r.success_count > 0)
-            .map(|r| format!(
-                "{} ({}) → {:?} | {} successes",
-                r.error_kind, r.error_code, r.fix, r.success_count
-            ))
+            .map(|r| {
+                format!(
+                    "{} ({}) → {:?} | {} successes",
+                    r.error_kind, r.error_code, r.fix, r.success_count
+                )
+            })
             .collect()
     }
 
@@ -225,4 +283,18 @@ impl RecipeLog {
             let _ = std::fs::write(&self.path, json);
         }
     }
+}
+
+/// Specificity score for recipe matching: more specific matches win.
+/// Code-specific (non-empty error code) beats kind-only; a context
+/// pattern beats none.
+fn recipe_specificity(recipe: &FixRecipe) -> u32 {
+    let mut score = 0;
+    if !recipe.error_code.is_empty() {
+        score += 2;
+    }
+    if recipe.context_pattern.is_some() {
+        score += 1;
+    }
+    score
 }

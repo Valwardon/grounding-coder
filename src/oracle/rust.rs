@@ -1,28 +1,28 @@
 // Rust-specific oracle for crates.io and docs.rs
-use super::mod::KnowledgeAdapter;
-use super::mod::KnowledgeResult;
-use super::mod::CodeSymbolInfo;
-use super::mod::VerifiedFact;
-use super::mod::CodePattern;
-use super::mod::PatternType;
+use super::{CodeSymbolInfo, KnowledgeAdapter, KnowledgeResult, VerifiedFact};
 use reqwest::Client;
-use serde::{Serialize, Deserialize};
 use std::sync::Arc;
 
 pub struct RustOracle {
     client: Arc<Client>,
-    max_results: usize,
+}
+
+impl Default for RustOracle {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RustOracle {
     pub fn new() -> Self {
         RustOracle {
-            client: Arc::new(Client::builder()
-                .user_agent("grounding-coder-rust-oracle/0.1")
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .unwrap()),
-            max_results: 10,
+            client: Arc::new(
+                Client::builder()
+                    .user_agent("grounding-coder-rust-oracle/0.1")
+                    .timeout(std::time::Duration::from_secs(30))
+                    .build()
+                    .unwrap(),
+            ),
         }
     }
 
@@ -32,10 +32,7 @@ impl RustOracle {
         match self.client.get(&url).send().await {
             Ok(response) => {
                 if response.status().is_success() {
-                    match response.json::<serde_json::Value>().await {
-                        Ok(data) => Some(data),
-                        Err(_) => None,
-                    }
+                    response.json::<serde_json::Value>().await.ok()
                 } else {
                     None
                 }
@@ -73,48 +70,43 @@ impl RustOracle {
     fn parse_crate_metadata(&self, metadata: &serde_json::Value) -> KnowledgeResult {
         let mut symbols = Vec::new();
         let mut facts = Vec::new();
-        let mut patterns = Vec::new();
+        let patterns = Vec::new();
         let mut source_urls = Vec::new();
 
-        if let Some(crates) = metadata.get("crates") {
-            if let Some(crate_data) = crates.get(0) {
-                let name = crate_data.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                let description = crate_data.get("description")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let versions = crate_data.get("versions")
-                    .and_then(|v| v.as_array())
-                    .and_then(|v| v.first())
-                    .and_then(|v| v.get("features"))
-                    .and_then(|v| v.as_array())
-                    .unwrap_or(&serde_json::Value::Array(vec![]));
+        if let Some(crates) = metadata.get("crates")
+            && let Some(crate_data) = crates.get(0)
+        {
+            let name = crate_data.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            let description = crate_data
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
 
-                // Create a symbol for the crate
-                symbols.push(CodeSymbolInfo {
-                    qname: name.to_string(),
-                    language: "rust".to_string(),
-                    kind: "crate".to_string(),
-                    module: name.to_string(),
-                    signature: format!("// Crate {} - {}", name, description),
-                    source_urls: vec![format!("https://crates.io/crates/{}", name)],
-                    compiler_verified: false,
-                    api_level: None,
-                    patterns: vec![],
-                });
+            // Create a symbol for the crate
+            symbols.push(CodeSymbolInfo {
+                qname: name.to_string(),
+                language: "rust".to_string(),
+                kind: "crate".to_string(),
+                module: name.to_string(),
+                signature: format!("// Crate {} - {}", name, description),
+                source_urls: vec![format!("https://crates.io/crates/{}", name)],
+                compiler_verified: false,
+                api_level: None,
+                patterns: vec![],
+            });
 
-                facts.push(VerifiedFact {
-                    content: format!("Rust crate {} - {} (v{})", name, description, "1.0.0"),
-                    confidence: 0.8,
-                    source_urls: vec![format!("https://crates.io/crates/{}", name)],
-                    compiler_verified: false,
-                    last_used: chrono::Utc::now().timestamp() as u64,
-                    utility: 0.9,
-                    usage_count: 0,
-                    dependency_count: 0,
-                });
+            facts.push(VerifiedFact {
+                content: format!("Rust crate {} - {} (v{})", name, description, "1.0.0"),
+                confidence: 0.8,
+                source_urls: vec![format!("https://crates.io/crates/{}", name)],
+                compiler_verified: false,
+                last_used: chrono::Utc::now().timestamp() as u64,
+                utility: 0.9,
+                usage_count: 0,
+                dependency_count: 0,
+            });
 
-                source_urls.push(format!("https://crates.io/crates/{}", name));
-            }
+            source_urls.push(format!("https://crates.io/crates/{}", name));
         }
 
         KnowledgeResult {
@@ -135,8 +127,8 @@ impl RustOracle {
         // Simple parsing - in real implementation would use proper HTML parsing
         let mut symbols = Vec::new();
         let mut facts = Vec::new();
-        let mut patterns = Vec::new();
-        let mut source_urls = vec![url.to_string()];
+        let patterns = Vec::new();
+        let source_urls = vec![url.to_string()];
 
         // Extract function signatures from HTML (simplified)
         let function_re = regex::Regex::new(r"fn\s+(\w+)\s*\([^)]*\)").unwrap();
@@ -192,18 +184,24 @@ impl KnowledgeAdapter for RustOracle {
         "rust"
     }
 
-    async fn research(&self, symbol: &str) -> Option<KnowledgeResult> {
-        // Try crates.io first
-        if let Some(metadata) = self.fetch_crate_metadata(symbol).await {
-            return Some(self.parse_crate_metadata(&metadata));
-        }
+    fn research<'a>(
+        &'a self,
+        symbol: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<KnowledgeResult>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            // Try crates.io first
+            if let Some(metadata) = self.fetch_crate_metadata(symbol).await {
+                return Some(self.parse_crate_metadata(&metadata));
+            }
 
-        // Then try docs.rs
-        if let Some(docs) = self.fetch_docs_rs(symbol).await {
-            return self.parse_docs_rs(&docs);
-        }
+            // Then try docs.rs
+            if let Some(docs) = self.fetch_docs_rs(symbol).await {
+                return self.parse_docs_rs(&docs);
+            }
 
-        None
+            None
+        })
     }
 
     fn can_handle(&self, symbol: &str) -> bool {

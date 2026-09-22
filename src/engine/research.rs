@@ -1,5 +1,5 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use serde::{Serialize, Deserialize};
 
 /// The ResearchOracle — grounded's KnowledgeStore.fetch() enhanced.
 ///
@@ -103,15 +103,50 @@ impl ResearchedDef {
 /// These are DETERMINISTIC — no guessing, no LLM-suggested URLs.
 const VERIFIED_SOURCES: &[(&str, &str, u32, &str, &str, bool)] = &[
     // Rust crate docs — docs.rs is the canonical source
-    ("docs.rs", "https://docs.rs/", 100, "rust", "markdown", false),
+    (
+        "docs.rs",
+        "https://docs.rs/",
+        100,
+        "rust",
+        "markdown",
+        false,
+    ),
     // crates.io — API for crate metadata
-    ("crates.io", "https://crates.io/api/v1/crates/", 90, "rust", "json", false),
+    (
+        "crates.io",
+        "https://crates.io/api/v1/crates/",
+        90,
+        "rust",
+        "json",
+        false,
+    ),
     // Android SDK docs — developer.android.com
-    ("Android SDK", "https://developer.android.com/reference/", 80, "kotlin", "html", false),
+    (
+        "Android SDK",
+        "https://developer.android.com/reference/",
+        80,
+        "kotlin",
+        "html",
+        false,
+    ),
     // Kotlin docs — kotlinlang.org
-    ("Kotlin Docs", "https://kotlinlang.org/api/latest/", 70, "kotlin", "markdown", false),
+    (
+        "Kotlin Docs",
+        "https://kotlinlang.org/api/latest/",
+        70,
+        "kotlin",
+        "markdown",
+        false,
+    ),
     // GitHub code search (for specific symbol patterns)
-    ("GitHub Code", "https://github.com/search?q=", 60, "multi", "html", true),
+    (
+        "GitHub Code",
+        "https://github.com/search?q=",
+        60,
+        "multi",
+        "html",
+        true,
+    ),
 ];
 
 impl ResearchOracle {
@@ -129,7 +164,7 @@ impl ResearchOracle {
         }
 
         // Sort by priority (deterministic order — highest first)
-        sources.sort_by(|a, b| b.priority.cmp(&a.priority));
+        sources.sort_by_key(|s| std::cmp::Reverse(s.priority));
 
         ResearchOracle {
             sources,
@@ -166,7 +201,11 @@ impl ResearchOracle {
 
         // Check budget
         if self.fetches_used >= self.max_fetches {
-            log::warn!("ResearchOracle: fetch budget exhausted ({}/{})", self.fetches_used, self.max_fetches);
+            log::warn!(
+                "ResearchOracle: fetch budget exhausted ({}/{})",
+                self.fetches_used,
+                self.max_fetches
+            );
             return None;
         }
 
@@ -185,7 +224,11 @@ impl ResearchOracle {
                     self.cache.insert(cache_key, code_def);
                     return Some(def);
                 } else {
-                    log::warn!("ResearchOracle: {} definition for '{}' failed compiler verification", source.name, symbol);
+                    log::warn!(
+                        "ResearchOracle: {} definition for '{}' failed compiler verification",
+                        source.name,
+                        symbol
+                    );
                     // Don't cache failed definitions — try other sources
                 }
             }
@@ -195,11 +238,17 @@ impl ResearchOracle {
         None
     }
 
-    async fn fetch_from_source(&self, source: &VerifiedSource, symbol: &str, language: &str) -> Option<ResearchedDef> {
+    async fn fetch_from_source(
+        &self,
+        source: &VerifiedSource,
+        symbol: &str,
+        language: &str,
+    ) -> Option<ResearchedDef> {
         let url = self.build_url(source, symbol, language);
         log::info!("ResearchOracle: fetching {} from {}", symbol, url);
 
-        let resp = self.client
+        let resp = self
+            .client
             .get(&url)
             .send()
             .await
@@ -214,9 +263,8 @@ impl ResearchOracle {
             return None;
         }
 
-        let content_type = resp.headers().get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
+        // Note: content-type is not currently needed for parsing decisions;
+        // kept as documentation of the response headers.
 
         // Get the content as text
         let body = resp.text().await.ok()?;
@@ -227,7 +275,7 @@ impl ResearchOracle {
 
     /// Build a deterministic URL for the given symbol and source.
     /// The URL is constructed from the base_url + symbol path — never guessed.
-    fn build_url(&self, source: &VerifiedSource, symbol: &str, language: &str) -> String {
+    fn build_url(&self, source: &VerifiedSource, symbol: &str, _language: &str) -> String {
         // Convert symbol (e.g., "solana_program::system_program") to path
         let symbol_path = if symbol.contains("::") {
             symbol.replace("::", "/")
@@ -239,16 +287,17 @@ impl ResearchOracle {
 
         match source.parser {
             SourceParser::RustDocs => {
-                format!("{}docs.rs/{}/latest/{}", source.base_url, symbol_path, symbol_path)
+                // base_url already ends in "/docs.rs/", so do not append another one.
+                format!("{}{}/latest/{}/", source.base_url, symbol_path, symbol_path)
             }
             SourceParser::Json => {
-                format!("{}/{}/{}", source.base_url, symbol, "")
+                format!("{}{}", source.base_url, symbol)
             }
             SourceParser::HtmlCodeBlocks => {
                 format!("{}{}", source.base_url, symbol_path)
             }
             SourceParser::Markdown => {
-                format!("{}/{}", source.base_url, symbol_path)
+                format!("{}{}", source.base_url, symbol_path)
             }
             SourceParser::Maven => {
                 format!("{}{}", source.base_url, symbol_path)
@@ -257,7 +306,14 @@ impl ResearchOracle {
     }
 
     /// Parse fetched content into a ResearchedDef based on source type.
-    fn parse_content(&self, content: &str, parser: &SourceParser, symbol: &str, language: &str, url: &str) -> Option<ResearchedDef> {
+    fn parse_content(
+        &self,
+        content: &str,
+        parser: &SourceParser,
+        symbol: &str,
+        language: &str,
+        url: &str,
+    ) -> Option<ResearchedDef> {
         match parser {
             SourceParser::Markdown => {
                 // docs.rs and kotlinlang.org use Markdown
@@ -267,19 +323,19 @@ impl ResearchOracle {
             SourceParser::HtmlCodeBlocks => {
                 self.parse_html_codeblocks(content, symbol, language, url)
             }
-            SourceParser::Json => {
-                self.parse_json(content, symbol, language, url)
-            }
-            SourceParser::RustDocs => {
-                self.parse_markdown(content, symbol, language, url)
-            }
-            SourceParser::Maven => {
-                self.parse_html_codeblocks(content, symbol, language, url)
-            }
+            SourceParser::Json => self.parse_json(content, symbol, language, url),
+            SourceParser::RustDocs => self.parse_markdown(content, symbol, language, url),
+            SourceParser::Maven => self.parse_html_codeblocks(content, symbol, language, url),
         }
     }
 
-    fn parse_markdown(&self, content: &str, symbol: &str, language: &str, url: &str) -> Option<ResearchedDef> {
+    fn parse_markdown(
+        &self,
+        content: &str,
+        symbol: &str,
+        language: &str,
+        url: &str,
+    ) -> Option<ResearchedDef> {
         // Extract code blocks (```...```) and function signatures
         let mut examples = Vec::new();
         let mut signature = String::new();
@@ -294,7 +350,8 @@ impl ResearchOracle {
 
         // Extract first heading as description
         let desc_re = regex::Regex::new(r"^# (.+)$").unwrap();
-        let description = desc_re.captures(content)
+        let description = desc_re
+            .captures(content)
             .and_then(|c| c.get(1))
             .map(|m| m.as_str().to_string())
             .unwrap_or_else(|| symbol.to_string());
@@ -312,7 +369,12 @@ impl ResearchOracle {
         Some(ResearchedDef {
             qname: symbol.to_string(),
             language: language.to_string(),
-            kind: if signature.contains("trait") { "trait" } else { "function" }.to_string(),
+            kind: if signature.contains("trait") {
+                "trait"
+            } else {
+                "function"
+            }
+            .to_string(),
             module: String::new(),
             signature,
             description,
@@ -322,7 +384,13 @@ impl ResearchOracle {
         })
     }
 
-    fn parse_html_codeblocks(&self, content: &str, symbol: &str, language: &str, url: &str) -> Option<ResearchedDef> {
+    fn parse_html_codeblocks(
+        &self,
+        content: &str,
+        symbol: &str,
+        language: &str,
+        url: &str,
+    ) -> Option<ResearchedDef> {
         // Parse HTML for <pre><code> blocks and class/function signatures
         let re = regex::Regex::new(r#"<code[^>]*class="[^"]*"[^>]*>(.*?)</code>"#).unwrap();
         let mut examples = Vec::new();
@@ -349,14 +417,18 @@ impl ResearchOracle {
         })
     }
 
-    fn parse_json(&self, content: &str, symbol: &str, language: &str, url: &str) -> Option<ResearchedDef> {
+    fn parse_json(
+        &self,
+        content: &str,
+        symbol: &str,
+        _language: &str,
+        url: &str,
+    ) -> Option<ResearchedDef> {
         // Parse crates.io API response for crate metadata
         #[derive(serde::Deserialize)]
         struct CrateInfo {
             #[serde(default)]
             description: Option<String>,
-            #[serde(default)]
-            documentation: Option<String>,
             #[serde(default)]
             max_version: Option<String>,
         }
@@ -370,8 +442,13 @@ impl ResearchOracle {
                     kind: "crate".to_string(),
                     module: symbol.to_string(),
                     signature: format!("// Crate {} v{}", symbol, version),
-                    description: info.description.unwrap_or_else(|| format!("Rust crate {}", symbol)),
-                    examples: vec![format!("// Add to Cargo.toml: {} = \"{}\"", symbol, version)],
+                    description: info
+                        .description
+                        .unwrap_or_else(|| format!("Rust crate {}", symbol)),
+                    examples: vec![format!(
+                        "// Add to Cargo.toml: {} = \"{}\"",
+                        symbol, version
+                    )],
                     source_url: url.to_string(),
                     compiler_verified: false,
                 })
@@ -414,10 +491,7 @@ impl ResearchOracle {
         let _ = std::fs::create_dir_all(&temp_dir);
         let test_file = temp_dir.join("verify_main.rs");
 
-        let content = format!(
-            "fn main() {{\n{}\n}}\n",
-            examples.join("\n")
-        );
+        let content = format!("fn main() {{\n{}\n}}\n", examples.join("\n"));
         if std::fs::write(&test_file, &content).is_err() {
             return false;
         }
@@ -425,7 +499,15 @@ impl ResearchOracle {
         // Run rustc to check if the code compiles
         // Note: this is a lightweight check — just syntax, not full verification
         let result = std::process::Command::new("rustc")
-            .args(&["--edition", "2021", "--crate-type", "bin", "-o", "/dev/null", test_file.to_str().unwrap()])
+            .args([
+                "--edition",
+                "2021",
+                "--crate-type",
+                "bin",
+                "-o",
+                "/dev/null",
+                test_file.to_str().unwrap(),
+            ])
             .output();
 
         match result {
@@ -452,8 +534,14 @@ impl ResearchOracle {
 
         // Check for known Android method call patterns
         let known_patterns = [
-            "findViewById", "setOnClickListener", "setText", "setContentView",
-            "getSystemService", "vibrate", "makeText", "setAdapter",
+            "findViewById",
+            "setOnClickListener",
+            "setText",
+            "setContentView",
+            "getSystemService",
+            "vibrate",
+            "makeText",
+            "setAdapter",
         ];
 
         for example in examples {
@@ -468,7 +556,12 @@ impl ResearchOracle {
 
     /// Add a verified definition to the SymbolTable.
     /// This is called when the bot successfully researches a new symbol.
-    pub fn cache_definition(&mut self, symbol: &str, language: &str, def: ResearchedDef) -> crate::engine::CodeDef {
+    pub fn cache_definition(
+        &mut self,
+        symbol: &str,
+        language: &str,
+        def: ResearchedDef,
+    ) -> crate::engine::CodeDef {
         let cache_key = format!("{}:{}", language, symbol.to_lowercase());
         let code_def = def.into_code_def();
         self.cache.insert(cache_key, code_def.clone());

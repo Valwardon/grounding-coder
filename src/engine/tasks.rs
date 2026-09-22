@@ -1,6 +1,6 @@
-use serde::{Deserialize, Serialize};
 #[allow(unused_imports)]
 use crate::engine::arena::{CodeArena, SymbolId, SymbolRelation};
+use serde::{Deserialize, Serialize};
 
 /// Priority weight for error magnitude (Eₚ) in the priority formula.
 /// Adapted from grounded's GoalFormationEngine ALPHA.
@@ -11,9 +11,6 @@ const BETA: f64 = 0.25;
 /// Priority weight for unresolved symbol ratio (U) — adapts γ (drive deprivation).
 /// High unresolved ratio → high priority to focus on resolution.
 const GAMMA: f64 = 0.25;
-/// Priority weight for budget pressure (B) — adapts δ (systemic inefficiency).
-/// Low remaining budget → high priority to complete quickly.
-const DELTA: f64 = 0.15;
 
 /// Ring buffer size for tracking per-symbol error history.
 /// Adapted from grounded's ERROR_HISTORY_SIZE.
@@ -71,6 +68,8 @@ impl TaskKind {
             TaskKind::WireHandler => "wire_handler",
             TaskKind::AddTest => "add_test",
             TaskKind::CreateFile => "create_file",
+            TaskKind::ResearchRequirements => "research_requirements",
+            TaskKind::CreateProjectManifest => "create_project_manifest",
         }
     }
 
@@ -99,6 +98,12 @@ pub struct SymbolErrorHistory {
     pub consecutive_unresolved: u8,
 }
 
+impl Default for SymbolErrorHistory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SymbolErrorHistory {
     pub fn new() -> Self {
         SymbolErrorHistory {
@@ -117,7 +122,7 @@ impl SymbolErrorHistory {
             self.count += 1;
         }
         if unresolved_count > 0 {
-            self.consecutive_unresolved = (self.consecutive_unresolved + 1).min(255);
+            self.consecutive_unresolved += 1;
         } else {
             self.consecutive_unresolved = 0;
         }
@@ -151,16 +156,19 @@ impl SymbolErrorHistory {
         let i0 = (self.write_idx + ERROR_HISTORY_SIZE - 1) % ERROR_HISTORY_SIZE;
         let i1 = (self.write_idx + ERROR_HISTORY_SIZE - 2) % ERROR_HISTORY_SIZE;
         let i2 = (self.write_idx + ERROR_HISTORY_SIZE - 3) % ERROR_HISTORY_SIZE;
-        (self.counts[i2] as f64) < (self.counts[i1] as f64) && (self.counts[i1] as f64) < (self.counts[i0] as f64)
+        (self.counts[i2] as f64) < (self.counts[i1] as f64)
+            && (self.counts[i1] as f64) < (self.counts[i0] as f64)
     }
 }
 
 /// A tracked symbol that the error history applies to.
 #[derive(Debug, Clone)]
 struct TrackedSymbol {
+    #[allow(dead_code)]
     id: SymbolId,
     history: SymbolErrorHistory,
     /// Whether we've already formed a "resolve" task for this symbol.
+    #[allow(dead_code)]
     task_formed: bool,
 }
 
@@ -190,7 +198,12 @@ pub struct SubTask {
 }
 
 impl SubTask {
-    pub fn new(kind: TaskKind, description: String, payload: serde_json::Value, source: String) -> Self {
+    pub fn new(
+        kind: TaskKind,
+        description: String,
+        payload: serde_json::Value,
+        source: String,
+    ) -> Self {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(1);
         Self {
@@ -332,6 +345,12 @@ pub struct IntentTest {
     pub code: String,
 }
 
+impl Default for TaskDecomposer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TaskDecomposer {
     pub fn new() -> Self {
         TaskDecomposer {
@@ -423,17 +442,23 @@ impl TaskDecomposer {
             let priority = (ALPHA * (unresolved_refs as f64 / total_refs.max(1) as f64)
                 + BETA * (unresolved_refs as f64 / total_refs.max(1) as f64))
                 .clamp(0.05, 1.0);
-            tasks.push(SubTask::new(
-                TaskKind::ResolveSymbol,
-                format!("Investigate rising unresolved trend in intent: {}", intent.goal),
-                serde_json::json!({
-                    "references": resolve_needed,
-                    "total": total_refs,
-                    "unresolved": unresolved_refs
-                }),
-                "trend_detection".to_string(),
-            ).with_priority(priority)
-             .with_deadline(self.tick + 2000));
+            tasks.push(
+                SubTask::new(
+                    TaskKind::ResolveSymbol,
+                    format!(
+                        "Investigate rising unresolved trend in intent: {}",
+                        intent.goal
+                    ),
+                    serde_json::json!({
+                        "references": resolve_needed,
+                        "total": total_refs,
+                        "unresolved": unresolved_refs
+                    }),
+                    "trend_detection".to_string(),
+                )
+                .with_priority(priority)
+                .with_deadline(self.tick + 2000),
+            );
         }
 
         // 4. Form explicit tasks from intent actions
@@ -446,18 +471,22 @@ impl TaskDecomposer {
         // 5. Form import tasks
         for import_path in &intent.imports {
             let priority = GAMMA * (unresolved_refs as f64 / total_refs.max(1) as f64);
-            tasks.push(SubTask::new(
-                TaskKind::AddImport,
-                format!("Add import: {}", import_path),
-                serde_json::json!({ "import": import_path }),
-                "intent_imports".to_string(),
-            ).with_priority(priority.clamp(0.05, 1.0))
-             .with_deadline(self.tick + 1500));
+            tasks.push(
+                SubTask::new(
+                    TaskKind::AddImport,
+                    format!("Add import: {}", import_path),
+                    serde_json::json!({ "import": import_path }),
+                    "intent_imports".to_string(),
+                )
+                .with_priority(priority.clamp(0.05, 1.0))
+                .with_deadline(self.tick + 1500),
+            );
         }
 
         // 6. Form definition (write function) tasks
         if let Some(def) = &intent.define {
-            let priority = ALPHA * 0.8 + GAMMA * (unresolved_refs as f64 / total_refs.max(1) as f64);
+            let priority =
+                ALPHA * 0.8 + GAMMA * (unresolved_refs as f64 / total_refs.max(1) as f64);
             let mut task = SubTask::new(
                 TaskKind::WriteFunction,
                 format!("Define {} ({})", def.name, def.kind),
@@ -468,60 +497,70 @@ impl TaskDecomposer {
                     "file": intent.file
                 }),
                 "intent_define".to_string(),
-            ).with_priority(priority.clamp(0.05, 1.0))
-             .with_deadline(self.tick + 1000);
+            )
+            .with_priority(priority.clamp(0.05, 1.0))
+            .with_deadline(self.tick + 1000);
             task.target_symbols = vec![def.name.clone()];
             task.required_symbols = def.references.clone();
             tasks.push(task);
         }
 
-    // 7. Form research requirements tasks
-    if !intent.unknown_requirements.is_empty() {
-        let priority = BETA * (unresolved_refs as f64 / total_refs.max(1) as f64);
-        let mut task = SubTask::new(
-            TaskKind::ResearchRequirements,
-            format!("Research requirements: {}", intent.goal),
-            serde_json::json!({
-                "goal": intent.goal,
-                "unknown_requirements": intent.unknown_requirements,
-                "domains": intent.domains,
-                "platform": intent.platform,
-                "architecture": intent.architecture,
-                "capabilities": intent.capabilities,
-                "constraints": intent.constraints,
-                "dependencies": intent.dependencies,
-                "runtime": intent.runtime
-            }),
-            "intent_requirements".to_string(),
-        ).with_priority(priority.clamp(0.05, 1.0))
-         .with_deadline(self.tick + 3000);
-        tasks.push(task);
-    }
+        // 7. Form research requirements tasks
+        if !intent.unknown_requirements.is_empty() {
+            let priority = BETA * (unresolved_refs as f64 / total_refs.max(1) as f64);
+            let task = SubTask::new(
+                TaskKind::ResearchRequirements,
+                format!("Research requirements: {}", intent.goal),
+                serde_json::json!({
+                    "goal": intent.goal,
+                    "unknown_requirements": intent.unknown_requirements,
+                    "domains": intent.domains,
+                    "platform": intent.platform,
+                    "architecture": intent.architecture,
+                    "capabilities": intent.capabilities,
+                    "constraints": intent.constraints,
+                    "dependencies": intent.dependencies,
+                    "runtime": intent.runtime
+                }),
+                "intent_requirements".to_string(),
+            )
+            .with_priority(priority.clamp(0.05, 1.0))
+            .with_deadline(self.tick + 3000);
+            tasks.push(task);
+        }
 
-    // 8. Form create project manifest tasks
-    if intent.platform == "android" || intent.architecture == "native" {
-        let priority = GAMMA * 0.8;
-        let mut task = SubTask::new(
-            TaskKind::CreateProjectManifest,
-            format!("Create project manifest for {} {}", intent.platform, intent.architecture),
-            serde_json::json!({
-                "platform": intent.platform,
-                "architecture": intent.architecture,
-                "runtime": intent.runtime,
-                "capabilities": intent.capabilities,
-                "domains": intent.domains,
-                "constraints": intent.constraints,
-                "dependencies": intent.dependencies,
-                "file": "Cargo.toml"
-            }),
-            "intent_manifest".to_string(),
-        ).with_priority(priority.clamp(0.05, 1.0))
-         .with_deadline(self.tick + 2000);
-        tasks.push(task);
-    }
+        // 8. Form create project manifest tasks
+        if intent.platform == "android" || intent.architecture == "native" {
+            let priority = GAMMA * 0.8;
+            let task = SubTask::new(
+                TaskKind::CreateProjectManifest,
+                format!(
+                    "Create project manifest for {} {}",
+                    intent.platform, intent.architecture
+                ),
+                serde_json::json!({
+                    "platform": intent.platform,
+                    "architecture": intent.architecture,
+                    "runtime": intent.runtime,
+                    "capabilities": intent.capabilities,
+                    "domains": intent.domains,
+                    "constraints": intent.constraints,
+                    "dependencies": intent.dependencies,
+                    "file": "Cargo.toml"
+                }),
+                "intent_manifest".to_string(),
+            )
+            .with_priority(priority.clamp(0.05, 1.0))
+            .with_deadline(self.tick + 2000);
+            tasks.push(task);
+        }
 
-    // 9. Sort by priority (descending) — like grounded's priority-based selection
-    tasks.sort_by(|a, b| b.priority.partial_cmp(&a.priority).unwrap_or(std::cmp::Ordering::Equal));
+        // 9. Sort by priority (descending) — like grounded's priority-based selection
+        tasks.sort_by(|a, b| {
+            b.priority
+                .partial_cmp(&a.priority)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         tasks
     }
@@ -541,50 +580,56 @@ impl TaskDecomposer {
             format!("Resolve unknown symbol: {}", symbol),
             serde_json::json!({ "symbol": symbol }),
             format!("intent: {}", intent_goal),
-        ).with_priority(priority)
-         .with_deadline(self.tick + 5000);
+        )
+        .with_priority(priority)
+        .with_deadline(self.tick + 5000);
         task.target_symbols = vec![symbol.to_string()];
         task
     }
 
     /// Form a task from an intent action.
     /// Maps intent action strings (e.g., "add_button") to concrete sub-tasks.
-    fn form_action_task(&mut self, action: &IntentAction, intent: &StructuredIntent) -> Option<SubTask> {
+    fn form_action_task(
+        &mut self,
+        action: &IntentAction,
+        intent: &StructuredIntent,
+    ) -> Option<SubTask> {
         let action_lower = action.action.to_lowercase();
 
-        let (kind, description, payload) = if action_lower.contains("button") || action_lower.contains("vibrate") {
-            (
-                TaskKind::WriteFunction,
-                format!("Handle action: {}", action.action),
-                serde_json::json!({
-                    "action": action.action,
-                    "params": action.params,
-                    "file": intent.file,
-                    "language": intent.language
-                }),
-            )
-        } else if action_lower.contains("test") || action_lower.contains("assert") {
-            (
-                TaskKind::AddTest,
-                format!("Test action: {}", action.action),
-                serde_json::json!({
-                    "action": action.action,
-                    "params": action.params,
-                    "file": intent.file
-                }),
-            )
-        } else {
-            (
-                TaskKind::WriteFunction,
-                format!("Execute action: {}", action.action),
-                serde_json::json!({
-                    "action": action.action,
-                    "params": action.params,
-                    "file": intent.file,
-                    "language": intent.language
-                }),
-            )
-        };
+        let (kind, description, payload) =
+            if action_lower.contains("button") || action_lower.contains("vibrate") {
+                (
+                    TaskKind::WriteFunction,
+                    format!("Handle action: {}", action.action),
+                    serde_json::json!({
+                        "action": action.action,
+                        "params": action.params,
+                        "file": intent.file,
+                        "language": intent.language
+                    }),
+                )
+            } else if action_lower.contains("test") || action_lower.contains("assert") {
+                (
+                    TaskKind::AddTest,
+                    format!("Test action: {}", action.action),
+                    serde_json::json!({
+                        "action": action.action,
+                        "params": action.params,
+                        "file": intent.file
+                    }),
+                )
+            } else {
+                (
+                    TaskKind::WriteFunction,
+                    format!("Execute action: {}", action.action),
+                    serde_json::json!({
+                        "action": action.action,
+                        "params": action.params,
+                        "file": intent.file,
+                        "language": intent.language
+                    }),
+                )
+            };
 
         let priority = 0.6;
         let mut task = SubTask::new(kind, description, payload, "intent_action".to_string())
@@ -592,12 +637,12 @@ impl TaskDecomposer {
             .with_deadline(self.tick + 1000);
 
         // Extract any referenced symbols from params
-        if let Some(refs) = action.params.get("references") {
-            if let Some(arr) = refs.as_array() {
-                for r in arr {
-                    if let Some(s) = r.as_str() {
-                        task.required_symbols.push(s.to_string());
-                    }
+        if let Some(refs) = action.params.get("references")
+            && let Some(arr) = refs.as_array()
+        {
+            for r in arr {
+                if let Some(s) = r.as_str() {
+                    task.required_symbols.push(s.to_string());
                 }
             }
         }
@@ -613,11 +658,14 @@ impl TaskDecomposer {
 
         // Track in error histories vector (repurposing the pattern)
         if self.error_histories.is_empty() {
-            self.error_histories.resize(1, TrackedSymbol {
-                id: SymbolId(0),
-                history: SymbolErrorHistory::new(),
-                task_formed: false,
-            });
+            self.error_histories.resize(
+                1,
+                TrackedSymbol {
+                    id: SymbolId(0),
+                    history: SymbolErrorHistory::new(),
+                    task_formed: false,
+                },
+            );
         }
 
         self.error_histories[0].history.record(unresolved);

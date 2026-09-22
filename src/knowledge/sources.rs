@@ -1,6 +1,6 @@
 // Source management for CastleStore
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceEntry {
@@ -29,6 +29,12 @@ pub struct SourceCache {
     pub max_content_size: usize,
 }
 
+impl Default for SourceCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SourceCache {
     pub fn new() -> Self {
         SourceCache {
@@ -38,7 +44,13 @@ impl SourceCache {
         }
     }
 
-    pub fn add_source(&mut self, url: String, content_hash: String, version: String, content: String) {
+    pub fn add_source(
+        &mut self,
+        url: String,
+        content_hash: String,
+        version: String,
+        content: String,
+    ) {
         let entry = SourceEntry {
             url: url.clone(),
             content_hash,
@@ -52,7 +64,12 @@ impl SourceCache {
 
         // Clean up old entries if needed
         if self.entries.len() > self.max_entries {
-            let keys: Vec<String> = self.entries.keys().take(self.entries.len() - self.max_entries + 1).cloned().collect();
+            let keys: Vec<String> = self
+                .entries
+                .keys()
+                .take(self.entries.len() - self.max_entries + 1)
+                .cloned()
+                .collect();
             for key in keys {
                 self.entries.remove(&key);
             }
@@ -68,14 +85,17 @@ impl SourceCache {
     }
 
     pub fn get_compressed_content(&self, url: &str) -> Option<String> {
-        self.entries.get(url).map(|entry| entry.compressed_content.clone())
+        self.entries
+            .get(url)
+            .map(|entry| entry.compressed_content.clone())
     }
 }
 
 pub fn compress_content(content: &str) -> String {
     // Simple compression: remove extra whitespace and newlines
     // In a real implementation, would use proper compression algorithms
-    let cleaned = content.replace(&['\n', '\r', '\t'][..], " ")
+    let cleaned = content
+        .replace(&['\n', '\r', '\t'][..], " ")
         .replace("  ", " ")
         .replace("   ", " ")
         .replace("    ", " ")

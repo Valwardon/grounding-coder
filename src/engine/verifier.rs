@@ -54,7 +54,10 @@ enum ProjectType {
 impl CodeVerifier {
     pub fn new(project_dir: PathBuf) -> Self {
         let project_type = detect_project_type(&project_dir);
-        CodeVerifier { project_dir, project_type }
+        CodeVerifier {
+            project_dir,
+            project_type,
+        }
     }
 
     /// Run all verification checks. This is the "oracle" call.
@@ -74,6 +77,28 @@ impl CodeVerifier {
         let mut all_warnings = Vec::new();
         let mut combined_stdout = String::new();
         let mut combined_stderr = String::new();
+
+        // ── Guardrail 0: toolchain availability ──
+        // If cargo is missing, that is a fact we must report — never a
+        // silent "clean" (a false pass would let unverified code through).
+        if !command_available("cargo") {
+            return VerificationResult {
+                clean: false,
+                errors: vec![CompileError {
+                    code: "CARGO_MISSING".to_string(),
+                    message: "cargo is not available on PATH — cannot verify code".to_string(),
+                    file: String::new(),
+                    line: 0,
+                    col: 0,
+                    suggestion: None,
+                    source_line: None,
+                    kind: super::error::ErrorKind::Other,
+                }],
+                warnings: Vec::new(),
+                stdout: String::new(),
+                stderr: "cargo not found".to_string(),
+            };
+        }
 
         // ── Guardrail 1: Syntax + Types (cargo check) ──
         let check = Command::new("cargo")
@@ -107,24 +132,29 @@ impl CodeVerifier {
         }
 
         // ── Guardrail 2: Linting (cargo clippy) ──
-        let clippy = Command::new("cargo")
-            .arg("clippy")
-            .arg("--all-targets")
-            .arg("--")
-            .arg("-D")
-            .arg("warnings")
-            .current_dir(&self.project_dir)
-            .output();
+        // Clippy is optional: if it isn't installed we skip it rather than
+        // failing the whole verification on a missing tool. Warnings are
+        // reported but never promoted to hard errors (`-D warnings` would
+        // gate the agent on its own stylistic output).
+        if command_available("cargo-clippy") || command_available("clippy-driver") {
+            let clippy = Command::new("cargo")
+                .arg("clippy")
+                .arg("--all-targets")
+                .current_dir(&self.project_dir)
+                .output();
 
-        if let Ok(output) = clippy {
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            combined_stdout.push_str(&String::from_utf8_lossy(&output.stdout));
-            combined_stderr.push_str(&stderr);
+            if let Ok(output) = clippy {
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                combined_stdout.push_str(&String::from_utf8_lossy(&output.stdout));
+                combined_stderr.push_str(&stderr);
 
-            let errors = ErrorClassifier::parse(&stderr);
-            let (errs, warns) = split_errors_warnings(errors);
-            all_errors.extend(errs);
-            all_warnings.extend(warns);
+                let errors = ErrorClassifier::parse(&stderr);
+                let (errs, warns) = split_errors_warnings(errors);
+                all_errors.extend(errs);
+                all_warnings.extend(warns);
+            }
+        } else {
+            log::info!("cargo-clippy not installed — skipping lint guardrail.");
         }
 
         // If clippy found issues, don't run tests yet
@@ -169,11 +199,14 @@ impl CodeVerifier {
 
     /// Verify an Android project: gradle build + lint
     fn verify_android(&self) -> VerificationResult {
-        // For Android Kotlin/Java projects, use gradle
-        let result = Command::new("./gradlew")
-            .arg("build")
-            .arg("-x")
-            .arg("test") // skip unit tests for MVP, focus on compilation
+        // Prefer the project's gradle wrapper, fall back to a system `gradle`.
+        let (cmd, args): (&str, Vec<&str>) = if self.project_dir.join("gradlew").exists() {
+            ("./gradlew", vec!["build", "-x", "test"])
+        } else {
+            ("gradle", vec!["build", "-x", "test"])
+        };
+        let result = Command::new(cmd)
+            .args(&args)
             .current_dir(&self.project_dir)
             .output();
 
@@ -231,7 +264,11 @@ impl CodeVerifier {
 fn detect_project_type(dir: &Path) -> ProjectType {
     if dir.join("Cargo.toml").exists() {
         ProjectType::Rust
-    } else if dir.join("gradlew").exists() || dir.join("build.gradle").exists() {
+    } else if dir.join("gradlew").exists()
+        || dir.join("build.gradle").exists()
+        || dir.join("settings.gradle").exists()
+        || has_source_files(dir, &["kt", "java"])
+    {
         ProjectType::Android
     } else {
         // Default to Rust for the MVP
@@ -239,8 +276,52 @@ fn detect_project_type(dir: &Path) -> ProjectType {
     }
 }
 
+/// Whether a binary is present on PATH (used to skip optional guardrails
+/// without silently failing — a missing *required* tool is reported loudly).
+fn command_available(name: &str) -> bool {
+    Command::new(name)
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+fn has_source_files(dir: &Path, extensions: &[&str]) -> bool {
+    let mut stack = vec![dir.to_path_buf()];
+    let ignore = [
+        ".git",
+        "target",
+        "build",
+        ".gradle",
+        ".idea",
+        "node_modules",
+    ];
+    while let Some(current) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if path
+                    .file_name()
+                    .is_none_or(|n| ignore.contains(&n.to_string_lossy().as_ref()))
+                {
+                    continue;
+                }
+                stack.push(path);
+            } else if let Some(ext) = path.extension().map(|e| e.to_string_lossy().to_string())
+                && extensions.contains(&ext.as_str())
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn split_errors_warnings(errors: Vec<CompileError>) -> (Vec<CompileError>, Vec<CompileError>) {
-    errors.into_iter()
+    errors
+        .into_iter()
         .partition(|e| !e.code.starts_with("warning"))
 }
 

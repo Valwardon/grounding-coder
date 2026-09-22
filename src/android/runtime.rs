@@ -1,6 +1,6 @@
 // Android-specific runtime and capability management
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AndroidRuntime {
@@ -36,7 +36,10 @@ pub fn initialize_android_runtime() -> AndroidRuntime {
         build_gradients: [
             ("compile".to_string(), "21".to_string()),
             ("minify".to_string(), "true".to_string()),
-        ].iter().cloned().collect(),
+        ]
+        .iter()
+        .cloned()
+        .collect(),
     }
 }
 
@@ -93,7 +96,7 @@ pub fn get_android_capabilities() -> Vec<AndroidCapability> {
     ]
 }
 
-pub fn validate_android_capability(capability: &str, runtime: &AndroidRuntime) -> bool {
+pub fn validate_android_capability(capability: &str, _runtime: &AndroidRuntime) -> bool {
     get_android_capabilities()
         .iter()
         .any(|c| c.name == capability && c.available)

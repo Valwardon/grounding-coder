@@ -1,12 +1,12 @@
-use dioxus::prelude::*;
 use crate::engine::{CodeBot, CodeSymbol};
+use dioxus::prelude::*;
 
 #[component]
 pub fn Chat() -> Element {
-    let mut input = use_signal(|| String::new());
-    let mut history = use_signal(|| Vec::<(String, bool)>::new());
+    let mut input = use_signal(String::new);
+    let mut history = use_signal(Vec::<(String, bool)>::new);
     let mut working = use_signal(|| false);
-    let mut settings = use_signal(crate::llm::load_config_default);
+    let settings = use_signal(crate::llm::load_config_default);
 
     rsx! {
         div { class: "screen",
@@ -63,7 +63,7 @@ pub fn Chat() -> Element {
 #[component]
 pub fn Settings() -> Element {
     let mut settings = use_signal(crate::llm::load_config_default);
-    let mut status = use_signal(|| String::new());
+    let mut status = use_signal(String::new);
 
     rsx! {
         div { class: "screen",
@@ -138,8 +138,8 @@ pub fn Settings() -> Element {
 
 #[component]
 pub fn Symbols() -> Element {
-    let mut symbols = use_signal(|| Vec::<(String, CodeSymbol)>::new());
-    let mut status = use_signal(|| String::new());
+    let mut symbols = use_signal(Vec::<(String, CodeSymbol)>::new);
+    let mut status = use_signal(String::new);
 
     use_effect(move || {
         spawn(async move {
@@ -170,8 +170,8 @@ pub fn Symbols() -> Element {
 
 #[component]
 pub fn Recipes() -> Element {
-    let mut recipes = use_signal(|| Vec::<String>::new());
-    let mut status = use_signal(|| String::new());
+    let mut recipes = use_signal(Vec::<String>::new);
+    let mut status = use_signal(String::new);
 
     use_effect(move || {
         spawn(async move {
@@ -209,22 +209,23 @@ async fn run_task_deterministic(prompt: &str, cfg: &crate::llm::ApiConfig) -> St
 
     let llm_client = crate::llm::LlmClient::new(cfg.clone());
     match llm_client.translate(prompt).await {
-        Ok(intent) => {
-            match serde_json::to_string(&intent) {
-                Ok(intent_json) => {
-                    let mut bot = CodeBot::new(".", 5);
-                    match bot.run_task(&intent_json).await {
-                        Ok(result) => format!(
-                            "SUCCESS: {}\nFiles: {} | Errors fixed: {} | Budget: {} | Recipes: {}",
-                            result.message, result.changes.len(), result.errors_fixed,
-                            result.budget_used, result.recipes_learned
-                        ),
-                        Err(e) => format!("ENGINE: {}", e),
-                    }
+        Ok(intent) => match serde_json::to_string(&intent) {
+            Ok(intent_json) => {
+                let mut bot = CodeBot::new(".", 5);
+                match bot.run_task(&intent_json).await {
+                    Ok(result) => format!(
+                        "SUCCESS: {}\nFiles: {} | Errors fixed: {} | Budget: {} | Recipes: {}",
+                        result.message,
+                        result.changes.len(),
+                        result.errors_fixed,
+                        result.budget_used,
+                        result.recipes_learned
+                    ),
+                    Err(e) => format!("ENGINE: {}", e),
                 }
-                Err(e) => format!("SERIALIZE: {}", e),
             }
-        }
+            Err(e) => format!("SERIALIZE: {}", e),
+        },
         Err(e) => format!("LLM: {}", e),
     }
 }

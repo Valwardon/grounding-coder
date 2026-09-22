@@ -38,7 +38,7 @@ impl RetryBudget {
     ///
     /// Mirrors grounded's `consume()` — the bot checks this before
     /// each retry. No budget = no more guessing.
-    pub fn consume(&mut self, semantic_distance: f64, error_rate: f64, novelty: f64) -> bool {
+    pub fn consume(&mut self, _semantic_distance: f64, error_rate: f64, novelty: f64) -> bool {
         // Cost increases with errors (like grounded's error_rate term)
         // and decreases with novelty (like grounded's novelty discount).
         // For coding: error_rate = fraction of previous attempts that failed.
@@ -71,10 +71,14 @@ impl RetryBudget {
     }
 
     /// Remaining attempts.
-    pub fn remaining(&self) -> u32 { self.remaining }
+    pub fn remaining(&self) -> u32 {
+        self.remaining
+    }
 
     /// Whether the bot should halt (budget exhausted).
-    pub fn is_exhausted(&self) -> bool { self.remaining == 0 }
+    pub fn is_exhausted(&self) -> bool {
+        self.remaining == 0
+    }
 
     /// Reset for a new task.
     pub fn reset(&mut self, new_total: u32) {

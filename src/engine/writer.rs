@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::arena::{CodeArena, SymbolId, SymbolKind};
+use super::arena::{SymbolId, SymbolKind};
 use super::corrector::Fix;
 use super::symbols::SymbolTable;
 
@@ -47,12 +47,12 @@ impl CodeWriter {
             .flatten()
         {
             let path = entry.path();
-            if path.extension().map_or(false, |ext| {
-                matches!(ext.to_str(), Some("rs") | Some("kt") | Some("java"))
-            }) {
-                if let Ok(content) = fs::read_to_string(path) {
-                    self.extract_symbols(path, &content, &mut symbols);
-                }
+            if path
+                .extension()
+                .is_some_and(|ext| matches!(ext.to_str(), Some("rs") | Some("kt") | Some("java")))
+                && let Ok(content) = fs::read_to_string(path)
+            {
+                self.extract_symbols(path, &content, &mut symbols);
             }
         }
 
@@ -61,13 +61,26 @@ impl CodeWriter {
 
     fn should_ignore(entry: &walkdir::DirEntry) -> bool {
         let name = entry.file_name().to_string_lossy().to_string();
-        [".git", "target", "build", ".gradle", ".idea", "node_modules"]
-            .contains(&name.as_str())
+        [
+            ".git",
+            "target",
+            "build",
+            ".gradle",
+            ".idea",
+            "node_modules",
+        ]
+        .contains(&name.as_str())
     }
 
     /// Extract code symbols from a source file.
-    fn extract_symbols(&self, path: &Path, content: &str, symbols: &mut Vec<super::arena::CodeSymbol>) {
-        let rel_path = path.strip_prefix(&self.project_dir)
+    fn extract_symbols(
+        &self,
+        path: &Path,
+        content: &str,
+        symbols: &mut Vec<super::arena::CodeSymbol>,
+    ) {
+        let rel_path = path
+            .strip_prefix(&self.project_dir)
             .unwrap_or(path)
             .to_string_lossy()
             .to_string();
@@ -91,7 +104,9 @@ impl CodeWriter {
             }
 
             let kw = trimmed.split_whitespace().next().unwrap_or("");
-            if let Some(name) = extract_type_name(trimmed, &["struct", "class", "enum", "interface", "trait"]) {
+            if let Some(name) =
+                extract_type_name(trimmed, &["struct", "class", "enum", "interface", "trait"])
+            {
                 let kind = match kw {
                     "struct" => SymbolKind::Struct,
                     "class" | "interface" => SymbolKind::Struct,
@@ -134,7 +149,8 @@ impl CodeWriter {
     /// The writer only emits code built from:
     ///   1. API reference examples (verified against Android SDK)
     ///   2. Codebase patterns (verified by compilation)
-    /// It NEVER hallucinates a function signature or import path.
+    ///
+    ///    It NEVER hallucinates a function signature or import path.
     pub fn write(&self, task: &super::tasks::SubTask, table: &SymbolTable) -> String {
         if task.target_symbols.is_empty() {
             return "// ERROR: no target symbols in task\n".to_string();
@@ -173,19 +189,26 @@ impl CodeWriter {
 
         match fix {
             Fix::AddImport(imp) => {
-                if let Some(file) = self.find_source_file() {
-                    if self.add_import(&file, imp) {
-                        changed.push(file.to_string_lossy().to_string());
-                    }
+                if let Some(file) = self.find_source_file()
+                    && self.add_import(&file, imp)
+                {
+                    changed.push(file.to_string_lossy().to_string());
                 }
             }
-            Fix::Replace { find, replace, file, line: _ } => {
+            Fix::Replace {
+                find,
+                replace,
+                file,
+                line: _,
+            } => {
+                if find.is_empty() {
+                    // Never patch with an empty anchor — that would corrupt the file.
+                    return Vec::new();
+                }
                 if let Ok(content) = fs::read_to_string(file) {
                     let new_content = content.replacen(find, replace, 1);
-                    if new_content != content {
-                        if fs::write(file, new_content).is_ok() {
-                            changed.push(file.clone());
-                        }
+                    if new_content != content && fs::write(file, new_content).is_ok() {
+                        changed.push(file.clone());
                     }
                 }
             }
@@ -212,12 +235,32 @@ impl CodeWriter {
     fn apply_suggestion(&self, file: &str, suggestion: &str, changed: &mut Vec<String>) {
         if let Ok(content) = fs::read_to_string(file) {
             // rustc suggestions look like: help: try `String::from(x)` or `x.to_string()`
-            let code = suggestion.trim();
-            let new_content = content.replacen(code, code, 1);
-            if new_content != content {
-                if fs::write(file, new_content).is_ok() {
-                    changed.push(file.to_string());
-                }
+            // Only import-path suggestions can be applied deterministically;
+            // arbitrary expression rewrites are routed to the correction pipeline
+            // (never guessed here).
+            let candidate = suggestion
+                .split('`')
+                .nth(1)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+
+            let import = candidate
+                .strip_prefix("use ")
+                .map(|s| s.trim_end_matches(';').trim().to_string())
+                .or_else(|| {
+                    if candidate.contains("::") {
+                        Some(candidate.clone())
+                    } else {
+                        None
+                    }
+                });
+
+            if let Some(import) = import
+                && !content.contains(&import)
+                && self.add_import(file.as_ref(), &format!("use {};", import))
+            {
+                changed.push(file.to_string());
             }
         }
     }
@@ -251,13 +294,13 @@ impl CodeWriter {
 
     fn find_source_file(&self) -> Option<PathBuf> {
         let src = self.project_dir.join("src");
-        if src.exists() {
-            if let Ok(entries) = fs::read_dir(&src) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().map_or(false, |e| e == "rs") {
-                        return Some(path);
-                    }
+        if src.exists()
+            && let Ok(entries) = fs::read_dir(&src)
+        {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|e| e == "rs") {
+                    return Some(path);
                 }
             }
         }

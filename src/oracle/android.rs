@@ -1,44 +1,46 @@
 // Android-specific oracle for Android SDK and documentation
-use super::mod::KnowledgeAdapter;
-use super::mod::KnowledgeResult;
-use super::mod::CodeSymbolInfo;
-use super::mod::VerifiedFact;
-use super::mod::CodePattern;
-use super::mod::PatternType;
+use super::{CodeSymbolInfo, KnowledgeAdapter, KnowledgeResult, VerifiedFact};
 use reqwest::Client;
 use std::sync::Arc;
 
 pub struct AndroidOracle {
     client: Arc<Client>,
-    max_results: usize,
+}
+
+impl Default for AndroidOracle {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AndroidOracle {
     pub fn new() -> Self {
         AndroidOracle {
-            client: Arc::new(Client::builder()
-                .user_agent("grounding-coder-android-oracle/0.1")
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .unwrap()),
-            max_results: 10,
+            client: Arc::new(
+                Client::builder()
+                    .user_agent("grounding-coder-android-oracle/0.1")
+                    .timeout(std::time::Duration::from_secs(30))
+                    .build()
+                    .unwrap(),
+            ),
         }
     }
 
     /// Fetch Android SDK documentation from developer.android.com
     async fn fetch_android_sdk_docs(&self, class_name: &str) -> Option<serde_json::Value> {
-        let url = format!("https://developer.android.com/reference/kotlin/android/{}?hl=en", class_name);
+        let url = format!(
+            "https://developer.android.com/reference/kotlin/android/{}?hl=en",
+            class_name
+        );
         match self.client.get(&url).send().await {
             Ok(response) => {
                 if response.status().is_success() {
                     match response.text().await {
-                        Ok(html) => {
-                            Some(serde_json::json!({
-                                "type": "android_sdk",
-                                "content": html,
-                                "url": url
-                            }))
-                        }
+                        Ok(html) => Some(serde_json::json!({
+                            "type": "android_sdk",
+                            "content": html,
+                            "url": url
+                        })),
                         Err(_) => None,
                     }
                 } else {
@@ -51,18 +53,19 @@ impl AndroidOracle {
 
     /// Fetch AndroidX documentation
     async fn fetch_androidx_docs(&self, class_name: &str) -> Option<serde_json::Value> {
-        let url = format!("https://developer.android.com/reference/kotlin/androidx/{}?hl=en", class_name);
+        let url = format!(
+            "https://developer.android.com/reference/kotlin/androidx/{}?hl=en",
+            class_name
+        );
         match self.client.get(&url).send().await {
             Ok(response) => {
                 if response.status().is_success() {
                     match response.text().await {
-                        Ok(html) => {
-                            Some(serde_json::json!({
-                                "type": "androidx_sdk",
-                                "content": html,
-                                "url": url
-                            }))
-                        }
+                        Ok(html) => Some(serde_json::json!({
+                            "type": "androidx_sdk",
+                            "content": html,
+                            "url": url
+                        })),
                         Err(_) => None,
                     }
                 } else {
@@ -81,8 +84,8 @@ impl AndroidOracle {
         // Simple parsing - in real implementation would use proper HTML parsing
         let mut symbols = Vec::new();
         let mut facts = Vec::new();
-        let mut patterns = Vec::new();
-        let mut source_urls = vec![url.to_string()];
+        let patterns = Vec::new();
+        let source_urls = vec![url.to_string()];
 
         // Extract Android API classes from HTML (simplified)
         let api_class_re = regex::Regex::new(r#"class=""([^"]*)"""#).unwrap();
@@ -107,11 +110,14 @@ impl AndroidOracle {
         for cap in method_re.captures_iter(content) {
             if let Some(method_sig) = cap.get(1) {
                 symbols.push(CodeSymbolInfo {
-                    qname: format!("{}::method", method_sig.as_str().split('.').next().unwrap_or("")),
+                    qname: format!(
+                        "{}::method",
+                        method_sig.as_str().split('.').next().unwrap_or("")
+                    ),
                     language: "kotlin".to_string(),
                     kind: "function".to_string(),
                     module: "android".to_string(),
-                    signature: format!("{}", method_sig.as_str()),
+                    signature: method_sig.as_str().to_string(),
                     source_urls: vec![url.to_string()],
                     compiler_verified: false,
                     api_level: None,
@@ -156,18 +162,24 @@ impl KnowledgeAdapter for AndroidOracle {
         "kotlin"
     }
 
-    async fn research(&self, symbol: &str) -> Option<KnowledgeResult> {
-        // Try Android SDK docs first
-        if let Some(docs) = self.fetch_android_sdk_docs(symbol).await {
-            return self.parse_android_sdk(&docs);
-        }
+    fn research<'a>(
+        &'a self,
+        symbol: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<KnowledgeResult>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            // Try Android SDK docs first
+            if let Some(docs) = self.fetch_android_sdk_docs(symbol).await {
+                return self.parse_android_sdk(&docs);
+            }
 
-        // Then try AndroidX docs
-        if let Some(docs) = self.fetch_androidx_docs(symbol).await {
-            return self.parse_android_sdk(&docs);
-        }
+            // Then try AndroidX docs
+            if let Some(docs) = self.fetch_androidx_docs(symbol).await {
+                return self.parse_android_sdk(&docs);
+            }
 
-        None
+            None
+        })
     }
 
     fn can_handle(&self, symbol: &str) -> bool {

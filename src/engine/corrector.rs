@@ -1,9 +1,6 @@
-use std::path::PathBuf;
-
-use super::budget::RetryBudget;
-use super::error::{CompileError, ErrorClassifier, ErrorKind};
-use super::recipes::RecipeLog;
 use super::arena::CodeArena;
+use super::error::{CompileError, ErrorKind};
+use super::recipes::RecipeLog;
 use super::writer::CodeWriter;
 
 /// The error correction pipeline — grounded's `SelfHealingPipeline` repurposed.
@@ -26,7 +23,6 @@ use super::writer::CodeWriter;
 /// (new cognitive algorithms). Here, the pipeline generates candidate
 /// CODE FIXES. But the structure is isomorphic.
 pub struct CorrectionPipeline {
-    budget: RetryBudget,
     recipes: RecipeLog,
 }
 
@@ -48,18 +44,27 @@ pub enum Fix {
     /// Add an import statement to a file.
     AddImport(String),
     /// Replace a specific code snippet.
-    Replace { find: String, replace: String, file: String, line: u32 },
+    Replace {
+        find: String,
+        replace: String,
+        file: String,
+        line: u32,
+    },
     /// Apply a compiler suggestion verbatim.
     ApplySuggestion { file: String, suggestion: String },
     /// Insert code after a line.
-    InsertAfter { file: String, line: u32, code: String },
+    InsertAfter {
+        file: String,
+        line: u32,
+        code: String,
+    },
     /// No fix available — the bot must concede.
     None,
 }
 
 impl CorrectionPipeline {
-    pub fn new(budget: RetryBudget, recipes: RecipeLog) -> Self {
-        CorrectionPipeline { budget, recipes }
+    pub fn new(recipes: RecipeLog) -> Self {
+        CorrectionPipeline { recipes }
     }
 
     /// Try to correct a compile error. Returns whether the fix was applied.
@@ -81,8 +86,12 @@ impl CorrectionPipeline {
 
         // ── Phase 1: Classify the error ──
         // Grounded maps this to: "generate a candidate module from the deficiency"
-        log::debug!("Phase 1: Classifying error {} at {}:{}",
-            error.code, error.file, error.line);
+        log::debug!(
+            "Phase 1: Classifying error {} at {}:{}",
+            error.code,
+            error.file,
+            error.line
+        );
 
         let recipe = self.recipes.lookup(error);
 
@@ -143,7 +152,11 @@ impl CorrectionPipeline {
     /// from the KnowledgeStore, then resolves it into graph nodes.
     /// Here: the FixSynthesizer fetches a recipe from the RecipeLog,
     /// then applies it to the specific code location.
-    fn synthesize_fix(&self, error: &CompileError, recipe: Option<&super::recipes::FixRecipe>) -> Fix {
+    fn synthesize_fix(
+        &self,
+        error: &CompileError,
+        recipe: Option<&super::recipes::FixRecipe>,
+    ) -> Fix {
         // If we have a recipe, use it
         if let Some(r) = recipe {
             return self.recipe_to_fix(r, error);
@@ -164,24 +177,31 @@ impl CorrectionPipeline {
                 }
             }
             ErrorKind::TypeMismatch => {
-                // Try common conversions
-                if error.message.contains("expected `String`") && error.message.contains("found `&str`") {
-                    Fix::Replace {
-                        find: error.source_line.clone().unwrap_or_default(),
-                        replace: String::new(), // placeholder — writer handles
-                        file: error.file.clone(),
-                        line: error.line,
+                // Try common conversions: wrap a string literal so an
+                // `expected String, found &str` error resolves deterministically.
+                if error.message.contains("expected `String`")
+                    && error.message.contains("found `&str`")
+                {
+                    if let Some((find, replace)) =
+                        wrap_string_literal(&error.source_line.clone().unwrap_or_default())
+                    {
+                        Fix::Replace {
+                            find,
+                            replace,
+                            file: error.file.clone(),
+                            line: error.line,
+                        }
+                    } else {
+                        Fix::None
                     }
                 } else {
                     Fix::None
                 }
             }
-            ErrorKind::UnresolvedSymbol if error.suggestion.is_some() => {
-                Fix::ApplySuggestion {
-                    file: error.file.clone(),
-                    suggestion: error.suggestion.clone().unwrap(),
-                }
-            }
+            ErrorKind::UnresolvedSymbol if error.suggestion.is_some() => Fix::ApplySuggestion {
+                file: error.file.clone(),
+                suggestion: error.suggestion.clone().unwrap(),
+            },
             _ => Fix::None,
         }
     }
@@ -194,7 +214,10 @@ impl CorrectionPipeline {
                 } else {
                     suggestion.clone()
                 };
-                Fix::ApplySuggestion { file: error.file.clone(), suggestion: s }
+                Fix::ApplySuggestion {
+                    file: error.file.clone(),
+                    suggestion: s,
+                }
             }
             super::recipes::FixAction::AddImport { import } => {
                 let i = if import.is_empty() {
@@ -206,11 +229,19 @@ impl CorrectionPipeline {
                 Fix::AddImport(i)
             }
             super::recipes::FixAction::WrapConversion { method } => {
-                Fix::Replace {
-                    find: error.source_line.clone().unwrap_or_default(),
-                    replace: method.clone(),
-                    file: error.file.clone(),
-                    line: error.line,
+                // Wrap a literal on the offending line with the suggested method,
+                // e.g. `"a"` → `"a".to_string()` or `42` → `42 as f64`.
+                if let Some((find, replace)) =
+                    wrap_with_method(&error.source_line.clone().unwrap_or_default(), method)
+                {
+                    Fix::Replace {
+                        find,
+                        replace,
+                        file: error.file.clone(),
+                        line: error.line,
+                    }
+                } else {
+                    Fix::None
                 }
             }
             _ => Fix::None,
@@ -220,12 +251,12 @@ impl CorrectionPipeline {
 
 fn infer_import_from_error(error: &CompileError) -> String {
     // Extract the symbol name from "cannot find value `Foo` in this scope"
-    if let Some(start) = error.message.find("`") {
-        if let Some(end) = error.message[start + 1..].find("`") {
-            let symbol = &error.message[start + 1..start + 1 + end];
-            // Try common module paths
-            return format!("use {};", symbol);
-        }
+    if let Some(start) = error.message.find("`")
+        && let Some(end) = error.message[start + 1..].find("`")
+    {
+        let symbol = &error.message[start + 1..start + 1 + end];
+        // Try common module paths
+        return format!("use {};", symbol);
     }
     String::new()
 }
@@ -237,4 +268,42 @@ fn inferred_import(error: &CompileError) -> Fix {
     } else {
         Fix::AddImport(imp)
     }
+}
+
+/// Find the first double-quoted literal in a code line, returning both the
+/// literal text (including quotes) and its byte offset in the line.
+fn first_string_literal(line: &str) -> Option<(String, usize)> {
+    let start = line.find('"')?;
+    let end = line[start + 1..].find('"')?;
+    let literal = line[start..start + 1 + end].to_string();
+    Some((literal, start))
+}
+
+/// Wrap the first string literal so it converts to an owned `String`.
+fn wrap_string_literal(line: &str) -> Option<(String, String)> {
+    let (literal, _) = first_string_literal(line)?;
+    Some((literal.clone(), format!("String::from({})", literal)))
+}
+
+/// Wrap a literal on a line with a conversion method from a recipe, e.g.
+/// `"a"` → `"a".to_string()` or `42` → `42 as f64`.
+fn wrap_with_method(line: &str, method: &str) -> Option<(String, String)> {
+    let method = method.trim();
+    if method.is_empty() {
+        return None;
+    }
+
+    if let Some((literal, _)) = first_string_literal(line) {
+        let replacement = format!("{}{}", literal, method);
+        return Some((literal, replacement));
+    }
+
+    // Bare numeric literal fallback, e.g. `let x: f64 = 42;`
+    let num_re = regex::Regex::new(r"\b\d+(\.\d+)?\b").unwrap();
+    if let Some(m) = num_re.find(line) {
+        let numeric = m.as_str().to_string();
+        return Some((numeric.clone(), format!("{}{}", numeric, method)));
+    }
+
+    None
 }

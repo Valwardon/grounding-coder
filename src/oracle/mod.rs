@@ -1,6 +1,12 @@
 // Knowledge adapters for different sources
-use std::collections::HashMap;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
+use std::future::Future;
+use std::pin::Pin;
+
+pub mod android;
+pub mod github;
+pub mod rust;
+pub mod solana;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgeResult {
@@ -62,7 +68,7 @@ pub enum PatternType {
     Performance,
 }
 
-/// Main knowledge oracle trait
+/// Main knowledge oracle trait — dyn-safe (boxed future research).
 pub trait KnowledgeAdapter {
     /// Get the name of this oracle
     fn name(&self) -> &str;
@@ -73,8 +79,11 @@ pub trait KnowledgeAdapter {
     /// Get the language this oracle supports
     fn language(&self) -> &str;
 
-    /// Research a symbol from this oracle
-    async fn research(&self, symbol: &str) -> Option<KnowledgeResult>;
+    /// Research a symbol from this oracle.
+    fn research<'a>(
+        &'a self,
+        symbol: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Option<KnowledgeResult>> + Send + 'a>>;
 
     /// Check if this oracle can handle the symbol
     fn can_handle(&self, symbol: &str) -> bool;
@@ -83,6 +92,12 @@ pub trait KnowledgeAdapter {
 /// Generic knowledge oracle implementation
 pub struct KnowledgeOracle {
     adapters: Vec<Box<dyn KnowledgeAdapter>>,
+}
+
+impl Default for KnowledgeOracle {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl KnowledgeOracle {
@@ -99,10 +114,10 @@ impl KnowledgeOracle {
     /// Research a symbol from all available adapters
     pub async fn research(&mut self, symbol: &str, language: &str) -> Option<KnowledgeResult> {
         for adapter in &self.adapters {
-            if adapter.language() == language || adapter.language() == "multi" {
-                if let Some(result) = adapter.research(symbol).await {
-                    return Some(result);
-                }
+            if (adapter.language() == language || adapter.language() == "multi")
+                && let Some(result) = adapter.research(symbol).await
+            {
+                return Some(result);
             }
         }
         None

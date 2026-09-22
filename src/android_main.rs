@@ -1,9 +1,13 @@
-/// This file is included by lib.rs when compiling for Android with the "ui" feature.
-/// It provides the `main` function that dioxus's mobile module looks up via dlsym
-/// to bootstrap the Dioxus application on Android.
+// Android/iOS mobile entry point (bin target "android_main", requires "ui").
+//
+// Dioxus's mobile runtime bootstrap for the `grounding-coder` app on Android.
+// This binary is defined in Cargo.toml as `android_main` and is only compiled
+// when the `ui` feature is enabled, so a plain `cargo build` is unaffected.
 
-use dioxus::prelude::*;
+// Dioxus's mobile runtime bootstrap for the `grounding-coder` app on Android.
+// This binary is defined in Cargo.toml as `android_main` and is only compiled
+// when the `ui` feature is enabled, so a plain `cargo build` is unaffected.
 
 fn main() {
-    dioxus::launch(crate::components::App);
+    dioxus::launch(grounding_coder::components::App);
 }

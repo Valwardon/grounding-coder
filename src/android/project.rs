@@ -1,6 +1,5 @@
 // Android project workspace and manifest management
-use std::collections::HashMap;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectManifest {
@@ -36,19 +35,18 @@ pub struct RuntimeInfo {
 pub fn load_project_manifest(project_path: &str) -> Option<ProjectManifest> {
     let manifest_path = format!("{}/project_manifest.json", project_path);
     match std::fs::read_to_string(&manifest_path) {
-        Ok(content) => {
-            match serde_json::from_str(&content) {
-                Ok(manifest) => Some(manifest),
-                Err(e) => {
-                    log::warn!("Failed to parse manifest: {}", e);
-                    None
-                }
+        Ok(content) => match serde_json::from_str(&content) {
+            Ok(manifest) => Some(manifest),
+            Err(e) => {
+                log::warn!("Failed to parse manifest: {}", e);
+                None
             }
-        }
+        },
         Err(_) => None,
     }
 }
 
+#[allow(clippy::too_many_arguments)] // a manifest carries all of these by design
 pub fn create_project_manifest(
     project_path: &str,
     platform: &str,
@@ -100,8 +98,13 @@ pub fn validate_project_manifest(manifest: &ProjectManifest) -> bool {
         return false;
     }
 
-    if manifest.project.architecture != "native" && manifest.project.architecture != "cross-platform" {
-        log::warn!("Unsupported architecture: {}", manifest.project.architecture);
+    if manifest.project.architecture != "native"
+        && manifest.project.architecture != "cross-platform"
+    {
+        log::warn!(
+            "Unsupported architecture: {}",
+            manifest.project.architecture
+        );
         return false;
     }
 
@@ -127,7 +130,7 @@ pub fn has_valid_project(project_path: &str) -> bool {
 
 pub fn initialize_android_project(project_path: &str) -> Result<(), String> {
     let runtime = crate::android::runtime::initialize_android_runtime();
-    let capabilities = crate::android::capabilities::get_android_capabilities()
+    let capabilities = crate::android::runtime::get_android_capabilities()
         .iter()
         .filter(|c| c.available)
         .map(|c| c.name.clone())

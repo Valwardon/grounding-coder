@@ -43,12 +43,24 @@ cargo run --bin gc -- recipes         # List fix recipes
 ```
 
 ### Android APK
+Built from the Gradle project in `android/`, producing `dist/grounding-coder.apk`.
 ```bash
-dx build --platform android --release --features ui
-# APK: target/dx/gc/release/android/app/app/build/outputs/apk/debug/app-debug.apk
+cargo build --release --target aarch64-linux-android --features ui --lib
+cp target/aarch64-linux-android/release/libgrounding_coder.so android/app/src/main/jniLibs/arm64-v8a/
+gradle -p android :app:assembleDebug
+cp android/app/build/outputs/apk/debug/app-debug.apk dist/grounding-coder.apk
+```
+Output: `dist/grounding-coder.apk` (~7.0 MB, arm64-v8a, debug-signed).
+
+## Quality Gates
+```bash
+cargo check --all-features
+cargo clippy --all-targets --all-features   # zero warnings
+cargo fmt --check
+cargo test --all-features
 ```
 
 ## Deliverables
 - GitHub: https://github.com/Valwardon/grounding-coder
 - Release: https://github.com/Valwardon/grounding-coder/releases/tag/v0.2.0 (updated)
-- APK: `app-debug.apk` (9.7MB) uploaded to release
+- APK: `grounding-coder.apk` (arm64) uploaded to release

@@ -55,14 +55,40 @@ impl LlmClient {
     /// Send a natural language prompt and receive a structured intent.
     /// NEVER writes code — only translates NL → intent JSON.
     pub async fn translate(&self, prompt: &str) -> Result<StructuredIntent, String> {
-        let system = "You translate natural language into a structured JSON intent.\
-                      You are an unverified layer ONLY. Do NOT write code.\
-                      Output a JSON object with fields: goal, file, language, actions, references, define, imports, test.\
-                      Every symbol in 'references' must be fully qualified (e.g. android.widget.Button).";
+        let system = concat!(
+            "You translate natural language into a structured JSON intent. ",
+            "You are an unverified layer ONLY. Do NOT write code. ",
+            "Output ONLY a JSON object (no markdown fences). ",
+            "Required fields and types:\n",
+            "- goal: string (what the human wants)\n",
+            "- file: string (target file path relative to project root)\n",
+            "- language: \"kotlin\" | \"rust\" | etc.\n",
+            "- actions: array of { action: string, params: object }\n",
+            "- references: array of strings — every symbol fully qualified (e.g. android.widget.Button, solenoid::Part)\n",
+            "- define: null or { name: string, kind: string, code: string, references: [string] }\n",
+            "- imports: array of strings\n",
+            "- test: null or { name: string, assertions: [string], code: string }\n",
+            "- platform: \"android\" | \"desktop\" | \"web\"\n",
+            "- architecture: \"native\" | \"cross-platform\" | \"hybrid\"\n",
+            "- runtime: null or { min_sdk?: number, target_sdk?: number, package?: string, api_constraints: [string] }\n",
+            "- capabilities: array of strings (network, filesystem, background execution, ...)\n",
+            "- domains: array of strings\n",
+            "- constraints: array of strings\n",
+            "- dependencies: array of strings\n",
+            "- unknown_requirements: array of strings\n",
+            "- confidence: number (0.0-1.0)\n"
+        );
 
-        let resp = self.client
+        let resp = self
+            .client
             .post(format!("{}/chat/completions", self.config.base_url))
-            .header("Authorization", format!("Bearer {}", self.config.openrouter_key.as_deref().unwrap_or("")))
+            .header(
+                "Authorization",
+                format!(
+                    "Bearer {}",
+                    self.config.openrouter_key.as_deref().unwrap_or("")
+                ),
+            )
             .json(&serde_json::json!({
                 "model": &self.config.model,
                 "messages": [
@@ -74,13 +100,32 @@ impl LlmClient {
             .await
             .map_err(|e| format!("HTTP error: {}", e))?;
 
-        let body: serde_json::Value = resp.json().await.map_err(|e| format!("Parse error: {}", e))?;
-        let content = body["choices"][0]["message"]["content"].as_str()
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("Parse error: {}", e))?;
+        let content = body["choices"][0]["message"]["content"]
+            .as_str()
             .ok_or("No content in response")?;
 
-        serde_json::from_str::<StructuredIntent>(content)
+        let cleaned = strip_json_fences(content);
+        serde_json::from_str::<StructuredIntent>(&cleaned)
             .map_err(|e| format!("Intent parse error: {}", e))
     }
+}
+
+/// Strip markdown code fences (```json ... ```) around the LLM's JSON reply.
+/// LLMs routinely wrap JSON in fences; serde cannot parse those directly.
+fn strip_json_fences(content: &str) -> String {
+    let trimmed = content.trim();
+    let inner = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```JSON"))
+        .or_else(|| trimmed.strip_prefix("```"))
+        .and_then(|rest| rest.strip_suffix("```"))
+        .map(str::trim)
+        .unwrap_or(trimmed);
+    inner.to_string()
 }
 
 /// Check if an API key is configured.
@@ -91,7 +136,12 @@ pub fn has_api_key(config: &ApiConfig) -> bool {
 /// Get the config file path for the current platform.
 pub fn config_path() -> Result<String, String> {
     dirs::config_dir()
-        .map(|p| p.join("grounding-coder").join("config.json").to_string_lossy().to_string())
+        .map(|p| {
+            p.join("grounding-coder")
+                .join("config.json")
+                .to_string_lossy()
+                .to_string()
+        })
         .ok_or_else(|| "Cannot determine config directory".to_string())
 }
 
@@ -102,7 +152,8 @@ pub fn load_config_default() -> ApiConfig {
 
 /// Save config to file (e.g., for settings panel).
 pub fn save_config(config: &ApiConfig, path: &str) -> Result<(), String> {
-    let json = serde_json::to_string_pretty(config).map_err(|e| format!("Serialize error: {}", e))?;
+    let json =
+        serde_json::to_string_pretty(config).map_err(|e| format!("Serialize error: {}", e))?;
     std::fs::write(path, json).map_err(|e| format!("Write error: {}", e))?;
     Ok(())
 }

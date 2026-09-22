@@ -17,10 +17,10 @@ const NAV_ITEMS: &[(&str, &str, Screen)] = &[
 
 #[component]
 pub fn App() -> Element {
-    document::Stylesheet { href: asset!("/assets/main.css") }
     let mut tab = use_signal(|| Screen::Chat);
 
     rsx! {
+        document::Stylesheet { href: asset!("/assets/main.css") }
         div { class: "app",
             div { class: "content",
                 match tab() {
@@ -33,8 +33,7 @@ pub fn App() -> Element {
             nav { class: "bottom-nav",
                 for (icon, label, screen) in NAV_ITEMS.iter() {
                     button {
-                        class: "nav-btn",
-                        class: if tab() == *screen { "nav-btn active" },
+                        class: if tab() == *screen { "nav-btn active" } else { "nav-btn" },
                         onclick: move |_| tab.set(*screen),
                         span { class: "nav-icon", "{icon}" }
                         span { class: "nav-label", "{label}" }
