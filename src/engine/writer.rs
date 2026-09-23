@@ -816,6 +816,7 @@ impl CodeWriter {
         // creates them (snapshot/rollback cover creation), while other
         // planners fail honestly when the file cannot be read.
         if let Some(target) = task.target_symbols.first() {
+            let target = target.strip_prefix("./").unwrap_or(target);
             let rel = Path::new(target);
             let safe = !rel.is_absolute()
                 && !rel

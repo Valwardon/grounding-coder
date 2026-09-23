@@ -62,7 +62,9 @@ async fn request(
     match tokio::time::timeout(timeout, RUNTIME.spawn(work)).await {
         Ok(Ok(r)) => r,
         Ok(Err(e)) => Err(format!("HTTP task failed: {}", e)),
-        Err(_) => Err("HTTP timeout".to_string()),
+        Err(_) => {
+            Err("LLM timed out queuing (free-tier models are slow) — try Send again.".to_string())
+        }
     }
 }
 
@@ -85,7 +87,9 @@ pub async fn post_json(
     let req = builder
         .body(Full::new(Bytes::from(bytes)))
         .map_err(|e| format!("Request build error: {}", e))?;
-    let (status, raw) = request(req, Duration::from_secs(90)).await?;
+    // Free-tier reasoning models can queue for minutes: bounded, but
+    // generous. A timeout still surfaces as text, never a hang.
+    let (status, raw) = request(req, Duration::from_secs(300)).await?;
     if !(200..300).contains(&status) {
         return Err(format!(
             "HTTP {}: {}",

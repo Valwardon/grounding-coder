@@ -7,12 +7,16 @@ use dioxus::prelude::*;
 /// Chat tab: natural language in, verified engine result out.
 /// Uses the project path + budget from Settings; reports changed files
 /// back through `on_done` so the Code tab can highlight them.
+/// History/input/working live in App state (props) so tab switches never
+/// wipe the conversation.
 #[component]
-pub fn Chat(settings: Signal<ApiConfig>, on_done: EventHandler<Vec<String>>) -> Element {
-    let mut input = use_signal(String::new);
-    let mut history = use_signal(Vec::<(String, bool)>::new);
-    let mut working = use_signal(|| false);
-
+pub fn Chat(
+    settings: Signal<ApiConfig>,
+    mut history: Signal<Vec<(String, bool)>>,
+    mut input: Signal<String>,
+    mut working: Signal<bool>,
+    on_done: EventHandler<Vec<String>>,
+) -> Element {
     rsx! {
         div { class: "screen",
             div { class: "screen-header",

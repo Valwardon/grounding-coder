@@ -200,16 +200,24 @@ fn normalize_intent(v: &serde_json::Value, prompt: &str) -> StructuredIntent {
     references.sort();
     references.dedup();
 
+    // Webpage requests: free models almost never emit page structure, so
+    // detect from the prompt. Content slots carry the user's own words
+    // verbatim — the engine escapes and verifies them, never invents copy.
+    let page = detect_page_request(&lower, prompt, v);
+
     // Target file: explicit field wins, else scan for src/... in output+prompt.
     let mut file: Option<String> = v
         .get("file")
         .and_then(|x| x.as_str())
-        .map(|s| s.to_string());
+        .map(|s| s.trim_start_matches("./").to_string());
     if file.is_none() {
         file = texts.iter().find_map(|t| scan_src_file(t));
     }
     if file.is_none() && (!imports.is_empty() || lower.contains("src/lib")) {
         file = Some("src/lib.rs".to_string());
+    }
+    if file.is_none() && page.is_some() {
+        file = Some("index.html".to_string());
     }
 
     let language = v
@@ -221,6 +229,12 @@ fn normalize_intent(v: &serde_json::Value, prompt: &str) -> StructuredIntent {
                 Some("rust".to_string())
             } else if file.as_deref().is_some_and(|f| f.ends_with(".kt")) {
                 Some("kotlin".to_string())
+            } else if file
+                .as_deref()
+                .is_some_and(|f| f.ends_with(".html") || f.ends_with(".htm"))
+                || page.is_some()
+            {
+                Some("html".to_string())
             } else {
                 None
             }
@@ -231,6 +245,29 @@ fn normalize_intent(v: &serde_json::Value, prompt: &str) -> StructuredIntent {
         .and_then(|x| x.as_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| prompt.to_string());
+
+    let define = match &page {
+        Some(p) => vec![Some(crate::engine::IntentDefinition {
+            name: "homepage".to_string(),
+            kind: "page".to_string(),
+            references: Vec::new(),
+            signature: None,
+            cases: Vec::new(),
+            fields: Vec::new(),
+            methods: Vec::new(),
+            title: Some(p.0.clone()),
+            sections: p
+                .1
+                .iter()
+                .map(|(h, b)| crate::engine::SectionDef {
+                    heading: h.clone(),
+                    body: b.clone(),
+                })
+                .collect(),
+            footer: Some(p.2.clone()),
+        })],
+        None => Vec::new(),
+    };
 
     StructuredIntent {
         platform: v
@@ -248,7 +285,7 @@ fn normalize_intent(v: &serde_json::Value, prompt: &str) -> StructuredIntent {
         domains: Default::default(),
         constraints: Default::default(),
         dependencies: Default::default(),
-        unknown_requirements: if imports.is_empty() {
+        unknown_requirements: if imports.is_empty() && page.is_none() {
             vec![format!("unresolved request: {}", truncate(prompt, 160))]
         } else {
             Vec::new()
@@ -259,9 +296,101 @@ fn normalize_intent(v: &serde_json::Value, prompt: &str) -> StructuredIntent {
         imports,
         confidence: 0.5,
         actions: Vec::new(),
-        define: Vec::new(),
+        define,
         test: Vec::new(),
         references,
+    }
+}
+
+/// Detected page content: title, (heading, body) sections, footer.
+type PageContent = (String, Vec<(String, String)>, String);
+
+/// Detect a webpage request in the prompt.
+/// Sections prefer model-provided structure when present; otherwise one
+/// Welcome section carries the prompt verbatim (user's words, escaped and
+/// verified downstream — never model-invented copy).
+fn detect_page_request(lower: &str, prompt: &str, v: &serde_json::Value) -> Option<PageContent> {
+    const TRIGGERS: &[&str] = &[
+        "html",
+        "website",
+        "webpage",
+        "homepage",
+        "landing page",
+        "web site",
+        "web page",
+    ];
+    if !TRIGGERS.iter().any(|t| lower.contains(t)) {
+        return None;
+    }
+    // Model-provided sections win when well-formed.
+    let mut sections: Vec<(String, String)> = v
+        .get("sections")
+        .and_then(|x| x.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| {
+                    Some((
+                        s.get("heading")?.as_str()?.to_string(),
+                        s.get("body")?.as_str()?.to_string(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if sections.is_empty() {
+        sections.push((
+            "Welcome".to_string(),
+            prompt.trim().chars().take(200).collect(),
+        ));
+    }
+    let footer = v
+        .get("footer")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    Some((page_title(lower, prompt), sections, footer))
+}
+
+/// Title from "for X" / "about X", else the prompt's own lead words.
+/// Word-based matching (ASCII case-insensitive): no byte offsets cross
+/// case mappings, so Unicode prompts can never misindex.
+fn page_title(_lower: &str, prompt: &str) -> String {
+    let words: Vec<&str> = prompt.split_whitespace().collect();
+    for (i, w) in words.iter().enumerate() {
+        if w.eq_ignore_ascii_case("for") || w.eq_ignore_ascii_case("about") {
+            let tail: Vec<&str> = words
+                .iter()
+                .skip(i + 1)
+                .filter(|w| !["a", "an", "the"].contains(&w.to_lowercase().as_str()))
+                .take(6)
+                .cloned()
+                .collect();
+            if !tail.is_empty() {
+                let title = tail
+                    .join(" ")
+                    .trim_end_matches(['.', ',', '!', '?'])
+                    .to_string();
+                return capitalize_first(&title);
+            }
+        }
+    }
+    // Fall back: strip leading verbs, keep the lead.
+    let skip = [
+        "build", "create", "make", "write", "generate", "a", "an", "the", "simple", "new",
+    ];
+    let words: Vec<&str> = prompt
+        .split_whitespace()
+        .filter(|w| !skip.contains(&w.to_lowercase().as_str()))
+        .take(6)
+        .collect();
+    capitalize_first(&words.join(" "))
+}
+
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+        None => "Homepage".to_string(),
     }
 }
 
@@ -526,6 +655,33 @@ mod tests {
             intent
                 .imports
                 .contains(&"std::collections::HashMap".to_string())
+        );
+    }
+
+    /// The reported on-device failure: a free model returns prose with no
+    /// structure for a dentist homepage. The translator must still produce
+    /// a page definition the engine can prove — never a stub dead-end.
+    #[test]
+    fn dentist_prompt_without_structure_still_routes_to_page() {
+        let v = serde_json::json!({"status": "needs_more_info", "message": "which framework?"});
+        let intent = normalize_intent(&v, "Build a simple HTML website for a dentist");
+        assert_eq!(intent.file.as_deref(), Some("index.html"));
+        assert_eq!(intent.language.as_deref(), Some("html"));
+        assert_eq!(intent.define.len(), 1);
+        let def = intent.define[0].as_ref().expect("page define");
+        assert_eq!(def.kind, "page");
+        assert!(def.title.as_deref().unwrap_or("").contains("Dentist"));
+        assert!(!def.sections.is_empty());
+    }
+
+    #[test]
+    fn page_title_prefers_for_object() {
+        assert_eq!(
+            page_title(
+                "build a homepage for bright smile dental",
+                "Build a homepage for Bright Smile Dental"
+            ),
+            "Bright Smile Dental"
         );
     }
 }

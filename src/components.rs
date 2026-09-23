@@ -16,11 +16,14 @@ const NAV_ITEMS: &[(&str, &str, Screen)] = &[
 #[component]
 pub fn App() -> Element {
     let mut tab = use_signal(|| Screen::Chat);
-    // Shared app state: settings persist to disk; last_changes + refresh
-    // let the Chat tab tell the Code tab what just landed on disk.
+    // Shared app state lives here so tab switches never destroy it:
+    // unmounting Chat used to wipe history + input + working flag.
     let settings = use_signal(crate::llm::load_config_default);
     let mut last_changes = use_signal(Vec::<String>::new);
     let mut refresh = use_signal(|| 0u64);
+    let history = use_signal(Vec::<(String, bool)>::new);
+    let input = use_signal(String::new);
+    let working = use_signal(|| false);
 
     // Theme is inlined at compile time: the Gradle build does not run the
     // manganis asset pipeline, so a linked stylesheet 404s on-device and
@@ -33,6 +36,9 @@ pub fn App() -> Element {
                     Screen::Chat => rsx! {
                         crate::screens::Chat {
                             settings,
+                            history,
+                            input,
+                            working,
                             on_done: move |files: Vec<String>| {
                                 last_changes.set(files);
                                 refresh += 1;
