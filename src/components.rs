@@ -24,6 +24,10 @@ pub fn App() -> Element {
     let history = use_signal(Vec::<(String, bool)>::new);
     let input = use_signal(String::new);
     let working = use_signal(|| false);
+    // Live engine trail: thread-safe storage so engine callbacks can push
+    // from any thread. Survives tab switches like the rest of Chat state.
+    let progress: dioxus::signals::Signal<Vec<String>, dioxus::signals::SyncStorage> =
+        dioxus::hooks::use_signal_sync(Vec::<String>::new);
 
     // Theme is inlined at compile time: the Gradle build does not run the
     // manganis asset pipeline, so a linked stylesheet 404s on-device and
@@ -39,6 +43,7 @@ pub fn App() -> Element {
                             history,
                             input,
                             working,
+                            progress,
                             on_done: move |files: Vec<String>| {
                                 last_changes.set(files);
                                 refresh += 1;

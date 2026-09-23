@@ -57,6 +57,9 @@ fn main() {
                         let intent_json =
                             serde_json::to_string(&intent).expect("intent should serialize");
                         let mut bot = CodeBot::new(&project, budget);
+                        bot.set_progress_listener(std::sync::Arc::new(|ev| {
+                            eprintln!("[progress] {}", ev)
+                        }));
                         match bot.run_task(&intent_json).await {
                             Ok(result) => println!("{}", result),
                             Err(e) => {

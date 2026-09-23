@@ -54,6 +54,8 @@ pub struct CodeBot {
     /// The bot's "curiosity harvester" repurposed: it can discover new symbols
     /// from authoritative sources, verify them with the compiler, and cache them.
     researcher: ResearchOracle,
+    /// Live progress sink (chat UI, CLI). `None` = silent.
+    progress: Option<ProgressCallback>,
 }
 
 /// Result of a completed coding task.
@@ -246,6 +248,41 @@ fn capitalize_page_title(s: &str) -> String {
     }
 }
 
+/// One step of the run, pushed live to whoever is watching (chat UI,
+/// CLI stderr). This is the feedback loop: a silent worker is
+/// indistinguishable from a dead one, so the engine narrates itself.
+#[derive(Debug, Clone)]
+pub enum ProgressEvent {
+    /// A task started: id, description, kind.
+    Task { id: u64, desc: String, kind: String },
+    /// A pipeline stage within a task: planned/applied/verify/repair/...
+    Stage {
+        id: u64,
+        stage: &'static str,
+        detail: String,
+    },
+}
+
+/// Push-based progress sink. `None` (default) = silent, for tests.
+pub type ProgressCallback = std::sync::Arc<dyn Fn(ProgressEvent) + Send + Sync>;
+
+impl std::fmt::Display for ProgressEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProgressEvent::Task { id, desc, kind } => {
+                write!(f, "▸ task {} [{}] {}", id, kind, desc)
+            }
+            ProgressEvent::Stage { id, stage, detail } => {
+                if detail.is_empty() {
+                    write!(f, "  [{}] {}", id, stage)
+                } else {
+                    write!(f, "  [{}] {} — {}", id, stage, detail)
+                }
+            }
+        }
+    }
+}
+
 /// A terminal honest refusal with one diagnostic.
 fn blocked_outcome(reason: BlockReason, code: &str, message: String) -> AgentOutcome {
     AgentOutcome::Blocked {
@@ -287,11 +324,23 @@ impl CodeBot {
             decomposer,
             writer,
             researcher,
+            progress: None,
         };
 
         // Bootstrap: scan the project and build the code symbol graph.
         bot.bootstrap();
         bot
+    }
+
+    /// Attach a live progress listener (chat UI, CLI stderr).
+    pub fn set_progress_listener(&mut self, cb: ProgressCallback) {
+        self.progress = Some(cb);
+    }
+
+    fn emit(&self, ev: ProgressEvent) {
+        if let Some(cb) = &self.progress {
+            cb(ev);
+        }
     }
 
     /// Scan the project's source files and populate the CodeArena
@@ -396,8 +445,18 @@ impl CodeBot {
                     "RESULT\n  SKIPPED research task {}\n  reason=already_attempted_in_step_0",
                     task.id
                 );
+                self.emit(ProgressEvent::Stage {
+                    id: task.id,
+                    stage: "skipped",
+                    detail: "research already attempted".to_string(),
+                });
                 continue;
             }
+            self.emit(ProgressEvent::Task {
+                id: task.id,
+                desc: task.description.clone(),
+                kind: task.kind.to_string(),
+            });
             active.push(task);
         }
 
@@ -418,6 +477,11 @@ impl CodeBot {
                             .flat_map(|p| p.edits.iter().map(|e| e.file.clone()))
                             .collect(),
                         Err(e) => {
+                            self.emit(ProgressEvent::Stage {
+                                id: task.id,
+                                stage: "plan-blocked",
+                                detail: e.clone(),
+                            });
                             return Ok(blocked_outcome(
                                 BlockReason::NoVerifiedPattern,
                                 "SYNTH_ERROR",
@@ -429,6 +493,11 @@ impl CodeBot {
                     match self.writer.plan(task, &self.symbol_table) {
                         Ok(plan) => plan.edits.iter().map(|e| e.file.clone()).collect(),
                         Err(e) => {
+                            self.emit(ProgressEvent::Stage {
+                                id: task.id,
+                                stage: "plan-blocked",
+                                detail: e.clone(),
+                            });
                             return Ok(blocked_outcome(
                                 BlockReason::NoVerifiedPattern,
                                 "PLAN_ERROR",
@@ -498,6 +567,11 @@ impl CodeBot {
                 Ok(p) => p,
                 Err(e) => {
                     let _ = self.writer.rollback(&global);
+                    self.emit(ProgressEvent::Stage {
+                        id: task.id,
+                        stage: "plan-blocked",
+                        detail: e.clone(),
+                    });
                     return Ok(blocked_outcome(
                         BlockReason::NoVerifiedPattern,
                         "PLAN_ERROR",
@@ -505,6 +579,19 @@ impl CodeBot {
                     ));
                 }
             };
+            self.emit(ProgressEvent::Stage {
+                id: task.id,
+                stage: "planned",
+                detail: format!(
+                    "{} edits · {}",
+                    plan.edits.len(),
+                    plan.edits
+                        .iter()
+                        .map(|e| e.file.to_string_lossy().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            });
 
             // 3. Apply: apply ONLY the precise edits from the plan
             let files = match self.writer.apply_plan(&plan) {
@@ -512,11 +599,21 @@ impl CodeBot {
                 Err(e) => {
                     // Rollback everything on failure
                     let _ = self.writer.rollback(&global);
+                    self.emit(ProgressEvent::Stage {
+                        id: task.id,
+                        stage: "apply-failed",
+                        detail: e.clone(),
+                    });
                     return Ok(AgentOutcome::Failed {
                         reason: format!("Failed to apply plan: {}", e),
                     });
                 }
             };
+            self.emit(ProgressEvent::Stage {
+                id: task.id,
+                stage: "applied",
+                detail: files.join(", "),
+            });
 
             // 4. Verify: run the compiler/tests
             let verdict = self.verifier.verify().await;
@@ -526,12 +623,26 @@ impl CodeBot {
                 verdict.errors.len(),
                 verdict.warnings.len()
             );
+            self.emit(ProgressEvent::Stage {
+                id: task.id,
+                stage: "verify",
+                detail: if verdict.is_clean() {
+                    "clean".to_string()
+                } else {
+                    format!("{} errors", verdict.errors.len())
+                },
+            });
 
             if verdict.is_clean() {
                 // 5a. Commit: changes are clean, commit the transaction
                 self.writer.commit(&global)?;
                 changes.extend(files.clone());
                 log::info!("RESULT\n  SUCCESS\n  files={:?}", files);
+                self.emit(ProgressEvent::Stage {
+                    id: task.id,
+                    stage: "committed",
+                    detail: String::new(),
+                });
                 continue;
             }
 
@@ -543,6 +654,11 @@ impl CodeBot {
             loop {
                 let mut any_fixed = false;
                 for error in &verdict.errors {
+                    self.emit(ProgressEvent::Stage {
+                        id: task.id,
+                        stage: "repair",
+                        detail: format!("{} {}:{}", error.code, error.file, error.line),
+                    });
                     let correction =
                         self.corrector
                             .try_correct(error, &self.arena.read(), &self.writer);
@@ -558,6 +674,11 @@ impl CodeBot {
                         // no unproven bytes remain, then report honestly
                         // instead of guessing.
                         let _ = self.writer.rollback(&global);
+                        self.emit(ProgressEvent::Stage {
+                            id: task.id,
+                            stage: "repair-blocked",
+                            detail: error.code.clone(),
+                        });
                         return Ok(AgentOutcome::Blocked {
                             reason: BlockReason::NoSafeFix,
                             diagnostics: vec![error.clone()],
@@ -570,6 +691,11 @@ impl CodeBot {
                 if !self.budget.consume(1.0, 0.0, 0.0) {
                     // Rollback before returning - budget exhausted
                     let _ = self.writer.rollback(&global);
+                    self.emit(ProgressEvent::Stage {
+                        id: task.id,
+                        stage: "budget-exhausted",
+                        detail: format!("{} attempts", attempts),
+                    });
                     return Ok(AgentOutcome::Blocked {
                         reason: BlockReason::NoSafeFix,
                         diagnostics: vec![CompileError {
@@ -632,6 +758,11 @@ impl CodeBot {
         let mut last_errors = Vec::new();
         for (i, plan) in plans.iter().enumerate() {
             log::info!("SYNTH candidate {}/{}", i + 1, plans.len());
+            self.emit(ProgressEvent::Stage {
+                id: plan.task_id,
+                stage: "synth-candidate",
+                detail: format!("{}/{}", i + 1, plans.len()),
+            });
             let snapshot = self.writer.snapshot(plan)?;
             match self.writer.apply_plan(plan) {
                 Ok(files) => {
@@ -642,9 +773,23 @@ impl CodeBot {
                         verdict.is_clean(),
                         verdict.errors.len()
                     );
+                    self.emit(ProgressEvent::Stage {
+                        id: plan.task_id,
+                        stage: "verify",
+                        detail: if verdict.is_clean() {
+                            format!("candidate {} clean", i + 1)
+                        } else {
+                            format!("candidate {}: {} errors", i + 1, verdict.errors.len())
+                        },
+                    });
                     if verdict.is_clean() {
                         self.writer.commit(&snapshot)?;
                         log::info!("RESULT\n  SUCCESS candidate {}", i + 1);
+                        self.emit(ProgressEvent::Stage {
+                            id: plan.task_id,
+                            stage: "committed",
+                            detail: format!("candidate {}/{}", i + 1, plans.len()),
+                        });
                         return Ok(AgentOutcome::Success(TaskResult {
                             success: true,
                             changes: files,

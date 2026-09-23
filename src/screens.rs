@@ -15,6 +15,7 @@ pub fn Chat(
     mut history: Signal<Vec<(String, bool)>>,
     mut input: Signal<String>,
     mut working: Signal<bool>,
+    progress: dioxus::signals::Signal<Vec<String>, dioxus::signals::SyncStorage>,
     on_done: EventHandler<Vec<String>>,
 ) -> Element {
     rsx! {
@@ -36,7 +37,14 @@ pub fn Chat(
                     }
                 }
                 if working() {
-                    div { class: "chat-bubble bot", "Working… (deterministic engine running)" }
+                    // Live feedback loop: the latest engine stage, not a
+                    // generic spinner. If this stops changing, THAT is where
+                    // it is stuck.
+                    if let Some(line) = progress().last() {
+                        div { class: "chat-bubble bot progress", "⏳ {line}" }
+                    } else {
+                        div { class: "chat-bubble bot", "Working… (contacting translator)" }
+                    }
                 }
             }
             div { class: "chat-input-row",
@@ -56,12 +64,32 @@ pub fn Chat(
                             return;
                         }
                         working.set(true);
+                        progress.write().clear();
                         history.write().push((prompt.clone(), true));
                         input.set(String::new());
                         spawn(async move {
-                            let (text, changed) = run_task_deterministic(&prompt, &cfg).await;
-                            history.write().push((text, false));
+                            notify_work_start().await;
+                            // Mutex around the sync signal: the engine may
+                            // call back from any thread, and `write` needs
+                            // exclusive access either way.
+                            let feed = std::sync::Arc::new(std::sync::Mutex::new(progress));
+                            let progress_cb: crate::engine::ProgressCallback =
+                                std::sync::Arc::new(move |ev: crate::engine::ProgressEvent| {
+                                    if let Ok(mut guard) = feed.lock() {
+                                        guard.write().push(ev.to_string());
+                                    }
+                                });
+                            let (text, changed) =
+                                run_task_deterministic(&prompt, &cfg, Some(progress_cb)).await;
+                            let trail = progress();
+                            let full = if trail.is_empty() {
+                                text
+                            } else {
+                                format!("{}\n\n— trail —\n{}", text, trail.join("\n"))
+                            };
+                            history.write().push((full, false));
                             working.set(false);
+                            notify_work_stop().await;
                             on_done.call(changed);
                         });
                     },
@@ -70,6 +98,27 @@ pub fn Chat(
             }
         }
     }
+}
+
+/// Tell the Android shell a job started/finished so it can hold a
+/// foreground service while work runs. No-ops everywhere the bridge is
+/// absent (desktop, tests): pure best-effort, never load-bearing.
+async fn notify_work_start() {
+    eval_bridge("if(window.Grounding){Grounding.startWork()}").await;
+}
+
+async fn notify_work_stop() {
+    eval_bridge("if(window.Grounding){Grounding.stopWork()}").await;
+}
+
+async fn eval_bridge(script: &'static str) {
+    // Await the JS evaluation inside panic armor: outside a document
+    // context (tests, desktop edge cases) this must degrade to silent,
+    // never to death. Fire-and-forget by design.
+    let fut = async move {
+        let _ = dioxus::document::eval(script).await;
+    };
+    let _ = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(fut)).await;
 }
 
 /// The deterministic path: LLM → intent JSON → engine.
@@ -122,7 +171,11 @@ pub fn config_summary(cfg: &ApiConfig) -> String {
 /// and the whole pipeline runs under panic recovery — on Android a Rust
 /// panic aborts the process with no message, so a panic must become chat
 /// text instead of death.
-async fn run_task_deterministic(prompt: &str, cfg: &ApiConfig) -> (String, Vec<String>) {
+async fn run_task_deterministic(
+    prompt: &str,
+    cfg: &ApiConfig,
+    progress: Option<crate::engine::ProgressCallback>,
+) -> (String, Vec<String>) {
     if cfg.openrouter_key.is_none() {
         return (
             "ERROR: OpenRouter API key not set. Open Settings.".to_string(),
@@ -152,7 +205,7 @@ async fn run_task_deterministic(prompt: &str, cfg: &ApiConfig) -> (String, Vec<S
     }
     install_panic_hook();
     let fut = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(run_task_inner(
-        prompt, cfg,
+        prompt, cfg, progress,
     )));
     match fut.await {
         Ok(result) => result,
@@ -171,7 +224,11 @@ async fn run_task_deterministic(prompt: &str, cfg: &ApiConfig) -> (String, Vec<S
     }
 }
 
-async fn run_task_inner(prompt: &str, cfg: &ApiConfig) -> (String, Vec<String>) {
+async fn run_task_inner(
+    prompt: &str,
+    cfg: &ApiConfig,
+    progress: Option<crate::engine::ProgressCallback>,
+) -> (String, Vec<String>) {
     let llm_client = crate::llm::LlmClient::new(cfg.clone());
     match llm_client.translate(prompt).await {
         Ok(intent) => match serde_json::to_string(&intent) {
@@ -180,6 +237,9 @@ async fn run_task_inner(prompt: &str, cfg: &ApiConfig) -> (String, Vec<String>) 
                     &crate::resolve_project_dir(&cfg.project_path),
                     cfg.max_retries,
                 );
+                if let Some(cb) = progress {
+                    bot.set_progress_listener(cb);
+                }
                 match bot.run_task(&intent_json).await {
                     Ok(outcome) => {
                         let changed = match &outcome {
