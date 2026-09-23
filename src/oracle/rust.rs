@@ -1,11 +1,7 @@
 // Rust-specific oracle for crates.io and docs.rs
 use super::{CodeSymbolInfo, KnowledgeAdapter, KnowledgeResult, VerifiedFact};
-use reqwest::Client;
-use std::sync::Arc;
 
-pub struct RustOracle {
-    client: Arc<Client>,
-}
+pub struct RustOracle;
 
 impl Default for RustOracle {
     fn default() -> Self {
@@ -15,54 +11,29 @@ impl Default for RustOracle {
 
 impl RustOracle {
     pub fn new() -> Self {
-        RustOracle {
-            client: Arc::new(
-                Client::builder()
-                    .user_agent("grounding-coder-rust-oracle/0.1")
-                    .timeout(std::time::Duration::from_secs(30))
-                    .build()
-                    .unwrap(),
-            ),
-        }
+        RustOracle
     }
 
     /// Fetch crate metadata from crates.io
     async fn fetch_crate_metadata(&self, crate_name: &str) -> Option<serde_json::Value> {
         let url = format!("https://crates.io/api/v1/crates/{}", crate_name);
-        match self.client.get(&url).send().await {
-            Ok(response) => {
-                if response.status().is_success() {
-                    response.json::<serde_json::Value>().await.ok()
-                } else {
-                    None
-                }
-            }
-            Err(_) => None,
-        }
+        // Bundled-roots HTTPS: no platform verifier, no JNI abort risk.
+        crate::http::get_json(&url, None).await.ok()
     }
 
     /// Fetch documentation from docs.rs
     async fn fetch_docs_rs(&self, symbol: &str) -> Option<serde_json::Value> {
         let url = format!("https://docs.rs/{}/latest/{}", symbol, symbol);
-        match self.client.get(&url).send().await {
-            Ok(response) => {
-                if response.status().is_success() {
-                    match response.text().await {
-                        Ok(html) => {
-                            // Parse HTML to extract symbols and facts
-                            Some(serde_json::json!({
-                                "type": "documentation",
-                                "content": html,
-                                "url": url
-                            }))
-                        }
-                        Err(_) => None,
-                    }
-                } else {
-                    None
-                }
+        match crate::http::get_text(&url).await {
+            Ok((status, html)) if (200..300).contains(&status) => {
+                // Parse HTML to extract symbols and facts
+                Some(serde_json::json!({
+                    "type": "documentation",
+                    "content": html,
+                    "url": url
+                }))
             }
-            Err(_) => None,
+            _ => None,
         }
     }
 

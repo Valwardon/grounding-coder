@@ -70,20 +70,12 @@ pub use crate::engine::StructuredIntent;
 /// and then decomposed into deterministic sub-tasks.
 pub struct LlmClient {
     config: Arc<ApiConfig>,
-    client: reqwest::Client,
 }
 
 impl LlmClient {
     pub fn new(config: ApiConfig) -> Self {
-        // Bounded: a hung mobile radio must surface as an error message,
-        // never an eternal spinner.
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(90))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
         LlmClient {
             config: Arc::new(config),
-            client,
         }
     }
 
@@ -115,32 +107,21 @@ impl LlmClient {
             "- confidence: number 0.0-1.0\n"
         );
 
-        let resp = self
-            .client
-            .post(format!("{}/chat/completions", self.config.base_url))
-            .header(
-                "Authorization",
-                format!(
-                    "Bearer {}",
-                    self.config.openrouter_key.as_deref().unwrap_or("")
-                ),
-            )
-            .json(&serde_json::json!({
+        // crate::http verifies with bundled roots — no platform trust
+        // store, so this cannot hit the Android JNI verifier abort.
+        let body = crate::http::post_json(
+            &format!("{}/chat/completions", self.config.base_url),
+            self.config.openrouter_key.as_deref(),
+            &serde_json::json!({
                 "model": &self.config.model,
                 "response_format": {"type": "json_object"},
                 "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": prompt}
                 ]
-            }))
-            .send()
-            .await
-            .map_err(|e| format!("HTTP error: {}", e))?;
-
-        let body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| format!("Parse error: {}", e))?;
+            }),
+        )
+        .await?;
         let content = body["choices"][0]["message"]["content"]
             .as_str()
             .ok_or("No content in response")?;

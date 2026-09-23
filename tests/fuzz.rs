@@ -21,7 +21,7 @@ fn deep_json_does_not_kill_decomposer() {
     for _ in 0..1000 {
         s.push('[');
     }
-    s.push_str("1");
+    s.push('1');
     for _ in 0..1000 {
         s.push(']');
     }

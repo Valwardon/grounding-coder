@@ -24,8 +24,6 @@ pub struct ResearchOracle {
     sources: Vec<VerifiedSource>,
     /// Cache of verified definitions (runtime cache, like grounded's)
     cache: HashMap<String, super::CodeDef>,
-    /// HTTP client for fetching
-    client: reqwest::Client,
     /// Maximum number of fetches per session (bounded — no infinite loops)
     max_fetches: u32,
     /// Fetches performed so far
@@ -169,11 +167,6 @@ impl ResearchOracle {
         ResearchOracle {
             sources,
             cache: HashMap::new(),
-            client: reqwest::Client::builder()
-                .user_agent("grounding-coder-research/0.1")
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
             max_fetches,
             fetches_used: 0,
         }
@@ -247,10 +240,8 @@ impl ResearchOracle {
         let url = self.build_url(source, symbol, language);
         log::info!("ResearchOracle: fetching {} from {}", symbol, url);
 
-        let resp = self
-            .client
-            .get(&url)
-            .send()
+        // Bundled-roots HTTPS: no platform verifier, no JNI abort risk.
+        let (status, body) = crate::http::get_text(&url)
             .await
             .map_err(|e| {
                 log::debug!("HTTP error for {}: {}", url, e);
@@ -258,16 +249,10 @@ impl ResearchOracle {
             })
             .ok()?;
 
-        if !resp.status().is_success() {
-            log::debug!("Non-200 status for {}: {}", url, resp.status());
+        if !(200..300).contains(&status) {
+            log::debug!("Non-2xx status for {}: {}", url, status);
             return None;
         }
-
-        // Note: content-type is not currently needed for parsing decisions;
-        // kept as documentation of the response headers.
-
-        // Get the content as text
-        let body = resp.text().await.ok()?;
 
         // Parse based on source parser type
         self.parse_content(&body, &source.parser, symbol, language, &url)

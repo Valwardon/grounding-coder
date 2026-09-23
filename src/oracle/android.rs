@@ -1,11 +1,7 @@
 // Android-specific oracle for Android SDK and documentation
 use super::{CodeSymbolInfo, KnowledgeAdapter, KnowledgeResult, VerifiedFact};
-use reqwest::Client;
-use std::sync::Arc;
 
-pub struct AndroidOracle {
-    client: Arc<Client>,
-}
+pub struct AndroidOracle;
 
 impl Default for AndroidOracle {
     fn default() -> Self {
@@ -15,15 +11,7 @@ impl Default for AndroidOracle {
 
 impl AndroidOracle {
     pub fn new() -> Self {
-        AndroidOracle {
-            client: Arc::new(
-                Client::builder()
-                    .user_agent("grounding-coder-android-oracle/0.1")
-                    .timeout(std::time::Duration::from_secs(30))
-                    .build()
-                    .unwrap(),
-            ),
-        }
+        AndroidOracle
     }
 
     /// Fetch Android SDK documentation from developer.android.com
@@ -32,22 +20,14 @@ impl AndroidOracle {
             "https://developer.android.com/reference/kotlin/android/{}?hl=en",
             class_name
         );
-        match self.client.get(&url).send().await {
-            Ok(response) => {
-                if response.status().is_success() {
-                    match response.text().await {
-                        Ok(html) => Some(serde_json::json!({
-                            "type": "android_sdk",
-                            "content": html,
-                            "url": url
-                        })),
-                        Err(_) => None,
-                    }
-                } else {
-                    None
-                }
-            }
-            Err(_) => None,
+        // Bundled-roots HTTPS: no platform verifier, no JNI abort risk.
+        match crate::http::get_text(&url).await {
+            Ok((status, html)) if (200..300).contains(&status) => Some(serde_json::json!({
+                "type": "android_sdk",
+                "content": html,
+                "url": url
+            })),
+            _ => None,
         }
     }
 
@@ -57,22 +37,13 @@ impl AndroidOracle {
             "https://developer.android.com/reference/kotlin/androidx/{}?hl=en",
             class_name
         );
-        match self.client.get(&url).send().await {
-            Ok(response) => {
-                if response.status().is_success() {
-                    match response.text().await {
-                        Ok(html) => Some(serde_json::json!({
-                            "type": "androidx_sdk",
-                            "content": html,
-                            "url": url
-                        })),
-                        Err(_) => None,
-                    }
-                } else {
-                    None
-                }
-            }
-            Err(_) => None,
+        match crate::http::get_text(&url).await {
+            Ok((status, html)) if (200..300).contains(&status) => Some(serde_json::json!({
+                "type": "androidx_sdk",
+                "content": html,
+                "url": url
+            })),
+            _ => None,
         }
     }
 

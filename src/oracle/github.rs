@@ -1,10 +1,7 @@
 // GitHub oracle for repository analysis and code examples
 use super::{CodeSymbolInfo, KnowledgeAdapter, KnowledgeResult, VerifiedFact};
-use reqwest::Client;
-use std::sync::Arc;
 
 pub struct GitHubOracle {
-    client: Arc<Client>,
     max_results: usize,
 }
 
@@ -16,16 +13,7 @@ impl Default for GitHubOracle {
 
 impl GitHubOracle {
     pub fn new() -> Self {
-        GitHubOracle {
-            client: Arc::new(
-                Client::builder()
-                    .user_agent("grounding-coder-github-oracle/0.1")
-                    .timeout(std::time::Duration::from_secs(30))
-                    .build()
-                    .unwrap(),
-            ),
-            max_results: 10,
-        }
+        GitHubOracle { max_results: 10 }
     }
 
     /// Search GitHub repositories for a given query
@@ -34,43 +22,18 @@ impl GitHubOracle {
             "https://api.github.com/search/repositories?q={}&per_page={}",
             query, self.max_results
         );
-        match self
-            .client
-            .get(&url)
-            .header("Accept", "application/vnd.github.v3+json")
-            .send()
+        // Bundled-roots HTTPS: no platform verifier, no JNI abort risk.
+        crate::http::get_json(&url, Some("application/vnd.github.v3+json"))
             .await
-        {
-            Ok(response) => {
-                if response.status().is_success() {
-                    response.json::<serde_json::Value>().await.ok()
-                } else {
-                    None
-                }
-            }
-            Err(_) => None,
-        }
+            .ok()
     }
 
     /// Get repository contents (simplified)
     async fn get_repo_contents(&self, owner: &str, repo: &str) -> Option<serde_json::Value> {
         let url = format!("https://api.github.com/repos/{}/{}?raw=true", owner, repo);
-        match self
-            .client
-            .get(&url)
-            .header("Accept", "application/vnd.github.v3+json")
-            .send()
+        crate::http::get_json(&url, Some("application/vnd.github.v3+json"))
             .await
-        {
-            Ok(response) => {
-                if response.status().is_success() {
-                    response.json::<serde_json::Value>().await.ok()
-                } else {
-                    None
-                }
-            }
-            Err(_) => None,
-        }
+            .ok()
     }
 
     /// Parse GitHub repository data into knowledge

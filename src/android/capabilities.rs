@@ -25,8 +25,13 @@ pub fn initialize_capability_registry() -> HashMap<String, ProjectCapability> {
             required: true,
             platform_specific: false,
             api_level: 1,
-            default_implementation: "reqwest::Client".to_string(),
-            dependencies: vec!["reqwest".to_string(), "tokio".to_string()],
+            default_implementation: "crate::http (hyper + webpki roots)".to_string(),
+            dependencies: vec![
+                "hyper".to_string(),
+                "hyper-util".to_string(),
+                "hyper-rustls".to_string(),
+                "tokio".to_string(),
+            ],
         },
     );
 

@@ -2,12 +2,7 @@
 use super::{
     CodePattern, CodeSymbolInfo, KnowledgeAdapter, KnowledgeResult, PatternType, VerifiedFact,
 };
-use reqwest::Client;
-use std::sync::Arc;
-
-pub struct SolanaOracle {
-    client: Arc<Client>,
-}
+pub struct SolanaOracle;
 
 impl Default for SolanaOracle {
     fn default() -> Self {
@@ -17,15 +12,7 @@ impl Default for SolanaOracle {
 
 impl SolanaOracle {
     pub fn new() -> Self {
-        SolanaOracle {
-            client: Arc::new(
-                Client::builder()
-                    .user_agent("grounding-coder-solana-oracle/0.1")
-                    .timeout(std::time::Duration::from_secs(30))
-                    .build()
-                    .unwrap(),
-            ),
-        }
+        SolanaOracle
     }
 
     /// Fetch Solana SDK documentation from solana.dev
@@ -34,22 +21,14 @@ impl SolanaOracle {
             "https://docs.solana.com/developing/clients/rust/{}?hl=en",
             symbol
         );
-        match self.client.get(&url).send().await {
-            Ok(response) => {
-                if response.status().is_success() {
-                    match response.text().await {
-                        Ok(html) => Some(serde_json::json!({
-                            "type": "solana_docs",
-                            "content": html,
-                            "url": url
-                        })),
-                        Err(_) => None,
-                    }
-                } else {
-                    None
-                }
-            }
-            Err(_) => None,
+        // Bundled-roots HTTPS: no platform verifier, no JNI abort risk.
+        match crate::http::get_text(&url).await {
+            Ok((status, html)) if (200..300).contains(&status) => Some(serde_json::json!({
+                "type": "solana_docs",
+                "content": html,
+                "url": url
+            })),
+            _ => None,
         }
     }
 
@@ -59,22 +38,13 @@ impl SolanaOracle {
             "https://github.com/solana-labs/solana-program-library/tree/master/{}?raw=true",
             example_name
         );
-        match self.client.get(&url).send().await {
-            Ok(response) => {
-                if response.status().is_success() {
-                    match response.text().await {
-                        Ok(content) => Some(serde_json::json!({
-                            "type": "solana_examples",
-                            "content": content,
-                            "url": url
-                        })),
-                        Err(_) => None,
-                    }
-                } else {
-                    None
-                }
-            }
-            Err(_) => None,
+        match crate::http::get_text(&url).await {
+            Ok((status, content)) if (200..300).contains(&status) => Some(serde_json::json!({
+                "type": "solana_examples",
+                "content": content,
+                "url": url
+            })),
+            _ => None,
         }
     }
 
