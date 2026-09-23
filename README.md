@@ -78,6 +78,17 @@ Oracle verify (compiler / tests / parser per language)
 - **Web pages from content slots** — title/sections/footer as pure data,
   engine-owned escaped template, parser oracle. Hostile
   `<script>alert(1)</script>` content renders as inert text.
+- **External crates with registry evidence** — `rand::…` imports trigger a
+  crates.io lookup; hits pin versions into `Cargo.toml` as evidence-backed
+  edits, then imports resolve. Unknown crates block with disk untouched.
+- **Real RNG struct** — `RandomNumberGenerator { rng: StdRng }` with a
+  verified `next_u32` delegation body, judged by a fixed seeded contract.
+- **Honest Partial outcomes** — hosts without a toolchain (Android) get
+  `syn` parse verification and a labeled PARTIAL instead of a false
+  SUCCESS or a useless BLOCKED.
+- **GitHub actor** — "create a repo called X / upload to github" creates
+  the repo and pushes project files from Chat with the Settings token.
+  Delivery never flips the outcome; failures report plainly.
 
 ## Proof, Not Promises
 
@@ -90,7 +101,12 @@ Oracle verify (compiler / tests / parser per language)
 | `end_to_end` | 2 | boring import path commits; unknown symbols block honestly |
 | `synthesize` | 7 | word_counts, Counter struct, parse_port, new-module wiring, cross-task rollback, unknown-op block, unsupported-shape block |
 | `polyglot` | 5 | Python import, unknown-import block, registry-JS import, TOML-defined language, missing-toolchain block |
-| `webpage` | 3 | homepage build, script-escape safety, empty-title block |
+| `webpage` | 4 | homepage build, script-escape safety, empty-title block, strict-intent page injection |
+| `repair` | 2 | missing-import repair + compile, unfixable block with untouched disk |
+| `rng` | 2 | registry-crate RNG struct end to end, bogus-crate clean block |
+| `progress` | 2 | ordered stage trail, silence without listener |
+| `config` | 2 | config path resolution, save/load roundtrip |
+| `fuzz` | 4 | deep JSON, unicode, hostile ranges, garbage intents |
 
 ### The dentist test
 

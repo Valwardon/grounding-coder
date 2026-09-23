@@ -59,6 +59,7 @@ pub trait LanguageBackend {
             warnings: Vec::new(),
             stdout: String::new(),
             stderr: String::new(),
+            full: true,
         }
     }
 }
@@ -179,6 +180,7 @@ impl LanguageBackend for PythonBackend {
                 warnings: Vec::new(),
                 stdout,
                 stderr: "python3 not found".to_string(),
+                full: true,
             };
         }
 
@@ -186,6 +188,7 @@ impl LanguageBackend for PythonBackend {
         let files = collect_with(project_dir, &["py"]);
         if files.is_empty() {
             return VerificationResult {
+                full: true,
                 clean: true,
                 errors,
                 warnings: Vec::new(),
@@ -223,6 +226,7 @@ impl LanguageBackend for PythonBackend {
         }
         if !errors.is_empty() {
             return VerificationResult {
+                full: true,
                 clean: false,
                 errors,
                 warnings: Vec::new(),
@@ -251,6 +255,7 @@ impl LanguageBackend for PythonBackend {
                     kind: ErrorKind::Other,
                 });
                 return VerificationResult {
+                    full: true,
                     clean: false,
                     errors,
                     warnings: Vec::new(),
@@ -295,6 +300,7 @@ impl LanguageBackend for PythonBackend {
         }
 
         VerificationResult {
+            full: true,
             clean: errors.is_empty(),
             errors,
             warnings: Vec::new(),
@@ -430,6 +436,7 @@ impl LanguageBackend for CBackend {
                 warnings: Vec::new(),
                 stdout,
                 stderr: "gcc not found".to_string(),
+                full: true,
             };
         }
 
@@ -464,6 +471,7 @@ impl LanguageBackend for CBackend {
         }
 
         VerificationResult {
+            full: true,
             clean: errors.is_empty(),
             errors,
             warnings: Vec::new(),
@@ -600,6 +608,7 @@ impl LanguageBackend for HtmlBackend {
                 warnings: Vec::new(),
                 stdout: String::new(),
                 stderr: "python3 not found".to_string(),
+                full: true,
             };
         }
         // argv: [script, project_dir] — the script walks *.html/*.htm,
@@ -706,6 +715,7 @@ sys.exit(1 if errors else 0)
                     });
                 }
                 VerificationResult {
+                    full: true,
                     clean: o.status.success() && structured.is_empty(),
                     errors: structured,
                     warnings: Vec::new(),
@@ -728,6 +738,7 @@ sys.exit(1 if errors else 0)
                 warnings: Vec::new(),
                 stdout: String::new(),
                 stderr: e.to_string(),
+                full: true,
             },
         }
     }
@@ -844,6 +855,7 @@ impl LanguageBackend for GenericBackend<'_> {
                 warnings: Vec::new(),
                 stdout: String::new(),
                 stderr: String::new(),
+                full: true,
             };
         }
         let tool = self.spec.verify_cmd[0].clone();
@@ -866,6 +878,7 @@ impl LanguageBackend for GenericBackend<'_> {
                 warnings: Vec::new(),
                 stdout: String::new(),
                 stderr: format!("{} not found", tool),
+                full: true,
             };
         }
         let mut errors = Vec::new();
@@ -897,6 +910,7 @@ impl LanguageBackend for GenericBackend<'_> {
         }
         if !errors.is_empty() {
             return VerificationResult {
+                full: true,
                 clean: false,
                 errors,
                 warnings: Vec::new(),
@@ -939,6 +953,7 @@ impl LanguageBackend for GenericBackend<'_> {
             }
         }
         VerificationResult {
+            full: true,
             clean: errors.is_empty(),
             errors,
             warnings: Vec::new(),

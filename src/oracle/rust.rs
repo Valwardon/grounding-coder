@@ -18,7 +18,7 @@ impl RustOracle {
     async fn fetch_crate_metadata(&self, crate_name: &str) -> Option<serde_json::Value> {
         let url = format!("https://crates.io/api/v1/crates/{}", crate_name);
         // Bundled-roots HTTPS: no platform verifier, no JNI abort risk.
-        crate::http::get_json(&url, None).await.ok()
+        crate::http::get_json(&url, None, None).await.ok()
     }
 
     /// Fetch documentation from docs.rs

@@ -14,6 +14,10 @@ async fn main() {
         .expect("usage: build_page <project-dir> <intent-json>");
     let intent_json = std::fs::read_to_string(&intent_path).expect("read intent");
     let mut bot = CodeBot::new(&project, 5);
+    // GITHUB_TOKEN env wires the publish actor when the intent asks for it.
+    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+        bot.set_github_token(Some(token));
+    }
     match bot.run_task(&intent_json).await {
         Ok(outcome) => println!("{}", outcome),
         Err(e) => {

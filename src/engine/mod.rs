@@ -56,6 +56,9 @@ pub struct CodeBot {
     researcher: ResearchOracle,
     /// Live progress sink (chat UI, CLI). `None` = silent.
     progress: Option<ProgressCallback>,
+    /// GitHub token for the publish actor. `None` = publishing disabled;
+    /// the engine never invents credentials.
+    github_token: Option<String>,
 }
 
 /// Result of a completed coding task.
@@ -90,6 +93,10 @@ impl std::fmt::Display for TaskResult {
 pub enum AgentOutcome {
     /// Task completed successfully
     Success(TaskResult),
+    /// Changes applied and syntax-verified, but no full type/test oracle
+    /// ran on this host (e.g. Android without cargo). Bytes placed with
+    /// evidence — honestly labeled, never a claimed full verification.
+    Partial { result: TaskResult, caveat: String },
     /// Task is blocked - no safe fix available
     Blocked {
         reason: BlockReason,
@@ -128,6 +135,11 @@ impl std::fmt::Display for AgentOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AgentOutcome::Success(r) => write!(f, "{}", r),
+            AgentOutcome::Partial { result, caveat } => {
+                writeln!(f, "Result: PARTIAL")?;
+                write!(f, "{}", result)?;
+                write!(f, "\nCaveat: {}", caveat)
+            }
             AgentOutcome::Blocked {
                 reason,
                 diagnostics,
@@ -325,11 +337,18 @@ impl CodeBot {
             writer,
             researcher,
             progress: None,
+            github_token: None,
         };
 
         // Bootstrap: scan the project and build the code symbol graph.
         bot.bootstrap();
         bot
+    }
+
+    /// Attach a GitHub token for the publish actor. Without it, publish
+    /// requests report honestly instead of failing obscurely.
+    pub fn set_github_token(&mut self, token: Option<String>) {
+        self.github_token = token.filter(|t| !t.trim().is_empty());
     }
 
     /// Attach a live progress listener (chat UI, CLI stderr).
@@ -407,6 +426,40 @@ impl CodeBot {
             }
         }
 
+        // Step 0b: registry-verified external crates (Rust only). For every
+        // non-std import root, ask crates.io. A hit pins name → version in
+        // the symbol table (evidence, never a guess) and later synthesizes
+        // an EnsureDep task for Cargo.toml. No is_known skip: bundled
+        // knowledge must not suppress the manifest dep, or the import
+        // would resolve nowhere at check time. Bounded: 8 lookups per run.
+        if intent.language.as_deref().unwrap_or("rust") == "rust" {
+            let mut roots = Vec::new();
+            for imp in &intent.imports {
+                let seg = imp.split([':', '.']).next().unwrap_or("").to_lowercase();
+                if seg.is_empty()
+                    || ["std", "core", "alloc", "crate", "self", "super"].contains(&seg.as_str())
+                    || roots.contains(&seg)
+                {
+                    continue;
+                }
+                roots.push(seg);
+            }
+            for root in roots.into_iter().take(8) {
+                match crate::engine::research::verify_crate(&root).await {
+                    Some(version) => {
+                        log::info!("Verified external crate {} v{}", root, version);
+                        self.emit(ProgressEvent::Stage {
+                            id: 0,
+                            stage: "crate-verified",
+                            detail: format!("{} v{}", root, version),
+                        });
+                        self.symbol_table.index_crate(&root, &version);
+                    }
+                    None => log::warn!("No registry entry for {}", root),
+                }
+            }
+        }
+
         // Step 1: TaskDecomposer breaks the intent into sub-tasks.
         // Re-serialize: repairs above (page injection) mutate the intent,
         // and the decomposer must see the repaired shape, not the raw input.
@@ -418,6 +471,12 @@ impl CodeBot {
         let mut errors_fixed = 0u32;
         let mut budget_used = 0u32;
         let mut recipes_learned = 0u32;
+        // Tasks verified syntax-only (no toolchain) land here: applied
+        // with evidence, honestly labeled instead of claimed verified.
+        let mut partial_notes: Vec<String> = Vec::new();
+        let partial_caveat =
+            "syntax-only verification (no toolchain on this host): types and behavior unproven"
+                .to_string();
 
         // Research tasks were already attempted in Step 0 — they touch no
         // files, so filter them here and let concrete edits proceed.
@@ -458,6 +517,44 @@ impl CodeBot {
                 kind: task.kind.to_string(),
             });
             active.push(task);
+        }
+
+        // Verified external crates become EnsureDep tasks FIRST, so the
+        // manifest lands before any code that needs it.
+        if intent.language.as_deref().unwrap_or("rust") == "rust"
+            && self.project_dir.join("Cargo.toml").exists()
+        {
+            let mut dep_roots = Vec::new();
+            for imp in &intent.imports {
+                let seg = imp.split([':', '.']).next().unwrap_or("").to_lowercase();
+                if seg.is_empty()
+                    || ["std", "core", "alloc", "crate", "self", "super"].contains(&seg.as_str())
+                    || dep_roots.contains(&seg)
+                {
+                    continue;
+                }
+                dep_roots.push(seg);
+            }
+            let mut deps = Vec::new();
+            for root in dep_roots {
+                if let Some(version) = self.symbol_table.crate_version(&root) {
+                    let mut t = SubTask::new(
+                        crate::engine::tasks::TaskKind::EnsureDep,
+                        format!("Ensure dep {} v{}", root, version),
+                        serde_json::json!({"crate": root, "version": version}),
+                        "external_crate".to_string(),
+                    );
+                    t.target_symbols.push("Cargo.toml".to_string());
+                    self.emit(ProgressEvent::Task {
+                        id: t.id,
+                        desc: t.description.clone(),
+                        kind: t.kind.to_string(),
+                    });
+                    deps.push(t);
+                }
+            }
+            deps.extend(active);
+            active = deps;
         }
 
         // Phase A: prove EVERYTHING plannable before touching disk, and
@@ -547,6 +644,14 @@ impl CodeBot {
                         recipes_learned += r.recipes_learned;
                         continue;
                     }
+                    Ok(AgentOutcome::Partial { result: r, caveat }) => {
+                        changes.extend(r.changes.clone());
+                        errors_fixed += r.errors_fixed;
+                        budget_used += r.budget_used;
+                        recipes_learned += r.recipes_learned;
+                        partial_notes.push(caveat);
+                        continue;
+                    }
                     Ok(blocked_or_failed) => {
                         let _ = self.writer.rollback(&global);
                         return Ok(blocked_or_failed);
@@ -634,15 +739,23 @@ impl CodeBot {
             });
 
             if verdict.is_clean() {
-                // 5a. Commit: changes are clean, commit the transaction
+                // 5a. Commit: changes are clean, commit the transaction.
+                // Syntax-only verdicts commit too but mark the run Partial.
                 self.writer.commit(&global)?;
                 changes.extend(files.clone());
                 log::info!("RESULT\n  SUCCESS\n  files={:?}", files);
                 self.emit(ProgressEvent::Stage {
                     id: task.id,
-                    stage: "committed",
+                    stage: if verdict.full {
+                        "committed"
+                    } else {
+                        "committed-syntax-only"
+                    },
                     detail: String::new(),
                 });
+                if !verdict.full {
+                    partial_notes.push(partial_caveat.clone());
+                }
                 continue;
             }
 
@@ -731,12 +844,15 @@ impl CodeBot {
                 verdict = self.verifier.verify().await;
                 if verdict.is_clean() {
                     log::info!("Verification passed after {} attempt(s)", attempts);
+                    if !verdict.full {
+                        partial_notes.push(partial_caveat.clone());
+                    }
                     break;
                 }
             }
         }
 
-        Ok(AgentOutcome::Success(TaskResult {
+        let mut result = TaskResult {
             success: true,
             changes,
             errors_fixed,
@@ -746,7 +862,119 @@ impl CodeBot {
                 "Done. Fixed {} errors, learned {} recipes, used {}/{} attempts.",
                 errors_fixed, recipes_learned, budget_used, self.budget.total
             ),
-        }))
+        };
+        // GitHub publish is delivery, not proof: it appends to the message
+        // and never flips the outcome. A failed publish reports plainly.
+        if let Some(note) = self.maybe_publish(&intent).await {
+            result.message.push_str(&note);
+        }
+        if partial_notes.is_empty() {
+            Ok(AgentOutcome::Success(result))
+        } else {
+            partial_notes.sort();
+            partial_notes.dedup();
+            Ok(AgentOutcome::Partial {
+                result,
+                caveat: partial_notes.join("; "),
+            })
+        }
+    }
+
+    /// Publish to GitHub when the intent asks for it and a token is set.
+    /// Returns a message suffix (success URL or honest failure), or None
+    /// when publishing was never requested. Reads only; never rewrites
+    /// local files.
+    async fn maybe_publish(&self, intent: &StructuredIntent) -> Option<String> {
+        let token = self.github_token.clone()?;
+        let haystack = format!(
+            "{} {}",
+            intent.goal,
+            intent
+                .actions
+                .iter()
+                .map(|a| match a {
+                    crate::engine::tasks::IntentAction::Action { action, .. } => action.clone(),
+                    crate::engine::tasks::IntentAction::Research { topic, .. } => topic.clone(),
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+        .to_lowercase();
+        let wants_repo = haystack.contains("repositor")
+            || haystack.contains("github")
+            || haystack.contains("publish")
+            || haystack.contains("upload");
+        if !wants_repo {
+            return None;
+        }
+        // Repo name: explicit `repo:<name>` wins, then "called/named X",
+        // else the project dir name.
+        let repo_name = haystack
+            .split("repo:")
+            .nth(1)
+            .and_then(|s| s.split_whitespace().next())
+            .map(|s| s.to_string())
+            .or_else(|| {
+                let words: Vec<&str> = haystack.split_whitespace().collect();
+                let stop = [
+                    "then",
+                    "and",
+                    "to",
+                    "for",
+                    "with",
+                    "on",
+                    "a",
+                    "an",
+                    "the",
+                    "called",
+                    "named",
+                    "repository",
+                    "repo",
+                ];
+                words.iter().enumerate().find_map(|(i, w)| {
+                    if *w != "called" && *w != "named" {
+                        return None;
+                    }
+                    let mut name = Vec::new();
+                    for extra in words.iter().skip(i + 1).take(3) {
+                        if stop.contains(extra) {
+                            break;
+                        }
+                        name.push(*extra);
+                    }
+                    if name.is_empty() {
+                        None
+                    } else {
+                        Some(name.join(" "))
+                    }
+                })
+            })
+            .unwrap_or_else(|| {
+                self.project_dir
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "grounding-project".to_string())
+            });
+        self.emit(ProgressEvent::Stage {
+            id: 0,
+            stage: "github-publish",
+            detail: repo_name.clone(),
+        });
+        match crate::github::token_owner(&token).await {
+            Ok(owner) => {
+                match crate::github::publish(&token, &owner, &repo_name, &self.project_dir).await {
+                    Ok((url, skipped)) => {
+                        let mut note = format!("\nGitHub: {}", url);
+                        if !skipped.is_empty() {
+                            note.push_str(&format!(" ({} files skipped)", skipped.len()));
+                        }
+                        Some(note)
+                    }
+                    Err(e) => Some(format!("\nGitHub publish failed: {}", e)),
+                }
+            }
+            Err(e) => Some(format!("\nGitHub publish failed: {}", e)),
+        }
     }
 
     /// Try each synthesis candidate: snapshot → apply → verify →
@@ -790,7 +1018,7 @@ impl CodeBot {
                             stage: "committed",
                             detail: format!("candidate {}/{}", i + 1, plans.len()),
                         });
-                        return Ok(AgentOutcome::Success(TaskResult {
+                        let result = TaskResult {
                             success: true,
                             changes: files,
                             errors_fixed: 0,
@@ -801,7 +1029,14 @@ impl CodeBot {
                                 i + 1,
                                 plans.len()
                             ),
-                        }));
+                        };
+                        if verdict.full {
+                            return Ok(AgentOutcome::Success(result));
+                        }
+                        return Ok(AgentOutcome::Partial {
+                            result,
+                            caveat: "syntax-only verification (no toolchain on this host): types and behavior unproven".to_string(),
+                        });
                     }
                     last_errors = verdict.errors;
                     let _ = self.writer.rollback(&snapshot);

@@ -47,6 +47,10 @@ pub struct SymbolTable {
     definitions: HashMap<String, CodeDef>,
     /// Runtime cache — codebase-specific symbols discovered by scanning.
     cache: HashMap<String, CodeDef>,
+    /// Registry-verified external crates: name → pinned version.
+    /// Populated live from crates.io during research; a crate lands here
+    /// only with registry evidence, never by guess.
+    known_crates: HashMap<String, String>,
 }
 
 /// Foundation API definitions — compiled into the binary at build time.
@@ -294,6 +298,31 @@ const FOUNDATION_APIS: &[FoundationApi] = &[
         "fn read(&mut self, buf: &mut [u8]): io::Result<usize>",
         &["let mut buf = [0u8; 1024]; f.read(&mut buf)?"],
     ),
+    // rand crate — verified against docs.rs (rand 0.9)
+    (
+        "rand::rngs::StdRng",
+        "rust",
+        "struct",
+        "rand::rngs",
+        "seed_from_u64(seed: u64): StdRng (via SeedableRng)",
+        &["let rng = StdRng::seed_from_u64(42)"],
+    ),
+    (
+        "rand::SeedableRng",
+        "rust",
+        "trait",
+        "rand",
+        "fn seed_from_u64(seed: u64) -> Self",
+        &["let rng = StdRng::seed_from_u64(42)"],
+    ),
+    (
+        "rand::Rng",
+        "rust",
+        "trait",
+        "rand",
+        "fn next_u32(&mut self) -> u32; fn next_u64(&mut self) -> u64",
+        &["let x: u32 = rng.next_u32()"],
+    ),
 ];
 
 impl Default for SymbolTable {
@@ -306,6 +335,7 @@ impl SymbolTable {
     pub fn new() -> Self {
         let mut definitions = HashMap::new();
         let cache = HashMap::new();
+        let known_crates = HashMap::new();
 
         // Populate from embedded foundation APIs (like grounded's KnowledgeStore)
         for def in FOUNDATION_APIS {
@@ -324,7 +354,22 @@ impl SymbolTable {
             definitions.entry(simple).or_insert(code_def);
         }
 
-        SymbolTable { definitions, cache }
+        SymbolTable {
+            definitions,
+            cache,
+            known_crates,
+        }
+    }
+
+    /// Record a registry-verified external crate (name → version).
+    pub fn index_crate(&mut self, name: &str, version: &str) {
+        self.known_crates
+            .insert(name.to_lowercase(), version.to_string());
+    }
+
+    /// Pinned version of a verified crate, if any.
+    pub fn crate_version(&self, name: &str) -> Option<String> {
+        self.known_crates.get(&name.to_lowercase()).cloned()
     }
 
     /// Fetch a definition — grounded's `KnowledgeStore::fetch()` repurposed.
@@ -343,6 +388,23 @@ impl SymbolTable {
         // Check embedded API reference (platform/system symbols)
         if let Some(def) = self.definitions.get(&sym) {
             return Some(def.clone());
+        }
+
+        // Registry-verified external crates: `rand::...` resolves through
+        // the verified crate root. The registry (plus the compiler later)
+        // is the evidence — never a guess.
+        if let Some((root, _)) = sym.split_once("::")
+            && let Some(version) = self.known_crates.get(root)
+        {
+            return Some(CodeDef {
+                qname: symbol.to_string(),
+                language: "rust".into(),
+                kind: "external".into(),
+                module: root.to_string(),
+                signature: format!("crate {} v{}", root, version),
+                description: format!("Verified external crate {} v{}", root, version),
+                examples: Vec::new(),
+            });
         }
 
         // Fundamental language primitives — no definition needed

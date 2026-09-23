@@ -74,11 +74,41 @@ pub async fn post_json(
     bearer: Option<&str>,
     body: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
+    send_json("POST", url, bearer, body, None).await
+}
+
+/// PUT JSON, expect JSON back. Non-2xx is an error with the body attached.
+pub async fn put_json(
+    url: &str,
+    bearer: Option<&str>,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    send_json(
+        "PUT",
+        url,
+        bearer,
+        body,
+        Some("application/vnd.github+json"),
+    )
+    .await
+}
+
+async fn send_json(
+    method: &str,
+    url: &str,
+    bearer: Option<&str>,
+    body: &serde_json::Value,
+    accept: Option<&str>,
+) -> Result<serde_json::Value, String> {
     let bytes = serde_json::to_vec(body).map_err(|e| format!("Serialize error: {}", e))?;
     let mut builder = hyper::Request::builder()
-        .method("POST")
+        .method(method)
         .uri(url)
-        .header("content-type", "application/json");
+        .header("content-type", "application/json")
+        .header("user-agent", "grounding-coder/0.5");
+    if let Some(a) = accept {
+        builder = builder.header("accept", a);
+    }
     if let Some(token) = bearer
         && !token.is_empty()
     {
@@ -100,14 +130,23 @@ pub async fn post_json(
     serde_json::from_slice(&raw).map_err(|e| format!("Parse error: {}", e))
 }
 
-/// GET JSON with an optional Accept header. Non-2xx is an error.
-pub async fn get_json(url: &str, accept: Option<&str>) -> Result<serde_json::Value, String> {
+/// GET JSON with optional bearer auth and Accept header. Non-2xx errors.
+pub async fn get_json(
+    url: &str,
+    bearer: Option<&str>,
+    accept: Option<&str>,
+) -> Result<serde_json::Value, String> {
     let mut builder = hyper::Request::builder()
         .method("GET")
         .uri(url)
         .header("user-agent", "grounding-coder-oracle/0.1");
     if let Some(a) = accept {
         builder = builder.header("accept", a);
+    }
+    if let Some(token) = bearer
+        && !token.is_empty()
+    {
+        builder = builder.header("authorization", format!("Bearer {}", token));
     }
     let req = builder
         .body(Full::new(Bytes::new()))

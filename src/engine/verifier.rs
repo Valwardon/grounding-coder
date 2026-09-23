@@ -16,6 +16,10 @@ pub struct VerificationResult {
     pub stdout: String,
     /// Raw stderr from the verification commands
     pub stderr: String,
+    /// Full type/test oracle ran. False means syntax-only (no toolchain on
+    /// host, e.g. Android): real parse facts, honestly labeled — the engine
+    /// reports Partial instead of claiming full verification.
+    pub full: bool,
 }
 
 impl VerificationResult {
@@ -85,6 +89,70 @@ impl CodeVerifier {
         }
     }
 
+    /// Parse-level oracle for hosts without cargo: every `.rs` file must
+    /// parse. Types and behavior stay unverified (`full: false`).
+    fn verify_rust_syntax(&self) -> VerificationResult {
+        let mut errors = Vec::new();
+        let mut files = 0u32;
+        let mut stack = vec![self.project_dir.clone()];
+        let ignore = [
+            ".git",
+            "target",
+            "build",
+            ".gradle",
+            ".idea",
+            "node_modules",
+        ];
+        while let Some(current) = stack.pop() {
+            if files > 2000 {
+                break;
+            }
+            let Ok(entries) = std::fs::read_dir(&current) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if path.file_name().is_none_or(|n| {
+                        let s = n.to_string_lossy();
+                        s.starts_with('.') || ignore.contains(&s.as_ref())
+                    }) {
+                        continue;
+                    }
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    files += 1;
+                    let rel = path
+                        .strip_prefix(&self.project_dir)
+                        .unwrap_or(&path)
+                        .to_string_lossy()
+                        .to_string();
+                    match std::fs::read_to_string(&path) {
+                        Ok(content) => errors.extend(check_rust_syntax(&rel, &content)),
+                        Err(e) => errors.push(CompileError {
+                            code: "READ_ERROR".to_string(),
+                            message: e.to_string(),
+                            file: rel,
+                            line: 0,
+                            col: 0,
+                            suggestion: None,
+                            source_line: None,
+                            kind: super::error::ErrorKind::Other,
+                        }),
+                    }
+                }
+            }
+        }
+        VerificationResult {
+            clean: errors.is_empty(),
+            errors,
+            warnings: Vec::new(),
+            stdout: format!("syn parse over {} files", files),
+            stderr: String::new(),
+            full: false,
+        }
+    }
+
     /// Verify a Rust project: cargo check → clippy → test
     fn verify_rust(&self) -> VerificationResult {
         let mut all_errors = Vec::new();
@@ -93,25 +161,11 @@ impl CodeVerifier {
         let mut combined_stderr = String::new();
 
         // ── Guardrail 0: toolchain availability ──
-        // If cargo is missing, that is a fact we must report — never a
-        // silent "clean" (a false pass would let unverified code through).
+        // No cargo (Android has no toolchain): fall back to the parse
+        // oracle. Real syntax facts, honestly labeled `full: false` — the
+        // engine reports Partial, never full SUCCESS, on this path.
         if !command_available("cargo") {
-            return VerificationResult {
-                clean: false,
-                errors: vec![CompileError {
-                    code: "CARGO_MISSING".to_string(),
-                    message: "cargo is not available on PATH — cannot verify code".to_string(),
-                    file: String::new(),
-                    line: 0,
-                    col: 0,
-                    suggestion: None,
-                    source_line: None,
-                    kind: super::error::ErrorKind::Other,
-                }],
-                warnings: Vec::new(),
-                stdout: String::new(),
-                stderr: "cargo not found".to_string(),
-            };
+            return self.verify_rust_syntax();
         }
 
         // ── Guardrail 1: Syntax + Types (cargo check) ──
@@ -142,6 +196,7 @@ impl CodeVerifier {
                 warnings: all_warnings,
                 stdout: combined_stdout,
                 stderr: combined_stderr,
+                full: true,
             };
         }
 
@@ -179,6 +234,7 @@ impl CodeVerifier {
                 warnings: all_warnings,
                 stdout: combined_stdout,
                 stderr: combined_stderr,
+                full: true,
             };
         }
 
@@ -208,6 +264,7 @@ impl CodeVerifier {
             warnings: all_warnings,
             stdout: combined_stdout,
             stderr: combined_stderr,
+            full: true,
         }
     }
 
@@ -233,6 +290,7 @@ impl CodeVerifier {
                 let (errs, warns) = split_errors_warnings(errors);
 
                 VerificationResult {
+                    full: true,
                     clean: errs.is_empty() && output.status.success(),
                     errors: errs,
                     warnings: warns,
@@ -255,6 +313,7 @@ impl CodeVerifier {
                 warnings: vec![],
                 stdout: String::new(),
                 stderr: e.to_string(),
+                full: true,
             },
         }
     }
@@ -272,6 +331,25 @@ impl CodeVerifier {
             ProjectType::Rust => self.verify_rust(),
             ProjectType::Android => self.verify_android(),
         }
+    }
+}
+
+/// Parse-level check of one Rust source: SYNTAX errors or nothing.
+/// Span locations need proc-macro2's unstable feature; the file + message
+/// carry the fact. Pure function — unit tested.
+fn check_rust_syntax(file: &str, content: &str) -> Vec<CompileError> {
+    match syn::parse_file(content) {
+        Ok(_) => Vec::new(),
+        Err(e) => vec![CompileError {
+            code: "SYNTAX".to_string(),
+            message: e.to_string(),
+            file: file.to_string(),
+            line: 0,
+            col: 0,
+            suggestion: None,
+            source_line: None,
+            kind: super::error::ErrorKind::Other,
+        }],
     }
 }
 
@@ -356,4 +434,29 @@ fn parse_test_failures(stdout: &str, stderr: &str) -> Vec<CompileError> {
         }
     }
     failures
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn syntax_oracle_accepts_good_code() {
+        let errs = check_rust_syntax("a.rs", "pub fn f() -> u32 {\n    42\n}\n");
+        assert!(errs.is_empty());
+    }
+
+    #[test]
+    fn syntax_oracle_flags_broken_code() {
+        let errs = check_rust_syntax("a.rs", "pub fn f( -> u32 {\n    42\n}\n");
+        assert_eq!(errs.len(), 1);
+        assert_eq!(errs[0].code, "SYNTAX");
+        assert_eq!(errs[0].file, "a.rs");
+    }
+
+    #[test]
+    fn syntax_oracle_handles_unicode() {
+        let errs = check_rust_syntax("a.rs", "// héllo — 日本語 🎉\nfn main() {}\n");
+        assert!(errs.is_empty());
+    }
 }

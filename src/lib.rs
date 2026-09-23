@@ -1,5 +1,6 @@
 pub mod android;
 pub mod engine;
+pub mod github;
 pub mod http;
 pub mod knowledge;
 pub mod llm;

@@ -23,7 +23,7 @@ impl GitHubOracle {
             query, self.max_results
         );
         // Bundled-roots HTTPS: no platform verifier, no JNI abort risk.
-        crate::http::get_json(&url, Some("application/vnd.github.v3+json"))
+        crate::http::get_json(&url, None, Some("application/vnd.github.v3+json"))
             .await
             .ok()
     }
@@ -31,7 +31,7 @@ impl GitHubOracle {
     /// Get repository contents (simplified)
     async fn get_repo_contents(&self, owner: &str, repo: &str) -> Option<serde_json::Value> {
         let url = format!("https://api.github.com/repos/{}/{}?raw=true", owner, repo);
-        crate::http::get_json(&url, Some("application/vnd.github.v3+json"))
+        crate::http::get_json(&url, None, Some("application/vnd.github.v3+json"))
             .await
             .ok()
     }

@@ -240,10 +240,12 @@ async fn run_task_inner(
                 if let Some(cb) = progress {
                     bot.set_progress_listener(cb);
                 }
+                bot.set_github_token(cfg.github_key.clone());
                 match bot.run_task(&intent_json).await {
                     Ok(outcome) => {
                         let changed = match &outcome {
                             AgentOutcome::Success(r) => r.changes.clone(),
+                            AgentOutcome::Partial { result: r, .. } => r.changes.clone(),
                             _ => Vec::new(),
                         };
                         (format!("{}", outcome), changed)

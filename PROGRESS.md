@@ -110,13 +110,33 @@ cargo test --all-features
 - `PROGRESS.md` — Updated with v0.2.1 progress
 
 ## Next Steps
-- [ ] Build Android APK
-- [ ] Push APK as release on GitHub
+- [x] Build Android APK (per-release pipeline, latest v0.4.0+)
+- [x] Push APK as release on GitHub
 - [x] Integration tests for EditPlan (`tests/editplan.rs` — 4 tests)
 - [x] End-to-end safety suite (`tests/end_to_end.rs` — 2 tests)
-- [ ] GitHub actor (push files / releases via API)
+- [x] GitHub actor (`src/github.rs`: create repo + contents upload from Chat)
 - [ ] APK pipeline wired to engine outputs
 - [ ] Solana sniper demo (watcher project → APK → GitHub)
+
+## v0.5.0 — External crates, honest Partials, GitHub delivery (2026-09-23)
+
+Driven by a live device report: `rand::…` imports BLOCKED (no registry
+path), nothing verifiable without a toolchain, and no way to ship to
+GitHub. 42 tests green.
+
+- **Registry-verified crates**: Step-0 crates.io lookup pins versions into
+  the symbol table; `EnsureDep` tasks write `Cargo.toml` with registry
+  evidence; imports of verified roots resolve. Proven live (`rand 0.10.3`).
+- **`call`-op methods**: verified delegation `self.field.method(args)`
+  against a checked table — enables wrapper types (RNG structs).
+- **syn syntax oracle**: cargo-less hosts get real parse facts; outcomes
+  split into SUCCESS vs labeled PARTIAL (never false-verified).
+- **GitHub actor**: repo create + file upload from Chat via Settings token;
+  `called`/`named` name extraction; delivery never flips outcomes.
+- **RNG demo**: struct + `next_u32` body + seeded contract, all green.
+- Repair loop gained compiler-suggestion `use`-path extraction; fixed a
+  double-`E` error-code bug that silently broke recipe matching, and a
+  missing idempotent-fix signal for repeat errors.
 
 ## v0.3 — The Engine Proves Itself (2026-09-22)
 

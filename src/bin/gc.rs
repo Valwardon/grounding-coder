@@ -51,6 +51,7 @@ fn main() {
                     eprintln!("OpenRouter API key not set. Use the UI to configure it.");
                     std::process::exit(1);
                 }
+                let github_key = config.github_key.clone();
                 let llm_client = llm::LlmClient::new(config);
                 match llm_client.translate(&prompt).await {
                     Ok(intent) => {
@@ -60,6 +61,7 @@ fn main() {
                         bot.set_progress_listener(std::sync::Arc::new(|ev| {
                             eprintln!("[progress] {}", ev)
                         }));
+                        bot.set_github_token(github_key);
                         match bot.run_task(&intent_json).await {
                             Ok(result) => println!("{}", result),
                             Err(e) => {

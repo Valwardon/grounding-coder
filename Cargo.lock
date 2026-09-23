@@ -2011,6 +2011,7 @@ version = "0.2.0"
 dependencies = [
  "android-activity",
  "anyhow",
+ "base64",
  "bytes",
  "chrono",
  "clap",
@@ -2030,6 +2031,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "syn 2.0.119",
  "tokio",
  "walkdir",
 ]

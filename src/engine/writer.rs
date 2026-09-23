@@ -234,6 +234,11 @@ impl CodeWriter {
                     evidence: Vec::new(),
                 });
             }
+            super::tasks::TaskKind::EnsureDep => {
+                let (edit, ev) = self.plan_ensure_dep(task)?;
+                edits.push(edit);
+                evidence.push(ev);
+            }
             super::tasks::TaskKind::AddImport => {
                 let (edit, ev) =
                     self.plan_add_import(&target_file, &content, task, symbol_table)?;
@@ -847,6 +852,69 @@ impl CodeWriter {
         None
     }
 
+    /// Ensure `name = "version"` sits under `[dependencies]` in Cargo.toml.
+    /// Evidence is the crates.io registry entry the engine verified in
+    /// Step 0 — the compiler re-verifies by resolving the dep at check.
+    fn plan_ensure_dep(&self, task: &SubTask) -> Result<(SourceEdit, Evidence), String> {
+        let name = task
+            .payload
+            .get("crate")
+            .and_then(|v| v.as_str())
+            .ok_or("EnsureDep task missing crate in payload")?;
+        let version = task
+            .payload
+            .get("version")
+            .and_then(|v| v.as_str())
+            .ok_or("EnsureDep task missing version in payload")?;
+        let manifest = self.project_dir.join("Cargo.toml");
+        let content = fs::read_to_string(&manifest)
+            .map_err(|e| format!("No Cargo.toml ({}); cannot add dep {}", e, name))?;
+
+        // Already declared (any version constraint counts — bumping
+        // versions unprompted would be guessing at the user's intent).
+        let declared = content.lines().any(|l| {
+            let t = l.trim();
+            t.starts_with(&format!("{} ", name))
+                || t.starts_with(&format!("{}=", name))
+                || t == name
+        });
+        if declared {
+            return Ok((
+                SourceEdit {
+                    file: manifest,
+                    start: 0,
+                    end: 0,
+                    expected_old: String::new(),
+                    replacement: String::new(),
+                },
+                Evidence::VerifiedSymbol {
+                    qname: name.to_string(),
+                    source: "already_present".to_string(),
+                },
+            ));
+        }
+
+        let lines: Vec<&str> = content.lines().collect();
+        let section = lines
+            .iter()
+            .position(|l| l.trim() == "[dependencies]")
+            .ok_or("Cargo.toml has no [dependencies] — BLOCKED")?;
+        let byte_offset = Self::byte_offset_for_line(&content, section + 1);
+        Ok((
+            SourceEdit {
+                file: manifest,
+                start: byte_offset,
+                end: byte_offset,
+                expected_old: String::new(),
+                replacement: format!("{} = \"{}\"\n", name, version),
+            },
+            Evidence::VerifiedSymbol {
+                qname: format!("crates.io/{}@{}", name, version),
+                source: "crates.io".to_string(),
+            },
+        ))
+    }
+
     fn byte_offset_for_line(content: &str, insert_line: usize) -> usize {
         if insert_line == 0 {
             return 0;
@@ -923,6 +991,12 @@ impl CodeWriter {
         let byte_offset = Self::byte_offset_for_line(content, insert_line);
         let import_line = format!("{}\n", backend.import_line(&import));
 
+        // Evidence names its source: backend stdlib vs registry crate.
+        let source = if backend.is_known_std(&import) {
+            backend.language().to_string()
+        } else {
+            "crates.io".to_string()
+        };
         Ok((
             SourceEdit {
                 file: file.to_path_buf(),
@@ -933,7 +1007,7 @@ impl CodeWriter {
             },
             Evidence::VerifiedSymbol {
                 qname: import.to_string(),
-                source: backend.language().to_string(),
+                source,
             },
         ))
     }

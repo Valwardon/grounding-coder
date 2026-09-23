@@ -65,6 +65,10 @@ pub enum TaskKind {
     /// Verify the project as-is and repair what the oracles flag.
     /// Emitted when an intent carries no edits (e.g. "fix this repo").
     VerifyOnly,
+    /// Ensure a registry-verified external crate is in Cargo.toml.
+    /// Built by the engine itself after Step-0 crate verification —
+    /// the decomposer never emits this.
+    EnsureDep,
 }
 
 impl TaskKind {
@@ -81,6 +85,7 @@ impl TaskKind {
             TaskKind::CreateProjectManifest => "create_project_manifest",
             TaskKind::AddDefinition => "add_definition",
             TaskKind::VerifyOnly => "verify_only",
+            TaskKind::EnsureDep => "ensure_dep",
             TaskKind::SynthesizeFunction => "synthesize_function",
         }
     }
@@ -693,6 +698,19 @@ impl TaskDecomposer {
                 references,
             } => {
                 let action_lower = action.to_lowercase();
+                // GitHub delivery belongs to the publish actor (post-phase),
+                // never to stub functions. Drop these so no junk lands.
+                if action_lower.contains("github")
+                    || action_lower.contains("repositor")
+                    || action_lower.contains("publish")
+                    || action_lower.contains("upload")
+                {
+                    log::info!(
+                        "Skipping GitHub-flavored action (actor owns it): {}",
+                        action
+                    );
+                    return None;
+                }
                 let target_file = intent
                     .file
                     .clone()

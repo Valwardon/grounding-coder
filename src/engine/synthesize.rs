@@ -139,6 +139,16 @@ const INGREDIENTS: &[Ingredient] = &[
         method: "contains",
         on_type: "Vec",
     },
+    // fn next_u32(&mut self) -> u32 (via rand::RngCore)
+    Ingredient {
+        method: "next_u32",
+        on_type: "StdRng",
+    },
+    // fn next_u64(&mut self) -> u64 (via rand::RngCore)
+    Ingredient {
+        method: "next_u64",
+        on_type: "StdRng",
+    },
     // fn parse<F: FromStr>(&self) -> Result<F, F::Err>
     Ingredient {
         method: "parse",
@@ -313,8 +323,10 @@ impl Synthesizer {
             .iter()
             .map(|(f, t)| format!("    pub {}: {},", f, t))
             .collect();
+        // Debug only: field types like StdRng are not Clone, and the
+        // template must never assume more than it verified.
         let body = format!(
-            "#[derive(Debug, Clone)]\npub struct {} {{\n{}\n}}\n\nimpl {} {{\n{}}}\n",
+            "#[derive(Debug)]\npub struct {} {{\n{}\n}}\n\nimpl {} {{\n{}}}\n",
             name,
             fields.join("\n"),
             name,
@@ -417,6 +429,71 @@ impl Synthesizer {
                         rhs
                     ),
                     vec![ev("add_assign", struct_name)],
+                ))
+            }
+            // Verified delegation: `self.field.method(args)` where the
+            // (receiver type, method, param types, return) tuple is in the
+            // table below. Enables wrapper types (RNG structs, adapters)
+            // without ever emitting an unverified call.
+            "call" => {
+                if m.self_kind != "ref" && m.self_kind != "mut" {
+                    return Err("call needs self_kind ref|mut — BLOCKED".to_string());
+                }
+                let field = m.field.clone().ok_or("call needs a field — BLOCKED")?;
+                let fty = def
+                    .fields
+                    .iter()
+                    .find(|(f, _)| *f == field)
+                    .map(|(_, t)| t.clone())
+                    .ok_or(format!("Unknown field {} — BLOCKED", field))?;
+                let (table_params, table_ret) = callable_method(&fty, &m.name)
+                    .ok_or(format!("Unverified call {}.{} — BLOCKED", fty, m.name))?;
+                if table_params.len() != m.params.len()
+                    || table_params
+                        .iter()
+                        .zip(m.params.iter())
+                        .any(|(a, b)| a != &b.1)
+                {
+                    return Err(format!(
+                        "Call {}.{} params {:?} != verified {:?} — BLOCKED",
+                        fty, m.name, m.params, table_params
+                    ));
+                }
+                if m.ret.as_deref().unwrap_or("()") != table_ret {
+                    return Err(format!("Call {}.{} return mismatch — BLOCKED", fty, m.name));
+                }
+                let receiver = if m.self_kind == "mut" {
+                    "&mut self"
+                } else {
+                    "&self"
+                };
+                let args = m
+                    .params
+                    .iter()
+                    .map(|(n, _)| n.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let ret_ann = if table_ret == "()" {
+                    String::new()
+                } else {
+                    format!(" -> {}", table_ret)
+                };
+                Ok((
+                    format!(
+                        "    pub fn {}({}{}){} {{\n        self.{}.{}({})\n    }}\n",
+                        m.name,
+                        receiver,
+                        if params.is_empty() {
+                            String::new()
+                        } else {
+                            format!(", {}", params.join(", "))
+                        },
+                        ret_ann,
+                        field,
+                        m.name,
+                        args
+                    ),
+                    vec![ev(&m.name, &fty)],
                 ))
             }
             // `self.field` reader.
@@ -622,6 +699,23 @@ fn escape_html(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+/// Verified delegatable calls: (receiver type, method) → (param types, return).
+/// Every entry checked against real API docs. The synthesizer may emit
+/// only these exact shapes.
+fn callable_method(
+    receiver: &str,
+    method: &str,
+) -> Option<(&'static [&'static str], &'static str)> {
+    const TABLE: &[(&str, &str, &[&str], &str)] = &[
+        ("StdRng", "next_u32", &[], "u32"),
+        ("StdRng", "next_u64", &[], "u64"),
+    ];
+    TABLE
+        .iter()
+        .find(|(r, m, _, _)| *r == receiver && *m == method)
+        .map(|(_, _, p, r)| (*p, *r))
 }
 
 fn sanitize(s: &str) -> String {

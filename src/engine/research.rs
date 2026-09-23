@@ -564,6 +564,26 @@ impl ResearchOracle {
     }
 }
 
+/// Verify an external crate against the registry: name → pinned version.
+/// The registry is the evidence; the compiler later re-verifies by
+/// resolving the dep. Names are charset-validated; anything else is None.
+pub async fn verify_crate(name: &str) -> Option<String> {
+    if name.is_empty()
+        || name.len() > 64
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+    {
+        return None;
+    }
+    let url = format!("https://crates.io/api/v1/crates/{}", name);
+    let v: serde_json::Value = crate::http::get_json(&url, None, None).await.ok()?;
+    v.get("crate")?
+        .get("max_version")?
+        .as_str()
+        .map(|s| s.to_string())
+}
+
 fn parse_parser(s: &str) -> SourceParser {
     match s {
         "markdown" => SourceParser::Markdown,
