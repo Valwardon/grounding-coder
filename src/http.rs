@@ -130,6 +130,37 @@ async fn send_json(
     serde_json::from_slice(&raw).map_err(|e| format!("Parse error: {}", e))
 }
 
+/// POST raw bytes (release assets), expect JSON back.
+pub async fn post_binary(
+    url: &str,
+    bearer: Option<&str>,
+    content_type: &str,
+    bytes: Vec<u8>,
+) -> Result<serde_json::Value, String> {
+    let mut builder = hyper::Request::builder()
+        .method("POST")
+        .uri(url)
+        .header("content-type", content_type)
+        .header("accept", "application/vnd.github+json");
+    if let Some(token) = bearer
+        && !token.is_empty()
+    {
+        builder = builder.header("authorization", format!("Bearer {}", token));
+    }
+    let req = builder
+        .body(Full::new(Bytes::from(bytes)))
+        .map_err(|e| format!("Request build error: {}", e))?;
+    let (status, raw) = request(req, Duration::from_secs(600)).await?;
+    if !(200..300).contains(&status) {
+        return Err(format!(
+            "HTTP {}: {}",
+            status,
+            String::from_utf8_lossy(&raw[..raw.len().min(300)])
+        ));
+    }
+    serde_json::from_slice(&raw).map_err(|e| format!("Parse error: {}", e))
+}
+
 /// GET raw bytes. Non-2xx is an error. Used by the tool provisioner —
 /// compilers arrive as bytes, never as text.
 pub async fn get_bytes(url: &str) -> Result<Vec<u8>, String> {

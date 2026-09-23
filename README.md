@@ -95,7 +95,9 @@ Oracle verify (compiler / tests / parser per language)
   SUCCESS or a useless BLOCKED.
 - **GitHub actor** — "create a repo called X / upload to github" creates
   the repo and pushes project files from Chat with the Settings token.
-  Delivery never flips the outcome; failures report plainly.
+  "Release … attach the apk" cuts the tag release and uploads project
+  APKs as assets. Delivery runs on every terminal outcome (even BLOCKED)
+  and never flips it; failures report plainly.
 
 ## Proof, Not Promises
 

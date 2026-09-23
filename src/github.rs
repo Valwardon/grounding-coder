@@ -158,6 +158,116 @@ pub async fn publish(
     Ok((format!("https://github.com/{}/{}", owner, repo), skipped))
 }
 
+/// Create a release, returning its id. 422 (tag exists) resolves the id
+/// from the tag instead of failing — reruns converge.
+pub async fn create_release(
+    token: &str,
+    owner: &str,
+    repo: &str,
+    tag: &str,
+    name: &str,
+    body: &str,
+) -> Result<u64, String> {
+    let v = crate::http::post_json(
+        &format!("https://api.github.com/repos/{}/{}/releases", owner, repo),
+        Some(token),
+        &serde_json::json!({
+            "tag_name": tag,
+            "name": name,
+            "body": body,
+            "draft": false,
+            "prerelease": false,
+        }),
+    )
+    .await;
+    match v {
+        Ok(v) => v
+            .get("id")
+            .and_then(|i| i.as_u64())
+            .ok_or_else(|| "Release created without id".to_string()),
+        Err(e) if e.contains("422") => {
+            let v = crate::http::get_json(
+                &format!(
+                    "https://api.github.com/repos/{}/{}/releases/tags/{}",
+                    owner, repo, tag
+                ),
+                Some(token),
+                None,
+            )
+            .await?;
+            v.get("id")
+                .and_then(|i| i.as_u64())
+                .ok_or_else(|| "Release tag lookup failed".to_string())
+        }
+        Err(e) => Err(format!("Create release failed: {}", e)),
+    }
+}
+
+/// Upload one file as a release asset. Returns the download URL.
+pub async fn upload_asset(
+    token: &str,
+    owner: &str,
+    repo: &str,
+    release_id: u64,
+    file_name: &str,
+    content_type: &str,
+    bytes: Vec<u8>,
+) -> Result<String, String> {
+    let url = format!(
+        "https://uploads.github.com/repos/{}/{}/releases/{}/assets?name={}&label={}",
+        owner, repo, release_id, file_name, file_name
+    );
+    let v = crate::http::post_binary(&url, Some(token), content_type, bytes).await?;
+    v.get("browser_download_url")
+        .and_then(|u| u.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| "Asset upload gave no download URL".to_string())
+}
+
+/// APKs under the project worth attaching to a release. Capped: 3 files,
+/// 200MB each. Sources travel via contents; binaries travel via releases.
+pub fn find_apks(project_dir: &std::path::Path) -> Vec<(String, std::path::PathBuf)> {
+    const MAX_APKS: usize = 3;
+    const MAX_BYTES: u64 = 200 * 1024 * 1024;
+    let mut out = Vec::new();
+    let mut stack = vec![(project_dir.to_path_buf(), 0u8)];
+    while let Some((current, depth)) = stack.pop() {
+        if out.len() >= MAX_APKS || depth > 6 {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&current) else {
+            continue;
+        };
+        let mut entries: Vec<_> = entries.flatten().collect();
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            let path = entry.path();
+            if path.is_dir() {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if name.starts_with('.') || name == "target" || name == "build" {
+                    continue;
+                }
+                stack.push((path, depth + 1));
+            } else if path.extension().is_some_and(|e| e == "apk") {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "app.apk".to_string());
+                if let Ok(meta) = path.metadata()
+                    && meta.len() <= MAX_BYTES
+                {
+                    out.push((name, path));
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
 /// Owner login for a token (`GET /user`). Needed to build repo URLs.
 pub async fn token_owner(token: &str) -> Result<String, String> {
     let body = crate::http::get_json("https://api.github.com/user", Some(token), None).await?;

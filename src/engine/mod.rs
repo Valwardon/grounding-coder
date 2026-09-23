@@ -383,7 +383,53 @@ impl CodeBot {
     ///
     /// The critical invariant: every task follows the transactional pattern:
     ///   snapshot → apply → verify → commit OR rollback
+    ///
+    /// Delivery (GitHub publish) is orthogonal to proof: it runs on every
+    /// terminal outcome — including Blocked — and only appends to the
+    /// message, never flips success into failure or vice versa.
     pub async fn run_task(&mut self, intent_json: &str) -> Result<AgentOutcome, String> {
+        let outcome = self.run_task_engine(intent_json).await?;
+        let intent: StructuredIntent = match serde_json::from_str(intent_json) {
+            Ok(i) => i,
+            Err(_) => return Ok(outcome),
+        };
+        let note = self.maybe_publish(&intent).await;
+        Ok(match (outcome, note) {
+            (AgentOutcome::Success(mut r), Some(n)) => {
+                r.message.push_str(&n);
+                AgentOutcome::Success(r)
+            }
+            (AgentOutcome::Partial { mut result, caveat }, Some(n)) => {
+                result.message.push_str(&n);
+                AgentOutcome::Partial { result, caveat }
+            }
+            (
+                AgentOutcome::Blocked {
+                    reason,
+                    mut diagnostics,
+                },
+                Some(n),
+            ) => {
+                diagnostics.push(CompileError {
+                    code: "GITHUB_NOTE".to_string(),
+                    message: n.trim().to_string(),
+                    file: String::new(),
+                    line: 0,
+                    col: 0,
+                    suggestion: None,
+                    source_line: None,
+                    kind: crate::engine::error::ErrorKind::Other,
+                });
+                AgentOutcome::Blocked {
+                    reason,
+                    diagnostics,
+                }
+            }
+            (other, _) => other,
+        })
+    }
+
+    async fn run_task_engine(&mut self, intent_json: &str) -> Result<AgentOutcome, String> {
         // Step 0: Parse intent and research unknown symbols
         let mut intent: StructuredIntent = serde_json::from_str(intent_json)
             .map_err(|e| format!("Failed to parse intent: {}", e))?;
@@ -852,7 +898,7 @@ impl CodeBot {
             }
         }
 
-        let mut result = TaskResult {
+        let result = TaskResult {
             success: true,
             changes,
             errors_fixed,
@@ -863,11 +909,6 @@ impl CodeBot {
                 errors_fixed, recipes_learned, budget_used, self.budget.total
             ),
         };
-        // GitHub publish is delivery, not proof: it appends to the message
-        // and never flips the outcome. A failed publish reports plainly.
-        if let Some(note) = self.maybe_publish(&intent).await {
-            result.message.push_str(&note);
-        }
         if partial_notes.is_empty() {
             Ok(AgentOutcome::Success(result))
         } else {
@@ -968,6 +1009,12 @@ impl CodeBot {
                         if !skipped.is_empty() {
                             note.push_str(&format!(" ({} files skipped)", skipped.len()));
                         }
+                        if let Some(release_note) = self
+                            .maybe_release(&token, &owner, &repo_name, &haystack)
+                            .await
+                        {
+                            note.push_str(&release_note);
+                        }
                         Some(note)
                     }
                     Err(e) => Some(format!("\nGitHub publish failed: {}", e)),
@@ -975,6 +1022,78 @@ impl CodeBot {
             }
             Err(e) => Some(format!("\nGitHub publish failed: {}", e)),
         }
+    }
+
+    /// Release flow: create the tag release and attach project APKs.
+    /// Runs only when the intent asks for it; failures report inline and
+    /// never touch the outcome.
+    async fn maybe_release(
+        &self,
+        token: &str,
+        owner: &str,
+        repo: &str,
+        haystack: &str,
+    ) -> Option<String> {
+        let wants_release = haystack.contains("release")
+            || (haystack.contains("apk")
+                && (haystack.contains("upload")
+                    || haystack.contains("attach")
+                    || haystack.contains("publish")));
+        if !wants_release {
+            return None;
+        }
+        self.emit(ProgressEvent::Stage {
+            id: 0,
+            stage: "github-release",
+            detail: repo.to_string(),
+        });
+        let tag = haystack
+            .split("tag:")
+            .nth(1)
+            .and_then(|s| s.split_whitespace().next())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "v0.1.0".to_string());
+        let apks = crate::github::find_apks(&self.project_dir);
+        if apks.is_empty() {
+            return Some(format!(
+                "\nGitHub release: no APK found under {}",
+                self.project_dir.display()
+            ));
+        }
+        let release_id = match crate::github::create_release(
+            token,
+            owner,
+            repo,
+            &tag,
+            &tag,
+            &format!("Built with grounding-coder ({})", tag),
+        )
+        .await
+        {
+            Ok(id) => id,
+            Err(e) => return Some(format!("\nGitHub release failed: {}", e)),
+        };
+        let mut urls = Vec::new();
+        for (name, path) in apks {
+            match std::fs::read(&path) {
+                Ok(bytes) => match crate::github::upload_asset(
+                    token,
+                    owner,
+                    repo,
+                    release_id,
+                    &name,
+                    "application/vnd.android.package-archive",
+                    bytes,
+                )
+                .await
+                {
+                    Ok(url) => urls.push(url),
+                    Err(e) => urls.push(format!("{} failed: {}", name, e)),
+                },
+                Err(e) => urls.push(format!("{} unreadable: {}", name, e)),
+            }
+        }
+        Some(format!("\nGitHub release {}: {}", tag, urls.join(", ")))
     }
 
     /// Try each synthesis candidate: snapshot → apply → verify →

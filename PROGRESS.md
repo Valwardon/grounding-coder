@@ -154,7 +154,11 @@ GitHub. 42 tests green.
   concrete (no trait objects) to allow it. `detect_project_type` no
   longer claims bare `.kt` for Gradle.
 - Proof: `RandomNumberGenerator(42).nextInt() == 972016666`, compiled and
-  run green. Demo repo: Valwardon/kotlin-rng (sources + APK).
+  run green. Demo repo: Valwardon/kotlin-rng (sources + APK), where every
+  GitHub step — repo create, source upload, `v0.1.0` release, APK asset —
+  was performed by the actor itself from an intent, not by scripts.
+  Delivery runs on all terminal outcomes; VerifyOnly plans before file
+  resolution so bare-dir intents reach verification.
 
 ## v0.3 — The Engine Proves Itself (2026-09-22)
 

@@ -180,6 +180,22 @@ impl CodeWriter {
     /// This replaces the old `write()` method which produced arbitrary text.
     /// Now we produce a deterministic edit plan with evidence for each edit.
     pub fn plan(&self, task: &SubTask, symbol_table: &SymbolTable) -> Result<EditPlan, String> {
+        // File-less kinds first: they must never fail on file resolution
+        // (a verify-only run on a bare dir has no source file to find).
+        if task.kind == super::tasks::TaskKind::VerifyOnly {
+            // No edits by design: the value is the verify+repair loop
+            // the caller runs after apply.
+            return Ok(EditPlan {
+                task_id: task.id,
+                edits: Vec::new(),
+                evidence: Vec::new(),
+            });
+        }
+        if task.kind == super::tasks::TaskKind::SynthesizeFunction {
+            return Err(
+                "SynthesizeFunction must go through plan_synthesis() candidate loop".to_string(),
+            );
+        }
         let mut edits = Vec::new();
         let mut evidence = Vec::new();
 
@@ -219,20 +235,10 @@ impl CodeWriter {
             return Err("LLM code in payload rejected: planner-only boundary".to_string());
         }
         match task.kind {
-            super::tasks::TaskKind::SynthesizeFunction => {
-                return Err(
-                    "SynthesizeFunction must go through plan_synthesis() candidate loop"
-                        .to_string(),
-                );
-            }
-            super::tasks::TaskKind::VerifyOnly => {
-                // No edits by design: the value is the verify+repair loop
-                // the caller runs after apply.
-                return Ok(EditPlan {
-                    task_id: task.id,
-                    edits: Vec::new(),
-                    evidence: Vec::new(),
-                });
+            super::tasks::TaskKind::SynthesizeFunction | super::tasks::TaskKind::VerifyOnly => {
+                // Handled before file resolution above; this arm exists so
+                // future refactors fail honestly instead of panicking.
+                return Err("Internal routing error — BLOCKED".to_string());
             }
             super::tasks::TaskKind::EnsureDep => {
                 let (edit, ev) = self.plan_ensure_dep(task)?;
