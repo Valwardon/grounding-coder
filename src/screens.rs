@@ -69,18 +69,26 @@ pub fn Chat(
                         input.set(String::new());
                         spawn(async move {
                             notify_work_start().await;
-                            // Mutex around the sync signal: the engine may
-                            // call back from any thread, and `write` needs
-                            // exclusive access either way.
-                            let feed = std::sync::Arc::new(std::sync::Mutex::new(progress));
+                            // Channel bridge: the callback only sends (Send-safe
+                            // from any thread); this UI task owns the pump that
+                            // forwards lines into the signal. Writes happen on
+                            // the UI thread, so every line repaints live —
+                            // silence always means stuck-at-last-line.
+                            let mut progress = progress;
+                            progress.write().clear();
+                            let (tx, mut rx) =
+                                tokio::sync::mpsc::unbounded_channel::<String>();
                             let progress_cb: crate::engine::ProgressCallback =
                                 std::sync::Arc::new(move |ev: crate::engine::ProgressEvent| {
-                                    if let Ok(mut guard) = feed.lock() {
-                                        guard.write().push(ev.to_string());
-                                    }
+                                    let _ = tx.send(ev.to_string());
                                 });
-                            let (text, changed) =
-                                run_task_deterministic(&prompt, &cfg, Some(progress_cb)).await;
+                            let run = run_task_deterministic(&prompt, &cfg, Some(progress_cb));
+                            let pump = async {
+                                while let Some(line) = rx.recv().await {
+                                    progress.write().push(line);
+                                }
+                            };
+                            let ((text, changed), _) = futures_util::join!(run, pump);
                             let trail = progress();
                             let full = if trail.is_empty() {
                                 text
