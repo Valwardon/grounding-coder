@@ -130,6 +130,23 @@ async fn send_json(
     serde_json::from_slice(&raw).map_err(|e| format!("Parse error: {}", e))
 }
 
+/// GET raw bytes. Non-2xx is an error. Used by the tool provisioner —
+/// compilers arrive as bytes, never as text.
+pub async fn get_bytes(url: &str) -> Result<Vec<u8>, String> {
+    let req = hyper::Request::builder()
+        .method("GET")
+        .uri(url)
+        .header("user-agent", "grounding-coder-provision/0.1")
+        .body(Full::new(Bytes::new()))
+        .map_err(|e| format!("Request build error: {}", e))?;
+    // Toolchains are tens of MB; bound generously, still never a hang.
+    let (status, raw) = request(req, Duration::from_secs(600)).await?;
+    if !(200..300).contains(&status) {
+        return Err(format!("HTTP {}", status));
+    }
+    Ok(raw)
+}
+
 /// GET JSON with optional bearer auth and Accept header. Non-2xx errors.
 pub async fn get_json(
     url: &str,

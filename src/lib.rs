@@ -5,6 +5,7 @@ pub mod http;
 pub mod knowledge;
 pub mod llm;
 pub mod oracle;
+pub mod tool;
 
 #[cfg(feature = "ui")]
 pub mod components;

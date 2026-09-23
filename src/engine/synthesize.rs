@@ -26,6 +26,9 @@ pub struct ContractCase {
 #[derive(Debug, Clone)]
 pub struct SynthRequest {
     pub fn_name: String,
+    /// Target language: "rust" or "kotlin". Families are gated on it —
+    /// a Rust template must never land in a `.kt` file or vice versa.
+    pub lang: String,
     /// Parameter list as (name, type), e.g. `[("text", "&str")]`.
     pub params: Vec<(String, String)>,
     /// Return type, e.g. `HashMap<String, usize>`.
@@ -190,6 +193,18 @@ impl Synthesizer {
         // Family 4: webpage from content slots.
         if let Some(page) = &req.page_def {
             return self.page_candidates(&req.fn_name, page);
+        }
+        // Family 5: Kotlin class over kotlin.random.Random.
+        if req.lang == "kotlin"
+            && let Some(def) = &req.struct_def
+        {
+            return self.kotlin_rng_class(&req.fn_name, def);
+        }
+        if req.lang != "rust" {
+            return Err(format!(
+                "No synthesis family for language {} — BLOCKED",
+                req.lang
+            ));
         }
         // Family 3: struct with verified method ops.
         if let Some(def) = &req.struct_def {
@@ -570,6 +585,104 @@ impl Synthesizer {
         }])
     }
 
+    /// Candidate bodies for a Kotlin class over `kotlin.random.Random`.
+    /// Methods come only from the op vocabulary: `knew` (secondary
+    /// constructor from a seed) and `kcall` (delegation checked against
+    /// the table below). Template is fixed; only names flow from metadata.
+    fn kotlin_rng_class(&self, name: &str, def: &StructDef) -> Result<Vec<Candidate>, String> {
+        if def.fields.len() != 1 || def.fields[0].1 != "Random" {
+            return Err("Kotlin RNG needs exactly one `Random` field — BLOCKED".to_string());
+        }
+        let field = def.fields[0].0.clone();
+        let mut methods_out = String::new();
+        let mut evidence = vec![Evidence::VerifiedSymbol {
+            qname: "kotlin.random.Random".to_string(),
+            source: "kotlin-stdlib".to_string(),
+        }];
+        for m in &def.methods {
+            match m.op.as_str() {
+                "knew" => {
+                    if m.self_kind != "none" {
+                        return Err("knew must have self_kind=none — BLOCKED".to_string());
+                    }
+                    if m.params.len() != 1 || m.params[0].1 != "Long" {
+                        return Err("knew needs exactly (seed: Long) — BLOCKED".to_string());
+                    }
+                    let seed = m.params[0].0.clone();
+                    methods_out.push_str(&format!(
+                        "    constructor({}: Long) {{\n        {} = Random({})\n    }}\n",
+                        seed, field, seed
+                    ));
+                    evidence.push(Evidence::VerifiedSymbol {
+                        qname: "kotlin.random.Random.invoke".to_string(),
+                        source: "kotlin-stdlib".to_string(),
+                    });
+                }
+                "kcall" => {
+                    if m.self_kind != "ref" && m.self_kind != "mut" {
+                        return Err("kcall needs self_kind ref|mut — BLOCKED".to_string());
+                    }
+                    let (table_params, table_ret) = kotlin_callable(&m.name)
+                        .ok_or(format!("Unverified Kotlin call {} — BLOCKED", m.name))?;
+                    if table_params.len() != m.params.len()
+                        || table_params
+                            .iter()
+                            .zip(m.params.iter())
+                            .any(|(a, b)| a != &b.1)
+                    {
+                        return Err(format!(
+                            "Call {} params {:?} != verified {:?} — BLOCKED",
+                            m.name, m.params, table_params
+                        ));
+                    }
+                    let want_ret = m.ret.clone().unwrap_or_else(|| "Unit".to_string());
+                    if want_ret != table_ret {
+                        return Err(format!("Call {} return mismatch — BLOCKED", m.name));
+                    }
+                    let args = m
+                        .params
+                        .iter()
+                        .map(|(n, _)| n.clone())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let ret_ann = if table_ret == "Unit" {
+                        String::new()
+                    } else {
+                        format!(": {}", table_ret)
+                    };
+                    methods_out.push_str(&format!(
+                        "    fun {}({}){} {{\n        return {}.{}({})\n    }}\n",
+                        m.name,
+                        m.params
+                            .iter()
+                            .map(|(n, t)| format!("{}: {}", n, t))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        ret_ann,
+                        field,
+                        m.name,
+                        args
+                    ));
+                    evidence.push(Evidence::VerifiedSymbol {
+                        qname: format!("kotlin.random.Random.{}", m.name),
+                        source: "kotlin-stdlib".to_string(),
+                    });
+                }
+                other => {
+                    return Err(format!("Unknown Kotlin op {} — BLOCKED", other));
+                }
+            }
+        }
+        // No import line in the body: imports are separate AddImport tasks.
+        // Emitting one here duplicates the task's line and kotlinc rejects
+        // conflicting imports — even identical ones.
+        let body = format!(
+            "class {} {{\n    private var {}: Random\n\n{}}}\n",
+            name, field, methods_out
+        );
+        Ok(vec![Candidate { body, evidence }])
+    }
+
     /// Render the contract test module for the request.
     /// The template is engine-controlled; only literal values come from data.
     /// Struct cases use block expressions (`{ stmts; final }`) as input.
@@ -578,6 +691,24 @@ impl Synthesizer {
         // and slot presence holds by construction (asserted by callers).
         if req.page_def.is_some() {
             return String::new();
+        }
+        // Kotlin contracts are a top-level `fun main` of `check()` calls —
+        // the oracle compiles and runs them, nonzero exit fails the run.
+        // Inputs run inside `run {}`: a bare `{...}` is a lambda in Kotlin,
+        // not a block, and would compare Function0 instead of executing.
+        // Inputs that already arrive brace-wrapped get one matching pair
+        // stripped so `run { run {...} }` can never nest a lambda.
+        if req.lang == "kotlin" {
+            let mut out = String::from("\nfun main() {\n");
+            for c in &req.cases {
+                out.push_str(&format!(
+                    "    check((run {{ {} }}) == ({}))\n",
+                    strip_matching_braces(&c.input),
+                    c.expected
+                ));
+            }
+            out.push_str("}\n");
+            return out;
         }
         let mut out = format!(
             "\n#[cfg(test)]\nmod grounded_contract_{} {{\n    use super::*;\n",
@@ -716,6 +847,66 @@ fn callable_method(
         .iter()
         .find(|(r, m, _, _)| *r == receiver && *m == method)
         .map(|(_, _, p, r)| (*p, *r))
+}
+
+/// Strip one brace pair only when the first `{` matches the last `}` —
+/// otherwise `{a} + {b}` inputs would corrupt into `a} + {b`.
+fn strip_matching_braces(s: &str) -> String {
+    let t = s.trim();
+    if !(t.starts_with('{') && t.ends_with('}')) {
+        return t.to_string();
+    }
+    let mut depth = 0usize;
+    let mut chars = t.chars().peekable();
+    let mut in_string = false;
+    let mut escaped = false;
+    while let Some(c) = chars.next() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        if c == '"' {
+            in_string = true;
+        } else if c == '{' {
+            depth += 1;
+        } else if c == '}' {
+            if depth == 0 {
+                return t.to_string();
+            }
+            depth -= 1;
+            if depth == 0 && chars.peek().is_some() {
+                // Closed before the end — not a wrapping pair.
+                return t.to_string();
+            }
+        }
+    }
+    if depth == 0 {
+        t[1..t.len() - 1].trim().to_string()
+    } else {
+        t.to_string()
+    }
+}
+
+/// Verified `kotlin.random.Random` calls: method → (param types, return).
+/// Checked against the Kotlin stdlib docs. The synthesizer may emit only
+/// these exact shapes.
+fn kotlin_callable(method: &str) -> Option<(&'static [&'static str], &'static str)> {
+    const TABLE: &[(&str, &[&str], &str)] = &[
+        ("nextInt", &[], "Int"),
+        ("nextLong", &[], "Long"),
+        ("nextDouble", &[], "Double"),
+        ("nextBits", &["Int"], "Int"),
+    ];
+    TABLE
+        .iter()
+        .find(|(m, _, _)| *m == method)
+        .map(|(_, p, r)| (*p, *r))
 }
 
 fn sanitize(s: &str) -> String {

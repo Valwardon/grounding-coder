@@ -642,12 +642,14 @@ impl TaskDecomposer {
 
         tasks.push(def_task);
 
-        // If this definition needs imports, add import tasks
+        // If this definition needs imports, add import tasks. Every task
+        // carries its target file — untargeted tasks die in planning
+        // ("No source file found") on projects without a src/*.rs fallback.
         for reference in &def.references {
             if !reference.contains("::") && !reference.contains('.') {
                 continue;
             }
-            let import_task = SubTask::new(
+            let mut import_task = SubTask::new(
                 TaskKind::AddImport,
                 format!("Add import for {}", reference),
                 serde_json::json!({"import": reference, "file": target_file}),
@@ -655,6 +657,7 @@ impl TaskDecomposer {
             )
             .with_priority(0.6)
             .with_deadline(self.tick + 1000);
+            import_task.target_symbols.push(target_file.clone());
             tasks.push(import_task);
         }
 

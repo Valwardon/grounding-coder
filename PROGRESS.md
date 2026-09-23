@@ -138,6 +138,24 @@ GitHub. 42 tests green.
   double-`E` error-code bug that silently broke recipe matching, and a
   missing idempotent-fix signal for repeat errors.
 
+## v0.6.0 — Kotlin synthesis + tool provisioning (2026-09-23)
+
+- **Kotlin oracle** (`KotlinBackend::verify`): kotlinc compile of all
+  sources + JVM run of every `fun main` contract (60s bound each).
+  Toolchain resolution: env → Gradle cache → provision.
+- **Provisioner** (`src/tool.rs`): manifest-pinned artifacts (SHA-256),
+  shared cache, corrupt bytes deleted on mismatch. Kotlin 2.0.20 set
+  proven by live download test.
+- **Kotlin RNG family** (`knew`/`kcall` ops over `kotlin.random.Random`,
+  `run {}` contract mains). Lessons from proving it: bare `{}` is a
+  lambda (needs `run`), duplicate imports are fatal in kotlinc (template
+  must not emit what import tasks own), facade class is `<File>Kt`.
+- **Async trait**: `LanguageBackend::verify` is async; `Backend` enum went
+  concrete (no trait objects) to allow it. `detect_project_type` no
+  longer claims bare `.kt` for Gradle.
+- Proof: `RandomNumberGenerator(42).nextInt() == 972016666`, compiled and
+  run green. Demo repo: Valwardon/kotlin-rng (sources + APK).
+
 ## v0.3 — The Engine Proves Itself (2026-09-22)
 
 HEAD `9b32fdb` did not compile (37 errors) despite claiming green gates.

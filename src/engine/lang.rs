@@ -24,6 +24,10 @@ use std::path::Path;
 use std::process::Command;
 
 /// One language's edit conventions plus its verification oracle.
+///
+/// Internal trait: `async fn` in trait position is fine here since this
+/// never crosses a public dyn boundary.
+#[allow(async_fn_in_trait)]
 pub trait LanguageBackend {
     fn language(&self) -> &str;
     fn extensions(&self) -> &'static [&'static str];
@@ -40,7 +44,7 @@ pub trait LanguageBackend {
     }
     /// Run the language oracle over the project. The default refuses
     /// honestly — a backend without an oracle must not report clean.
-    fn verify(&self, _project_dir: &Path) -> VerificationResult {
+    async fn verify(&self, _project_dir: &Path) -> VerificationResult {
         VerificationResult {
             clean: false,
             errors: vec![CompileError {
@@ -159,7 +163,7 @@ impl LanguageBackend for PythonBackend {
         PY_STDLIB.contains(&base)
     }
 
-    fn verify(&self, project_dir: &Path) -> VerificationResult {
+    async fn verify(&self, project_dir: &Path) -> VerificationResult {
         let mut errors = Vec::new();
         let mut stdout = String::new();
         let mut stderr = String::new();
@@ -415,7 +419,7 @@ impl LanguageBackend for CBackend {
         C_STDLIB.contains(&p)
     }
 
-    fn verify(&self, project_dir: &Path) -> VerificationResult {
+    async fn verify(&self, project_dir: &Path) -> VerificationResult {
         let mut errors = Vec::new();
         let mut stdout = String::new();
         let mut stderr = String::new();
@@ -454,7 +458,27 @@ impl LanguageBackend for CBackend {
                     let err = String::from_utf8_lossy(&o.stderr).to_string();
                     stderr.push_str(&err);
                     if !o.status.success() {
+                        let before = errors.len();
                         errors.extend(parse_gcc(&err, f));
+                        // A failed exit with no parseable error is still a
+                        // fact — never report clean on nonzero status.
+                        if errors.len() == before {
+                            errors.push(CompileError {
+                                code: "GCC_ERROR".to_string(),
+                                message: err
+                                    .trim()
+                                    .lines()
+                                    .last()
+                                    .unwrap_or("gcc failed")
+                                    .to_string(),
+                                file: f.clone(),
+                                line: 0,
+                                col: 0,
+                                suggestion: None,
+                                source_line: None,
+                                kind: ErrorKind::Other,
+                            });
+                        }
                     }
                 }
                 Err(e) => errors.push(CompileError {
@@ -483,6 +507,13 @@ impl LanguageBackend for CBackend {
 
 /// Parse `file:line:col: error: message` from gcc stderr.
 fn parse_gcc(stderr: &str, fallback_file: &str) -> Vec<CompileError> {
+    parse_colon_errors(stderr, fallback_file, "GCC_ERROR")
+}
+
+/// Parse `path:line:col: error: message` compiler output (gcc, kotlinc)
+/// into structured errors. Anything unparseable becomes one generic error
+/// rather than silence.
+fn parse_colon_errors(stderr: &str, fallback_file: &str, code: &str) -> Vec<CompileError> {
     let mut errors = Vec::new();
     for raw in stderr.lines() {
         let parts: Vec<&str> = raw.splitn(4, ':').collect();
@@ -502,22 +533,27 @@ fn parse_gcc(stderr: &str, fallback_file: &str) -> Vec<CompileError> {
             }
         }
     }
-    if errors.is_empty() && !stderr.trim().is_empty() {
-        errors.push(CompileError {
-            code: "GCC_ERROR".to_string(),
-            message: stderr
-                .trim()
-                .lines()
-                .last()
-                .unwrap_or("gcc failed")
-                .to_string(),
-            file: fallback_file.to_string(),
-            line: 0,
-            col: 0,
-            suggestion: None,
-            source_line: None,
-            kind: ErrorKind::Other,
-        });
+    if errors.is_empty() {
+        // Warning-only output (e.g. kotlinc's kotlin-home notices on a
+        // successful build) is NOT failure. Only mint a fallback error
+        // when some line actually claims to be one.
+        if let Some(msg) = stderr
+            .trim()
+            .lines()
+            .map(|l| l.trim())
+            .rfind(|t| !t.is_empty() && t.contains("error"))
+        {
+            errors.push(CompileError {
+                code: code.to_string(),
+                message: msg.to_string(),
+                file: fallback_file.to_string(),
+                line: 0,
+                col: 0,
+                suggestion: None,
+                source_line: None,
+                kind: ErrorKind::Other,
+            });
+        }
     }
     errors
 }
@@ -558,8 +594,291 @@ impl LanguageBackend for KotlinBackend {
     fn is_known_std(&self, symbol: &str) -> bool {
         KOTLIN_STDLIB.iter().any(|p| symbol.starts_with(p))
     }
-    // No local kotlinc here: Gradle-backed Android projects keep verifying
-    // through the Android oracle path in `verifier.rs`.
+
+    async fn verify(&self, project_dir: &Path) -> VerificationResult {
+        let Some((kotlinc_cp, stdlib)) = kotlin_toolchain().await else {
+            return VerificationResult {
+                clean: false,
+                errors: vec![CompileError {
+                    code: "KOTLINC_MISSING".to_string(),
+                    message: "No kotlinc found and provisioning failed (tried env, Gradle cache, Maven Central) — cannot verify Kotlin".to_string(),
+                    file: String::new(),
+                    line: 0,
+                    col: 0,
+                    suggestion: None,
+                    source_line: None,
+                    kind: ErrorKind::Other,
+                }],
+                warnings: Vec::new(),
+                stdout: String::new(),
+                stderr: "kotlinc not found".to_string(),
+                full: true,
+            };
+        };
+
+        let mut errors: Vec<CompileError> = Vec::new();
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+
+        let files = collect_with(project_dir, &["kt"]);
+        if files.is_empty() {
+            return VerificationResult {
+                clean: true,
+                errors,
+                warnings: Vec::new(),
+                stdout,
+                stderr,
+                full: true,
+            };
+        }
+
+        // Compile everything into one jar: kotlinc exit code is the oracle.
+        let out_jar = project_dir.join("target").join("grounding-check.jar");
+        let _ = std::fs::create_dir_all(out_jar.parent().unwrap());
+        let mut cmd = Command::new("java");
+        cmd.arg("-cp")
+            .arg(&kotlinc_cp)
+            .arg("org.jetbrains.kotlin.cli.jvm.K2JVMCompiler")
+            .args(&files)
+            .arg("-d")
+            .arg(&out_jar)
+            .arg("-cp")
+            .arg(&stdlib)
+            .current_dir(project_dir);
+        match cmd.output() {
+            Ok(o) => {
+                stdout.push_str(&String::from_utf8_lossy(&o.stdout));
+                let err = String::from_utf8_lossy(&o.stderr).to_string();
+                stderr.push_str(&err);
+                if !o.status.success() {
+                    // Attribute diagnostics to the first file when the
+                    // parser cannot (paths are absolute in kotlinc output).
+                    let fallback = files.first().cloned().unwrap_or_default();
+                    errors.extend(parse_colon_errors(&err, &fallback, "KOTLIN_ERROR"));
+                    if errors.is_empty() {
+                        errors.push(CompileError {
+                            code: "KOTLIN_ERROR".to_string(),
+                            message: "kotlinc failed".to_string(),
+                            file: fallback,
+                            line: 0,
+                            col: 0,
+                            suggestion: None,
+                            source_line: None,
+                            kind: ErrorKind::Other,
+                        });
+                    }
+                    return VerificationResult {
+                        clean: false,
+                        errors,
+                        warnings: Vec::new(),
+                        stdout,
+                        stderr,
+                        full: true,
+                    };
+                }
+            }
+            Err(e) => {
+                return VerificationResult {
+                    clean: false,
+                    errors: vec![CompileError {
+                        code: "JAVA_ERROR".to_string(),
+                        message: format!("Failed to run kotlinc: {}", e),
+                        file: String::new(),
+                        line: 0,
+                        col: 0,
+                        suggestion: None,
+                        source_line: None,
+                        kind: ErrorKind::Other,
+                    }],
+                    warnings: Vec::new(),
+                    stdout,
+                    stderr,
+                    full: true,
+                };
+            }
+        }
+
+        // Behavior: run each `fun main` entry point; nonzero exit or a
+        // `check()` throw fails the run. Bounded at 60s per entry via the
+        // `timeout` utility when present (a hanging main must fail the
+        // run, never the engine).
+        for f in &files {
+            let content = std::fs::read_to_string(f).unwrap_or_default();
+            if !content.contains("fun main(") {
+                continue;
+            }
+            let class = main_class_for(f);
+            let cp = format!("{}:{}", out_jar.to_string_lossy(), stdlib);
+            let run = if command_available("timeout") {
+                Command::new("timeout")
+                    .arg("60")
+                    .arg("java")
+                    .arg("-cp")
+                    .arg(&cp)
+                    .arg(&class)
+                    .current_dir(project_dir)
+                    .output()
+            } else {
+                Command::new("java")
+                    .arg("-cp")
+                    .arg(&cp)
+                    .arg(&class)
+                    .current_dir(project_dir)
+                    .output()
+            };
+            match run {
+                Ok(o) => {
+                    stdout.push_str(&String::from_utf8_lossy(&o.stdout));
+                    stderr.push_str(&String::from_utf8_lossy(&o.stderr));
+                    if !o.status.success() {
+                        let code = o.status.code().unwrap_or(-1);
+                        errors.push(CompileError {
+                            code: "TEST_FAILURE".to_string(),
+                            message: if code == 124 {
+                                format!("{} timed out after 60s", class)
+                            } else {
+                                format!("{} exited {}", class, code)
+                            },
+                            file: f.clone(),
+                            line: 0,
+                            col: 0,
+                            suggestion: None,
+                            source_line: None,
+                            kind: ErrorKind::Other,
+                        });
+                    }
+                }
+                Err(e) => errors.push(CompileError {
+                    code: "JAVA_ERROR".to_string(),
+                    message: format!("Failed to run {}: {}", class, e),
+                    file: f.clone(),
+                    line: 0,
+                    col: 0,
+                    suggestion: None,
+                    source_line: None,
+                    kind: ErrorKind::Other,
+                }),
+            }
+        }
+
+        VerificationResult {
+            clean: errors.is_empty(),
+            errors,
+            warnings: Vec::new(),
+            stdout,
+            stderr,
+            full: true,
+        }
+    }
+}
+
+/// Kotlin file facade: `Rng.kt` with top-level `fun main` → class `RngKt`.
+fn main_class_for(path: &str) -> String {
+    let stem = Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Main");
+    let mut name: String = stem
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    if name.chars().next().is_none_or(|c| c.is_ascii_digit()) {
+        name = format!("File{}", name);
+    }
+    let mut chars = name.chars();
+    let capitalized = match chars.next() {
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+        None => "Main".to_string(),
+    };
+    format!("{}Kt", capitalized)
+}
+
+/// Locate a working kotlinc: `KOTLIN_COMPILER_CP` + `KOTLIN_STDLIB` win;
+/// else the Gradle module cache; else provision pinned jars from Maven
+/// Central like pip fetching a build backend (checksum-verified, cached).
+/// Returns (compiler classpath, stdlib jar).
+async fn kotlin_toolchain() -> Option<(String, String)> {
+    if let (Ok(cp), Ok(stdlib)) = (
+        std::env::var("KOTLIN_COMPILER_CP"),
+        std::env::var("KOTLIN_STDLIB"),
+    ) {
+        return Some((cp, stdlib));
+    }
+    if let Some(found) = search_gradle_kotlin() {
+        return Some(found);
+    }
+    // Provision: download pinned artifacts, verify hashes, cache them.
+    let dir = crate::tool::ensure_tool(&crate::tool::KOTLIN_TOOL)
+        .await
+        .ok()?;
+    let get = |n: &str| dir.join(n).to_string_lossy().to_string();
+    Some((
+        [
+            get("kotlin-compiler-embeddable-2.0.20.jar"),
+            get("kotlin-stdlib-2.0.20.jar"),
+            get("kotlinx-coroutines-core-jvm-1.6.4.jar"),
+            get("annotations-13.0.jar"),
+            get("trove4j-1.0.20200330.jar"),
+        ]
+        .join(":"),
+        get("kotlin-stdlib-2.0.20.jar"),
+    ))
+}
+
+fn search_gradle_kotlin() -> Option<(String, String)> {
+    let home = dirs_home_fallback()?;
+    let cache = home.join(".gradle/caches/modules-2/files-2.1");
+    if !cache.exists() {
+        return None;
+    }
+    let find = |name_part: &str| walk_find(&cache, name_part);
+    let compiler = find("kotlin-compiler-embeddable-")?;
+    let stdlib = find("kotlin-stdlib-2.")?;
+    let coroutines = find("kotlinx-coroutines-core-jvm-")?;
+    let annotations = find("annotations-13.0.jar")?;
+    let trove = find("trove4j-")?;
+    Some((
+        [compiler, stdlib.clone(), coroutines, annotations, trove].join(":"),
+        stdlib,
+    ))
+}
+
+fn dirs_home_fallback() -> Option<std::path::PathBuf> {
+    std::env::var("HOME")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.exists())
+}
+
+fn walk_find(root: &Path, name_part: &str) -> Option<String> {
+    let mut stack = vec![root.to_path_buf()];
+    let mut best: Option<String> = None;
+    let mut seen = 0;
+    while let Some(current) = stack.pop() {
+        if seen > 20000 {
+            break;
+        }
+        seen += 1;
+        let Ok(entries) = std::fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                && name.starts_with(name_part)
+                && name.ends_with(".jar")
+                && !name.contains("sources")
+            {
+                let s = path.to_string_lossy().to_string();
+                if best.as_ref().is_none_or(|b| s > *b) {
+                    best = Some(s);
+                }
+            }
+        }
+    }
+    best
 }
 
 // --- HTML ---
@@ -591,7 +910,7 @@ impl LanguageBackend for HtmlBackend {
         false
     }
 
-    fn verify(&self, project_dir: &Path) -> VerificationResult {
+    async fn verify(&self, project_dir: &Path) -> VerificationResult {
         if !command_available("python3") {
             return VerificationResult {
                 clean: false,
@@ -835,7 +1154,7 @@ impl LanguageBackend for GenericBackend<'_> {
             })
     }
 
-    fn verify(&self, project_dir: &Path) -> VerificationResult {
+    async fn verify(&self, project_dir: &Path) -> VerificationResult {
         if self.spec.verify_cmd.is_empty() {
             return VerificationResult {
                 clean: false,
@@ -1256,44 +1575,42 @@ pub fn backend_for_file<'a>(file: &Path, extra: &'a [LanguageSpec]) -> Backend<'
     if let Some(spec) = extra.iter().find(|s| s.extensions.iter().any(|e| e == ext)) {
         return Backend::Generic(GenericBackend { spec });
     }
-    let builtin: Option<&'static dyn LanguageBackend> = match ext {
-        "py" => Some(&PythonBackend),
-        "kt" | "java" => Some(&KotlinBackend),
-        "c" | "h" => Some(&CBackend),
-        "html" | "htm" => Some(&HtmlBackend),
-        "rs" => Some(&RustBackend),
-        _ => None,
-    };
-    if let Some(b) = builtin {
-        return Backend::Builtin(b);
+    match ext {
+        "py" => Backend::Python,
+        "kt" | "java" => Backend::Kotlin,
+        "c" | "h" => Backend::C,
+        "html" | "htm" => Backend::Html,
+        "rs" => Backend::Rust,
+        _ => {
+            if let Some(spec) = registry()
+                .iter()
+                .find(|s| s.extensions.iter().any(|e| e == ext))
+            {
+                return Backend::Generic(GenericBackend { spec });
+            }
+            Backend::Rust
+        }
     }
-    if let Some(spec) = registry()
-        .iter()
-        .find(|s| s.extensions.iter().any(|e| e == ext))
-    {
-        return Backend::Generic(GenericBackend { spec });
-    }
-    Backend::Builtin(&RustBackend)
 }
 
 /// Backend for a whole project by layout markers (override wins).
 pub fn backend_for_project<'a>(project_dir: &Path, extra: &'a [LanguageSpec]) -> Backend<'a> {
     if project_dir.join("Cargo.toml").exists() {
-        return Backend::Builtin(&RustBackend);
+        return Backend::Rust;
     }
     if project_dir.join("pyproject.toml").exists()
         || project_dir.join("requirements.txt").exists()
         || project_dir.join("setup.py").exists()
         || has_source_files(project_dir, &["py"])
     {
-        return Backend::Builtin(&PythonBackend);
+        return Backend::Python;
     }
     if project_dir.join("build.gradle").exists()
         || project_dir.join("build.gradle.kts").exists()
         || project_dir.join("settings.gradle").exists()
         || has_source_files(project_dir, &["kt", "java"])
     {
-        return Backend::Builtin(&KotlinBackend);
+        return Backend::Kotlin;
     }
     if project_dir.join("go.mod").exists() || has_source_files(project_dir, &["go"]) {
         return generic_by_name(extra, "go");
@@ -1307,17 +1624,17 @@ pub fn backend_for_project<'a>(project_dir: &Path, extra: &'a [LanguageSpec]) ->
         || project_dir.join("CMakeLists.txt").exists()
         || has_source_files(project_dir, &["c"])
     {
-        return Backend::Builtin(&CBackend);
+        return Backend::C;
     }
     if has_source_files(project_dir, &["html", "htm"]) {
-        return Backend::Builtin(&HtmlBackend);
+        return Backend::Html;
     }
     // Last resort: first source file's backend wins over the Rust default.
     if let Some(ext) = first_source_extension(project_dir, extra) {
         let probe = Path::new("probe").with_extension(ext);
         return backend_for_file(&probe, extra);
     }
-    Backend::Builtin(&RustBackend)
+    Backend::Rust
 }
 
 fn generic_by_name<'a>(extra: &'a [LanguageSpec], name: &str) -> Backend<'a> {
@@ -1326,7 +1643,7 @@ fn generic_by_name<'a>(extra: &'a [LanguageSpec], name: &str) -> Backend<'a> {
     } else if let Some(spec) = registry().iter().find(|s| s.name == name) {
         Backend::Generic(GenericBackend { spec })
     } else {
-        Backend::Builtin(&RustBackend)
+        Backend::Rust
     }
 }
 
@@ -1354,59 +1671,70 @@ pub const KNOWN_EXTENSIONS: &[&str] = &[
 ];
 
 /// Unified handle for dispatch without lifetime gymnastics at call sites.
+/// Concrete variants (no trait objects) so the trait can stay `async`.
 pub enum Backend<'a> {
-    Builtin(&'static dyn LanguageBackend),
+    Rust,
+    Python,
+    Kotlin,
+    C,
+    Html,
     Generic(GenericBackend<'a>),
+}
+
+macro_rules! dispatch {
+    ($self:ident, $method:ident ( $($arg:expr),* )) => {
+        match $self {
+            Backend::Rust => RustBackend.$method($($arg),*),
+            Backend::Python => PythonBackend.$method($($arg),*),
+            Backend::Kotlin => KotlinBackend.$method($($arg),*),
+            Backend::C => CBackend.$method($($arg),*),
+            Backend::Html => HtmlBackend.$method($($arg),*),
+            Backend::Generic(g) => g.$method($($arg),*),
+        }
+    };
 }
 
 impl LanguageBackend for Backend<'_> {
     fn language(&self) -> &str {
-        match self {
-            Backend::Builtin(b) => b.language(),
-            Backend::Generic(g) => g.language(),
-        }
+        dispatch!(self, language())
     }
 
     fn extensions(&self) -> &'static [&'static str] {
         match self {
-            Backend::Builtin(b) => b.extensions(),
+            Backend::Rust => RustBackend.extensions(),
+            Backend::Python => PythonBackend.extensions(),
+            Backend::Kotlin => KotlinBackend.extensions(),
+            Backend::C => CBackend.extensions(),
+            Backend::Html => HtmlBackend.extensions(),
             Backend::Generic(_) => &[],
         }
     }
 
     fn import_line(&self, path: &str) -> String {
-        match self {
-            Backend::Builtin(b) => b.import_line(path),
-            Backend::Generic(g) => g.import_line(path),
-        }
+        dispatch!(self, import_line(path))
     }
 
     fn is_import_line(&self, line: &str) -> bool {
-        match self {
-            Backend::Builtin(b) => b.is_import_line(line),
-            Backend::Generic(g) => g.is_import_line(line),
-        }
+        dispatch!(self, is_import_line(line))
     }
 
     fn is_known_std(&self, symbol: &str) -> bool {
-        match self {
-            Backend::Builtin(b) => b.is_known_std(symbol),
-            Backend::Generic(g) => g.is_known_std(symbol),
-        }
+        dispatch!(self, is_known_std(symbol))
     }
 
-    fn verify(&self, project_dir: &Path) -> VerificationResult {
+    async fn verify(&self, project_dir: &Path) -> VerificationResult {
         match self {
-            Backend::Builtin(b) => b.verify(project_dir),
-            Backend::Generic(g) => g.verify(project_dir),
+            Backend::Rust => RustBackend.verify(project_dir).await,
+            Backend::Python => PythonBackend.verify(project_dir).await,
+            Backend::Kotlin => KotlinBackend.verify(project_dir).await,
+            Backend::C => CBackend.verify(project_dir).await,
+            Backend::Html => HtmlBackend.verify(project_dir).await,
+            Backend::Generic(g) => g.verify(project_dir).await,
         }
     }
 
     fn skip_lines(&self) -> usize {
-        match self {
-            Backend::Builtin(b) => b.skip_lines(),
-            Backend::Generic(g) => g.skip_lines(),
-        }
+        dispatch!(self, skip_lines())
     }
 }
 

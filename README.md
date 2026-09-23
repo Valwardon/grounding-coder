@@ -72,9 +72,16 @@ Oracle verify (compiler / tests / parser per language)
   `mod geometry;` wired into `lib.rs` in one transaction. If any task fails
   after others applied, every file rolls back byte-identical.
 - **Any language with a checker** — Rust, Python (`py_compile`+pytest), C
-  (`gcc`), Kotlin, JavaScript (registry data + `node --check`), HTML
-  (tag-balance oracle), Go (honest `GO_MISSING` without toolchain), plus any
-  language at all via a project `.grounding.toml` `[language]` table.
+  (`gcc`), Kotlin (`kotlinc` compile + JVM run of contracts), JavaScript
+  (registry data + `node --check`), HTML (tag-balance oracle), Go (honest
+  `GO_MISSING` without toolchain), plus any language at all via a project
+  `.grounding.toml` `[language]` table.
+- **Tool provisioning** — missing compilers are fetched pinned-by-SHA256
+  from Maven Central into a shared cache (Gradle cache reused when present),
+  like pip fetching a build backend. Corrupt bytes are deleted, never run.
+- **Kotlin synthesis** — `RandomNumberGenerator` over `kotlin.random.Random`
+  from constructor/delegation metadata, judged by `check()` contracts run
+  on the JVM. Proved live: `Random(42).nextInt() == 972016666`.
 - **Web pages from content slots** — title/sections/footer as pure data,
   engine-owned escaped template, parser oracle. Hostile
   `<script>alert(1)</script>` content renders as inert text.

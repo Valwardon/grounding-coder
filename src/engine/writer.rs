@@ -371,9 +371,19 @@ impl CodeWriter {
             })
             .unwrap_or_default();
 
+        let lang = if target_file
+            .extension()
+            .is_some_and(|e| e == "kt" || e == "java")
+        {
+            "kotlin"
+        } else {
+            "rust"
+        }
+        .to_string();
         let synth = super::synthesize::Synthesizer::new();
         let req = super::synthesize::SynthRequest {
             fn_name: name.clone(),
+            lang,
             params,
             ret,
             cases,
@@ -383,7 +393,11 @@ impl CodeWriter {
         let candidates = synth.synthesize(&req)?;
         let contract_test = synth.contract_test(&req);
         let item_exists = if req.struct_def.is_some() {
-            content.contains(&format!("struct {}", req.fn_name))
+            if req.lang == "kotlin" {
+                content.contains(&format!("class {}", req.fn_name))
+            } else {
+                content.contains(&format!("struct {}", req.fn_name))
+            }
         } else {
             content.contains(&format!("fn {}", req.fn_name))
         };
@@ -437,6 +451,10 @@ impl CodeWriter {
     /// crate root, build the `mod <m>;` insert edit. `None` when no wiring
     /// is needed. Errors when no crate root exists (module unreachable).
     fn mod_wire_edit(&self, target: &Path) -> Result<Option<SourceEdit>, String> {
+        // Rust modules only — other languages have no `mod` wiring.
+        if !target.extension().is_some_and(|e| e == "rs") {
+            return Ok(None);
+        }
         let rel = target.strip_prefix(&self.project_dir).unwrap_or(target);
         let mut comps = rel.components();
         let (Some(first), Some(second), None) = (comps.next(), comps.next(), comps.next()) else {

@@ -34,6 +34,7 @@ hyper-rustls = { version = "0.27", features = ["http1", "webpki-roots", "aws-lc-
 http-body-util = "0.1"
 bytes = "1"
 base64 = "0.22"
+sha2 = "0.10"
 # Parse-level oracle for hosts without cargo (Android): real syntax facts,
 # honestly labeled — never a substitute claim for type/test verification.
 syn = { version = "2", features = ["full", "parsing"] }

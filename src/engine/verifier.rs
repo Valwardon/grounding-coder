@@ -78,14 +78,17 @@ impl CodeVerifier {
         // backend IS the oracle. Rust/Kotlin keep their mature paths.
         let backend = super::lang::backend_for_project(&self.project_dir, &self.extra);
         match backend.language() {
-            "python" => super::lang::PythonBackend.verify(&self.project_dir),
-            "c" => super::lang::CBackend.verify(&self.project_dir),
-            "rust" | "kotlin" => match self.project_type {
-                ProjectType::Rust => self.verify_rust(),
+            "python" => super::lang::PythonBackend.verify(&self.project_dir).await,
+            "c" => super::lang::CBackend.verify(&self.project_dir).await,
+            "rust" => self.verify_rust(),
+            // Gradle projects keep the Android path; plain Kotlin sources
+            // verify through kotlinc + run.
+            "kotlin" => match self.project_type {
                 ProjectType::Android => self.verify_android(),
+                ProjectType::Rust => super::lang::KotlinBackend.verify(&self.project_dir).await,
             },
             // Registry and `.grounding.toml` languages verify themselves.
-            _ => backend.verify(&self.project_dir),
+            _ => backend.verify(&self.project_dir).await,
         }
     }
 
@@ -358,9 +361,11 @@ fn detect_project_type(dir: &Path) -> ProjectType {
         ProjectType::Rust
     } else if dir.join("gradlew").exists()
         || dir.join("build.gradle").exists()
+        || dir.join("build.gradle.kts").exists()
         || dir.join("settings.gradle").exists()
-        || has_source_files(dir, &["kt", "java"])
     {
+        // Gradle markers only: bare `.kt` sources verify through kotlinc,
+        // not through a build that isn't there.
         ProjectType::Android
     } else {
         // Default to Rust for the MVP
@@ -375,40 +380,6 @@ fn command_available(name: &str) -> bool {
         .arg("--version")
         .output()
         .is_ok_and(|o| o.status.success())
-}
-
-fn has_source_files(dir: &Path, extensions: &[&str]) -> bool {
-    let mut stack = vec![dir.to_path_buf()];
-    let ignore = [
-        ".git",
-        "target",
-        "build",
-        ".gradle",
-        ".idea",
-        "node_modules",
-    ];
-    while let Some(current) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&current) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                if path
-                    .file_name()
-                    .is_none_or(|n| ignore.contains(&n.to_string_lossy().as_ref()))
-                {
-                    continue;
-                }
-                stack.push(path);
-            } else if let Some(ext) = path.extension().map(|e| e.to_string_lossy().to_string())
-                && extensions.contains(&ext.as_str())
-            {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 fn split_errors_warnings(errors: Vec<CompileError>) -> (Vec<CompileError>, Vec<CompileError>) {
