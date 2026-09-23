@@ -65,6 +65,20 @@ impl Default for ApiConfig {
 /// The engine takes over from here: all code is generated deterministically.
 pub use crate::engine::StructuredIntent;
 
+/// Free models probed working against OpenRouter, in fallback order.
+/// The user's configured model is always tried first; these only cover
+/// shared-pool 429s. Probed 2026-09: liquid + nemotron answer, others
+/// rate-limit or gate.
+const FREE_FALLBACK_MODELS: &[&str] = &[
+    "liquid/lfm-2.5-2.6b:free",
+    "nvidia/nemotron-3.5-lightning:free",
+];
+
+/// True when the error is upstream throttling worth retrying/falling back.
+fn is_rate_limited(e: &str) -> bool {
+    e.contains("429") || e.to_lowercase().contains("rate-limit")
+}
+
 /// OpenRouter client — sends NL prompt, receives structured intent.
 /// UNVERIFIED: the LLM's output is never trusted. It's validated as JSON
 /// and then decomposed into deterministic sub-tasks.
@@ -107,21 +121,62 @@ impl LlmClient {
             "- confidence: number 0.0-1.0\n"
         );
 
-        // crate::http verifies with bundled roots — no platform trust
-        // store, so this cannot hit the Android JNI verifier abort.
-        let body = crate::http::post_json(
-            &format!("{}/chat/completions", self.config.base_url),
-            self.config.openrouter_key.as_deref(),
-            &serde_json::json!({
-                "model": &self.config.model,
-                "response_format": {"type": "json_object"},
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": prompt}
-                ]
-            }),
-        )
-        .await?;
+        // Free shared-pool models throttle (HTTP 429) routinely. Try the
+        // configured model first, then known-good free fallbacks — the
+        // translator output is validated identically either way, so a
+        // fallback can never weaken the determinism boundary.
+        let mut candidates = vec![self.config.model.clone()];
+        for fallback in FREE_FALLBACK_MODELS {
+            if !candidates.iter().any(|m| m == fallback) {
+                candidates.push(fallback.to_string());
+            }
+        }
+        let mut last_err = String::new();
+        let mut body = None;
+        for (i, model) in candidates.iter().enumerate() {
+            if i > 0 {
+                // Brief backoff; shared pools recover in seconds.
+                tokio::time::sleep(std::time::Duration::from_secs(2 * i as u64)).await;
+                log::info!(
+                    "Translator fallback {}/{}: {}",
+                    i + 1,
+                    candidates.len(),
+                    model
+                );
+            }
+            // crate::http verifies with bundled roots — no platform trust
+            // store, so this cannot hit the Android JNI verifier abort.
+            match crate::http::post_json(
+                &format!("{}/chat/completions", self.config.base_url),
+                self.config.openrouter_key.as_deref(),
+                &serde_json::json!({
+                    "model": model,
+                    "response_format": {"type": "json_object"},
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": prompt}
+                    ]
+                }),
+            )
+            .await
+            {
+                Ok(b) => {
+                    body = Some(b);
+                    break;
+                }
+                Err(e) if is_rate_limited(&e) && i + 1 < candidates.len() => {
+                    log::warn!("Translator throttled on {}: {}", model, truncate(&e, 160));
+                    last_err = e;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        let body = body.ok_or_else(|| {
+            format!(
+                "All translator models throttled. Last: {}. Retry shortly or set a faster model in Settings.",
+                truncate(&last_err, 300)
+            )
+        })?;
         let content = body["choices"][0]["message"]["content"]
             .as_str()
             .ok_or("No content in response")?;
