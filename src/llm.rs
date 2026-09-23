@@ -285,11 +285,21 @@ fn normalize_intent(v: &serde_json::Value, prompt: &str) -> StructuredIntent {
 }
 
 fn collect_strings(v: &serde_json::Value, out: &mut Vec<String>) {
+    collect_strings_depth(v, out, 0);
+}
+
+/// Depth-capped recursion: hostile model output nested past this is
+/// truncated, never a stack overflow (which the OS reports as death,
+/// not as a catchable panic).
+fn collect_strings_depth(v: &serde_json::Value, out: &mut Vec<String>, depth: u8) {
+    if depth > 32 || out.len() > 512 {
+        return;
+    }
     match v {
         serde_json::Value::String(s) => out.push(s.clone()),
         serde_json::Value::Array(a) => {
             for x in a {
-                collect_strings(x, out);
+                collect_strings_depth(x, out, depth + 1);
             }
         }
         serde_json::Value::Object(m) => {
@@ -298,7 +308,7 @@ fn collect_strings(v: &serde_json::Value, out: &mut Vec<String>) {
                 if k.eq_ignore_ascii_case("code") {
                     continue;
                 }
-                collect_strings(x, out);
+                collect_strings_depth(x, out, depth + 1);
             }
         }
         _ => {}

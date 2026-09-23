@@ -18,6 +18,7 @@ pub fn Chat(settings: Signal<ApiConfig>, on_done: EventHandler<Vec<String>>) -> 
             div { class: "screen-header",
                 h2 { "Chat" }
                 span { class: "subtitle", "LLM translates → engine proves → oracle verifies" }
+                span { class: "config-line", "{config_summary(&settings())}" }
             }
             div { class: "chat-container",
                 if history().is_empty() {
@@ -71,6 +72,48 @@ pub fn Chat(settings: Signal<ApiConfig>, on_done: EventHandler<Vec<String>>) -> 
 /// The LLM is NOT involved in code generation. Returns display text plus
 /// the files a successful run changed.
 ///
+/// Last panic location captured by the hook below (file:line). Lets the
+/// app report its own crash site on-device where there is no logcat.
+static LAST_PANIC: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+static HOOK_SET: std::sync::Once = std::sync::Once::new();
+
+fn install_panic_hook() {
+    HOOK_SET.call_once(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let loc = info
+                .location()
+                .map(|l| format!("{}:{}", l.file(), l.line()))
+                .unwrap_or_else(|| "unknown".to_string());
+            if let Ok(mut slot) = LAST_PANIC.lock() {
+                *slot = Some(loc);
+            }
+            prev(info);
+        }));
+    });
+}
+
+fn take_panic_location() -> Option<String> {
+    LAST_PANIC.lock().ok().and_then(|mut s| s.take())
+}
+
+/// One-line proof of what the engine is actually using: key presence
+/// (never the key), model, project, budget. Ends "is it reading config"
+/// debates with facts on screen.
+pub fn config_summary(cfg: &ApiConfig) -> String {
+    format!(
+        "key:{} model:{} project:{} budget:{}",
+        if cfg.openrouter_key.is_some() {
+            "set"
+        } else {
+            "MISSING"
+        },
+        cfg.model,
+        cfg.project_path,
+        cfg.max_retries
+    )
+}
+
 /// Hostile-OS armor: the project path is validated before anything runs,
 /// and the whole pipeline runs under panic recovery — on Android a Rust
 /// panic aborts the process with no message, so a panic must become chat
@@ -101,18 +144,24 @@ async fn run_task_deterministic(prompt: &str, cfg: &ApiConfig) -> (String, Vec<S
             Vec::new(),
         );
     }
+    install_panic_hook();
     let fut = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(run_task_inner(
         prompt, cfg,
     )));
     match fut.await {
         Ok(result) => result,
-        Err(_) => (
-            "ENGINE PANIC recovered: the engine hit an internal error instead of \
-             answering. Nothing was committed — snapshots roll back on failure. \
-             Report this prompt so the armor can become a proper fix."
-                .to_string(),
-            Vec::new(),
-        ),
+        Err(_) => {
+            let loc = take_panic_location().unwrap_or_else(|| "unknown".to_string());
+            (
+                format!(
+                    "ENGINE PANIC recovered at {} — nothing committed, snapshots \
+                     rolled back. Config in use: {}. Report the prompt + location.",
+                    loc,
+                    config_summary(cfg)
+                ),
+                Vec::new(),
+            )
+        }
     }
 }
 

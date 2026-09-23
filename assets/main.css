@@ -51,6 +51,12 @@ body {
     color: #888;
 }
 
+.config-line {
+    font-size: 11px;
+    color: #5a7a5a;
+    font-family: 'Fira Code', monospace;
+}
+
 .card-block {
     background: #1a1a2e;
     border: 1px solid #2a2a3e;
