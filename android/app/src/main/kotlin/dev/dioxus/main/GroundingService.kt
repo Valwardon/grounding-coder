@@ -43,7 +43,7 @@ class GroundingService : Service() {
             this,
             NOTIFICATION_ID,
             note,
-            androidx.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+            android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
         )
         return START_STICKY
     }
