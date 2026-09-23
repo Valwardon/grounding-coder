@@ -305,13 +305,28 @@ fn collect_strings(v: &serde_json::Value, out: &mut Vec<String>) {
     }
 }
 
-fn scan_use_paths(t: &str) -> Vec<String> {
+/// Scan for `use a::b` paths and bare `std::...` tokens.
+/// Byte-safe by construction: all matching is done on bytes (which never
+/// panic), and string slices are built only over ASCII runs, whose every
+/// index is a char boundary. Multibyte model output can never abort this.
+pub(crate) fn scan_use_paths(t: &str) -> Vec<String> {
+    fn push_token(bytes: &[u8], start: usize, end: usize, out: &mut Vec<String>) {
+        if end <= start {
+            return;
+        }
+        let p = String::from_utf8_lossy(&bytes[start..end])
+            .trim_end_matches(':')
+            .to_string();
+        if p.contains("::") && !out.contains(&p) {
+            out.push(p);
+        }
+    }
     let mut out = Vec::new();
     let bytes = t.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         // Match `use <path>` where path looks like a::b::C.
-        if t[i..].starts_with("use ") || t[i..].starts_with("use\t") {
+        if bytes[i..].starts_with(b"use ") || bytes[i..].starts_with(b"use\t") {
             let mut j = i + 4;
             while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
                 j += 1;
@@ -322,24 +337,16 @@ fn scan_use_paths(t: &str) -> Vec<String> {
             {
                 j += 1;
             }
-            if j > start {
-                let p = t[start..j].trim_end_matches(':').to_string();
-                if p.contains("::") && !out.contains(&p) {
-                    out.push(p);
-                }
-            }
+            push_token(bytes, start, j, &mut out);
             i = j;
-        } else if t[i..].starts_with("std::") {
+        } else if bytes[i..].starts_with(b"std::") {
             let mut j = i;
             while j < bytes.len()
                 && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_' || bytes[j] == b':')
             {
                 j += 1;
             }
-            let p = t[i..j].trim_end_matches(':').to_string();
-            if !out.contains(&p) {
-                out.push(p);
-            }
+            push_token(bytes, i, j, &mut out);
             i = j;
         } else {
             i += 1;
@@ -349,24 +356,30 @@ fn scan_use_paths(t: &str) -> Vec<String> {
 }
 
 fn scan_src_file(t: &str) -> Option<String> {
-    let mut i = 0;
-    while let Some(pos) = t[i..].find("src/") {
-        let start = i + pos;
-        let mut j = start;
-        while j < t.len()
-            && !t[j..].chars().next().is_some_and(|c| {
-                c.is_whitespace() || matches!(c, '"' | '\'' | '`' | ')' | ',' | ';')
-            })
-        {
-            j += 1;
+    // Char-boundary safe: `from` only ever holds boundary offsets, and
+    // every slice goes through boundary-checked arithmetic below.
+    let mut from = 0;
+    while from <= t.len() {
+        let rest = t.get(from..)?;
+        let pos = rest.find("src/")?;
+        let start = from + pos;
+        let mut end = start;
+        for (idx, c) in t[start..].char_indices() {
+            if c.is_whitespace() || matches!(c, '"' | '\'' | '`' | ')' | ',' | ';') {
+                break;
+            }
+            end = start + idx + c.len_utf8();
         }
-        let p = t[start..j]
+        let p = t
+            .get(start..end)
+            .unwrap_or("")
             .trim_end_matches(['.', ',', ';', ':', '"', '\''])
             .to_string();
         if p.ends_with(".rs") || p.ends_with(".kt") || p.ends_with(".java") {
             return Some(p);
         }
-        i = j.max(start + 4);
+        // "src/" is 4 ASCII bytes, so start + 4 is always a boundary.
+        from = end.max(start + 4);
     }
     None
 }
@@ -375,7 +388,11 @@ fn truncate(s: &str, n: usize) -> String {
     if s.len() <= n {
         s.to_string()
     } else {
-        format!("{}…", &s[..n])
+        let mut m = n;
+        while !s.is_char_boundary(m) {
+            m -= 1;
+        }
+        format!("{}…", &s[..m])
     }
 }
 
@@ -490,4 +507,34 @@ pub fn load_config(path: &str) -> ApiConfig {
         .ok()
         .and_then(|s| serde_json::from_str::<ApiConfig>(&s).ok())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Multibyte model output must never abort string scanning.
+    /// This class of bug killed the app on-device with no message.
+    #[test]
+    fn scanners_survive_multibyte() {
+        let t =
+            "Add HashMap — 日本語テスト 🎉 use std::collections::HashMap; see src/lib.rs — done —";
+        let paths = scan_use_paths(t);
+        assert!(paths.contains(&"std::collections::HashMap".to_string()));
+        assert_eq!(scan_src_file(t).as_deref(), Some("src/lib.rs"));
+        let _ = truncate(&"é".repeat(200), 120);
+        let _ = truncate("emoji 🎉🎉🎉 boundary", 8);
+        let _ = extract_json_object(t);
+    }
+
+    #[test]
+    fn normalize_unicode_prompt_without_panic() {
+        let v = serde_json::json!({"goal": "do things — fast 🚀"});
+        let intent = normalize_intent(&v, "Add HashMap — now 🚀 src/lib.rs");
+        assert!(
+            intent
+                .imports
+                .contains(&"std::collections::HashMap".to_string())
+        );
+    }
 }

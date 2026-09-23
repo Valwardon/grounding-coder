@@ -1533,7 +1533,13 @@ fn truncate_str(s: &str, n: usize) -> String {
     if s.len() <= n {
         s.to_string()
     } else {
-        format!("{}…", &s[..n])
+        // Floor to a char boundary (see plan.rs): raw byte slicing panics
+        // on multibyte text and panics abort the mobile process.
+        let mut m = n;
+        while !s.is_char_boundary(m) {
+            m -= 1;
+        }
+        format!("{}…", &s[..m])
     }
 }
 

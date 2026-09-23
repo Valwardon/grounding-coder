@@ -286,45 +286,11 @@ fn infer_import_from_error(error: &CompileError) -> String {
 /// Extract a `use` path from the compiler's own suggestion text.
 /// Returns the first plausible path, preferring `std::` ones.
 /// This is evidence, not inference: rustc named these exact bytes.
+/// Scanning goes through the shared byte-safe scanner — suggestion text
+/// with multibyte characters must never abort the process.
 fn suggested_import(error: &CompileError) -> Option<String> {
     let text = error.suggestion.as_deref()?;
-    let mut found: Vec<String> = Vec::new();
-    // `use a::b::C;` shapes.
-    let mut i = 0;
-    while let Some(pos) = text[i..].find("use ") {
-        let start = i + pos + 4;
-        let mut end = start;
-        while end < text.len()
-            && (text.as_bytes()[end].is_ascii_alphanumeric()
-                || matches!(text.as_bytes()[end], b'_' | b':'))
-        {
-            end += 1;
-        }
-        if end > start {
-            let p = text[start..end].trim_end_matches(':').to_string();
-            if p.contains("::") && !found.contains(&p) {
-                found.push(p);
-            }
-        }
-        i = end.max(start + 1);
-    }
-    // Bare `std::...` tokens.
-    let mut j = 0;
-    while let Some(pos) = text[j..].find("std::") {
-        let start = j + pos;
-        let mut end = start;
-        while end < text.len()
-            && (text.as_bytes()[end].is_ascii_alphanumeric()
-                || matches!(text.as_bytes()[end], b'_' | b':'))
-        {
-            end += 1;
-        }
-        let p = text[start..end].trim_end_matches(':').to_string();
-        if !found.contains(&p) {
-            found.push(p);
-        }
-        j = end.max(start + 1);
-    }
+    let found = crate::llm::scan_use_paths(text);
     // Verified-shape paths first; anything else still faces the
     // planner's own std/symbol check downstream.
     found

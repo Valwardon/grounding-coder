@@ -67,7 +67,13 @@ fn truncate(s: &str, n: usize) -> String {
     if s.len() <= n {
         s.to_string()
     } else {
-        format!("{}…", &s[..n])
+        // Floor to a char boundary: slicing multibyte text at a raw byte
+        // offset panics, and on Android a panic aborts the process.
+        let mut m = n;
+        while !s.is_char_boundary(m) {
+            m -= 1;
+        }
+        format!("{}…", &s[..m])
     }
 }
 
