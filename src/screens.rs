@@ -113,7 +113,7 @@ pub fn config_summary(cfg: &ApiConfig) -> String {
             "MISSING"
         },
         cfg.model,
-        cfg.project_path,
+        crate::resolve_project_dir(&cfg.project_path),
         cfg.max_retries
     )
 }
@@ -129,12 +129,14 @@ async fn run_task_deterministic(prompt: &str, cfg: &ApiConfig) -> (String, Vec<S
             Vec::new(),
         );
     }
-    let project = std::path::Path::new(&cfg.project_path);
+    // Bare "." means the app-private dir handed over via JNI at boot.
+    let resolved = crate::resolve_project_dir(&cfg.project_path);
+    let project = std::path::Path::new(&resolved);
     if !project.exists() {
         return (
             format!(
-                "ERROR: project path does not exist: {}. Fix it in Settings.",
-                cfg.project_path
+                "ERROR: project path does not exist: {} (set: {}). Fix it in Settings.",
+                resolved, cfg.project_path
             ),
             Vec::new(),
         );
@@ -142,8 +144,8 @@ async fn run_task_deterministic(prompt: &str, cfg: &ApiConfig) -> (String, Vec<S
     if !project.is_dir() {
         return (
             format!(
-                "ERROR: project path is not a directory: {}. Fix it in Settings.",
-                cfg.project_path
+                "ERROR: project path is not a directory: {} (set: {}). Fix it in Settings.",
+                resolved, cfg.project_path
             ),
             Vec::new(),
         );
@@ -174,7 +176,10 @@ async fn run_task_inner(prompt: &str, cfg: &ApiConfig) -> (String, Vec<String>) 
     match llm_client.translate(prompt).await {
         Ok(intent) => match serde_json::to_string(&intent) {
             Ok(intent_json) => {
-                let mut bot = CodeBot::new(&cfg.project_path, cfg.max_retries);
+                let mut bot = CodeBot::new(
+                    &crate::resolve_project_dir(&cfg.project_path),
+                    cfg.max_retries,
+                );
                 match bot.run_task(&intent_json).await {
                     Ok(outcome) => {
                         let changed = match &outcome {
@@ -210,7 +215,7 @@ pub fn Code(
     // Re-list whenever Chat reports a completed run.
     use_effect(move || {
         let _tick = refresh();
-        let project = settings().project_path.clone();
+        let project = crate::resolve_project_dir(&settings().project_path);
         spawn(async move {
             match list_sources(&project) {
                 Ok(list) => {
@@ -237,7 +242,8 @@ pub fn Code(
                         class: if selected().as_deref() == Some(f.as_str()) { "code-item active" } else { "code-item" },
                         onclick: {
                             let f = f.clone();
-                            let project = settings().project_path.clone();
+                            let project =
+                                crate::resolve_project_dir(&settings().project_path);
                             move |_| {
                                 selected.set(Some(f.clone()));
                                 let path = std::path::Path::new(&project).join(&f);
@@ -448,7 +454,8 @@ pub fn Settings(settings: Signal<ApiConfig>) -> Element {
                 button {
                     class: "btn-secondary",
                     onclick: move |_| {
-                        let project = settings().project_path.clone();
+                        let project =
+                            crate::resolve_project_dir(&settings().project_path);
                         spawn(async move {
                             let bot = CodeBot::new(&project, 5);
                             let syms = bot.symbols().len();

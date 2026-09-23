@@ -141,6 +141,111 @@ impl std::fmt::Display for AgentOutcome {
     }
 }
 
+/// Inject a page definition when the intent asks for a webpage whose
+/// target file does not exist yet. Without this, valid-schema model output
+/// with stub actions dies on the read — the exact reported PLAN_ERROR.
+/// No-op when a page define exists, the target isn't `.html`, or the file
+/// already exists (edit flows stay untouched).
+fn ensure_page_create(intent: &mut StructuredIntent, project_dir: &std::path::Path) {
+    if intent.define.iter().flatten().any(|d| d.kind == "page") {
+        return;
+    }
+    let target = match intent.file.clone() {
+        Some(f) => f.trim_start_matches("./").to_string(),
+        None => return,
+    };
+    if !(target.ends_with(".html") || target.ends_with(".htm")) {
+        return;
+    }
+    if project_dir.join(&target).exists() {
+        return;
+    }
+    let goal = intent.goal.clone();
+    let lower = goal.to_lowercase();
+    const TRIGGERS: &[&str] = &[
+        "html",
+        "website",
+        "webpage",
+        "homepage",
+        "landing page",
+        "web site",
+        "web page",
+        "site",
+        "page",
+    ];
+    if !TRIGGERS.iter().any(|t| lower.contains(t)) {
+        return;
+    }
+    let title = page_title_from_goal(&goal);
+    intent.define.push(Some(IntentDefinition {
+        name: "homepage".to_string(),
+        kind: "page".to_string(),
+        references: Vec::new(),
+        signature: None,
+        cases: Vec::new(),
+        fields: Vec::new(),
+        methods: Vec::new(),
+        title: Some(title),
+        sections: vec![SectionDef {
+            heading: "Welcome".to_string(),
+            body: goal.chars().take(200).collect(),
+        }],
+        footer: Some(String::new()),
+    }));
+    // Stub tasks cannot build a missing page — the definition owns it now.
+    intent.actions.clear();
+    intent.imports.clear();
+    intent.test.clear();
+    log::info!("Page create injected for {}", target);
+}
+
+/// Title from "for X" / "about X" by words (no byte arithmetic across
+/// case mappings — see the translator for why that matters).
+fn page_title_from_goal(goal: &str) -> String {
+    let words: Vec<&str> = goal.split_whitespace().collect();
+    for (i, w) in words.iter().enumerate() {
+        if w.eq_ignore_ascii_case("for") || w.eq_ignore_ascii_case("about") {
+            let tail: Vec<&str> = words
+                .iter()
+                .skip(i + 1)
+                .filter(|w| !["a", "an", "the"].contains(&w.to_lowercase().as_str()))
+                .take(6)
+                .cloned()
+                .collect();
+            if !tail.is_empty() {
+                let title = tail
+                    .join(" ")
+                    .trim_end_matches(['.', ',', '!', '?'])
+                    .to_string();
+                return capitalize_page_title(&title);
+            }
+        }
+    }
+    capitalize_page_title(
+        &words
+            .iter()
+            .filter(|w| {
+                ![
+                    "build", "create", "make", "write", "generate", "a", "an", "the", "simple",
+                    "new",
+                ]
+                .contains(&w.to_lowercase().as_str())
+            })
+            .take(6)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+fn capitalize_page_title(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+        None => "Homepage".to_string(),
+    }
+}
+
 /// A terminal honest refusal with one diagnostic.
 fn blocked_outcome(reason: BlockReason, code: &str, message: String) -> AgentOutcome {
     AgentOutcome::Blocked {
@@ -212,8 +317,14 @@ impl CodeBot {
     ///   snapshot → apply → verify → commit OR rollback
     pub async fn run_task(&mut self, intent_json: &str) -> Result<AgentOutcome, String> {
         // Step 0: Parse intent and research unknown symbols
-        let intent: StructuredIntent = serde_json::from_str(intent_json)
+        let mut intent: StructuredIntent = serde_json::from_str(intent_json)
             .map_err(|e| format!("Failed to parse intent: {}", e))?;
+
+        // A webpage request whose target does not exist yet cannot be served
+        // by stub tasks (they fail the read). Inject a page definition from
+        // the goal so the page family creates it — content slots carry the
+        // goal's own words, never invented copy. Existing files are untouched.
+        ensure_page_create(&mut intent, &self.project_dir);
 
         // Collect all referenced symbols that the bot doesn't know yet
         let mut unknown_symbols = Vec::new();
@@ -247,8 +358,12 @@ impl CodeBot {
             }
         }
 
-        // Step 1: TaskDecomposer breaks the intent into sub-tasks
-        let tasks = self.decomposer.decompose(intent_json, &self.arena.read());
+        // Step 1: TaskDecomposer breaks the intent into sub-tasks.
+        // Re-serialize: repairs above (page injection) mutate the intent,
+        // and the decomposer must see the repaired shape, not the raw input.
+        let intent_json = serde_json::to_string(&intent)
+            .map_err(|e| format!("Failed to re-serialize intent: {}", e))?;
+        let tasks = self.decomposer.decompose(&intent_json, &self.arena.read());
 
         let mut changes = Vec::new();
         let mut errors_fixed = 0u32;

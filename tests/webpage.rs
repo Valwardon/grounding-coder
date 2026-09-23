@@ -101,6 +101,49 @@ async fn hostile_content_is_escaped_not_executed() {
     let _ = fs::remove_dir_all(&base);
 }
 
+/// The reported on-device failure: valid-schema model output with stub
+/// actions and no page definition, targeting a missing index.html.
+/// The engine must inject the page definition itself, not PLAN_ERROR.
+#[tokio::test]
+async fn strict_intent_without_page_define_still_builds() {
+    let base = tmp_dir();
+    let project = base.to_string_lossy().to_string();
+    let mut bot = CodeBot::new(&project, 5);
+    let intent = serde_json::json!({
+        "goal": "Build a simple HTML website for a dentist",
+        "file": "./index.html",
+        "language": "html",
+        "actions": [{"Action": {"action": "build", "params": [], "references": []}}],
+        "references": [],
+        "define": [],
+        "test": [],
+        "imports": [],
+        "platform": "web",
+        "architecture": "native",
+        "runtime": "",
+        "capabilities": [],
+        "domains": [],
+        "constraints": [],
+        "dependencies": [],
+        "unknown_requirements": [],
+        "confidence": 0.8
+    });
+    let outcome = bot
+        .run_task(&serde_json::to_string(&intent).unwrap())
+        .await
+        .expect("run");
+    let rendered = format!("{}", outcome);
+    assert!(
+        rendered.contains("SUCCESS"),
+        "expected page injection SUCCESS, got: {}",
+        rendered
+    );
+    let html = fs::read_to_string(base.join("index.html")).unwrap();
+    assert!(html.contains("<!DOCTYPE html>"), "no doctype");
+    assert!(html.contains("Dentist"), "no derived title:\n{}", html);
+    let _ = fs::remove_dir_all(&base);
+}
+
 #[tokio::test]
 async fn empty_title_blocks_without_file() {
     let base = tmp_dir();

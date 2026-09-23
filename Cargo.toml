@@ -33,6 +33,10 @@ hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", 
 hyper-rustls = { version = "0.27", features = ["http1", "webpki-roots", "aws-lc-rs", "native-tokio"] }
 http-body-util = "0.1"
 bytes = "1"
+# JNI bridge for the app-private files dir (Android file access).
+# Without it the engine runs against an unreadable CWD and every
+# file op dies with "No such file or directory".
+jni = "0.21"
 anyhow = "1.0"
 parking_lot = "0.12"
 dirs = "5"

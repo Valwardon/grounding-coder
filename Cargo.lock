@@ -2022,6 +2022,7 @@ dependencies = [
  "hyper",
  "hyper-rustls",
  "hyper-util",
+ "jni 0.21.1",
  "log",
  "once_cell",
  "parking_lot",

@@ -26,3 +26,41 @@ pub use engine::{AgentOutcome, BlockReason, CodeBot, TaskResult};
 pub extern "C" fn main() {
     dioxus::launch(crate::components::App);
 }
+
+/// App-private files dir, handed over from Kotlin at startup.
+///
+/// Android gives Rust processes an unreadable CWD, so every engine file
+/// op fails without this. `MainActivity.onCreate` calls
+/// `nativeInitFilesDir(filesDir.absolutePath)` exactly once; before that
+/// (and on non-Android hosts) this is `None` and paths pass through.
+#[cfg(target_os = "android")]
+static APP_FILES_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// JNI entry called from `MainActivity.onCreate`. Trivial by design: parse
+/// one string, store it. Nothing here can fail the boot.
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "C" fn Java_dev_dioxus_main_MainActivity_nativeInitFilesDir(
+    mut env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    dir: jni::objects::JString,
+) {
+    if let Ok(s) = env.get_string(&dir) {
+        let path: String = s.into();
+        let _ = APP_FILES_DIR.set(std::path::PathBuf::from(path));
+    }
+}
+
+/// Resolve the engine's working dir: bare `"."`/empty means "the app's
+/// private dir" when the bridge has handed it over, else passthrough.
+pub fn resolve_project_dir(configured: &str) -> String {
+    let t = configured.trim();
+    if t == "." || t.is_empty() {
+        #[cfg(target_os = "android")]
+        if let Some(d) = APP_FILES_DIR.get() {
+            return d.to_string_lossy().to_string();
+        }
+        return ".".to_string();
+    }
+    configured.to_string()
+}
