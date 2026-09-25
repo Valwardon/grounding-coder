@@ -187,7 +187,9 @@ impl Synthesizer {
     /// Returns `Err` when no family covers the signature shape — the
     /// caller turns that into `BLOCKED`, never a fallback guess.
     pub fn synthesize(&self, req: &SynthRequest) -> Result<Vec<Candidate>, String> {
-        if req.page_def.is_none() && req.cases.is_empty() {
+        // Functions prove by contract cases; structs prove by their
+        // field + op contract; pages by their content slots.
+        if req.page_def.is_none() && req.struct_def.is_none() && req.cases.is_empty() {
             return Err("Synthesize requires at least one contract case — BLOCKED".to_string());
         }
         // Family 4: webpage from content slots.

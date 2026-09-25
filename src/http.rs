@@ -162,20 +162,73 @@ pub async fn post_binary(
 }
 
 /// GET raw bytes. Non-2xx is an error. Used by the tool provisioner —
-/// compilers arrive as bytes, never as text.
+/// compilers arrive as bytes, never as text. Follows up to 5 redirects
+/// (release CDNs answer 302 to another https host); anything else fails
+/// honestly instead of saving an error page as a "toolchain".
 pub async fn get_bytes(url: &str) -> Result<Vec<u8>, String> {
-    let req = hyper::Request::builder()
-        .method("GET")
-        .uri(url)
-        .header("user-agent", "grounding-coder-provision/0.1")
-        .body(Full::new(Bytes::new()))
-        .map_err(|e| format!("Request build error: {}", e))?;
-    // Toolchains are tens of MB; bound generously, still never a hang.
-    let (status, raw) = request(req, Duration::from_secs(600)).await?;
-    if !(200..300).contains(&status) {
+    let mut current = url.to_string();
+    for _ in 0..6 {
+        let req = hyper::Request::builder()
+            .method("GET")
+            .uri(current.clone())
+            .header("user-agent", "grounding-coder-provision/0.1")
+            .body(Full::new(Bytes::new()))
+            .map_err(|e| format!("Request build error: {}", e))?;
+        // Toolchains are tens of MB; bound generously, still never a hang.
+        let (status, headers, raw) = request_with_headers(req, Duration::from_secs(600)).await?;
+        if (200..300).contains(&status) {
+            return Ok(raw);
+        }
+        if matches!(status, 301 | 302 | 303 | 307 | 308) {
+            let next = headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("location"))
+                .map(|(_, v)| v.clone())
+                .filter(|v| v.starts_with("https://"));
+            match next {
+                Some(n) => {
+                    current = n;
+                    continue;
+                }
+                None => return Err(format!("HTTP {} with no https Location", status)),
+            }
+        }
         return Err(format!("HTTP {}", status));
     }
-    Ok(raw)
+    Err("Too many redirects — BLOCKED".to_string())
+}
+
+/// Same transport as [`request`], but keeps response headers so the
+/// provisioner can follow release-CDN redirects honestly.
+async fn request_with_headers(
+    req: hyper::Request<Full<Bytes>>,
+    timeout: Duration,
+) -> Result<(u16, Vec<(String, String)>, Vec<u8>), String> {
+    let work = async move {
+        let resp = client()
+            .request(req)
+            .await
+            .map_err(|e| format!("HTTP error: {}", e))?;
+        let status = resp.status().as_u16();
+        let headers = resp
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
+        let body = resp
+            .into_body()
+            .collect()
+            .await
+            .map_err(|e| format!("Body error: {}", e))?
+            .to_bytes()
+            .to_vec();
+        Ok::<_, String>((status, headers, body))
+    };
+    match tokio::time::timeout(timeout, RUNTIME.spawn(work)).await {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => Err(format!("HTTP task failed: {}", e)),
+        Err(_) => Err("HTTP redirect probe timed out".to_string()),
+    }
 }
 
 /// GET JSON with optional bearer auth and Accept header. Non-2xx errors.

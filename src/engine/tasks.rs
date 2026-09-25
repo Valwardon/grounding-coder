@@ -69,6 +69,16 @@ pub enum TaskKind {
     /// Built by the engine itself after Step-0 crate verification —
     /// the decomposer never emits this.
     EnsureDep,
+    /// Replicate one URL-fetched file byte-exact after hash verification.
+    ReplicateFile,
+    /// One exact byte replacement (package renames). Single-match rule.
+    ReplaceExact,
+    /// Build the project into a real artifact via the language backend's
+    /// build oracle (gcc, cargo, kotlinc/javac, provisioned dx…). The
+    /// artifact's own bytes are the proof; missing toolchains and unknown
+    /// targets block honestly. Covers any language with a backend —
+    /// anything else is BLOCKED, never guessed.
+    Build,
 }
 
 impl TaskKind {
@@ -86,7 +96,10 @@ impl TaskKind {
             TaskKind::AddDefinition => "add_definition",
             TaskKind::VerifyOnly => "verify_only",
             TaskKind::EnsureDep => "ensure_dep",
+            TaskKind::ReplicateFile => "replicate_file",
+            TaskKind::ReplaceExact => "replace_exact",
             TaskKind::SynthesizeFunction => "synthesize_function",
+            TaskKind::Build => "build",
         }
     }
 
@@ -253,6 +266,34 @@ pub struct SectionDef {
     pub body: String,
 }
 
+/// One file to replicate byte-exact from a URL. The SHA-256 IS the
+/// specification: fetched bytes that don't match never touch disk.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplicatedFile {
+    /// Project-relative destination, e.g. `app/src/main.rs`.
+    #[serde(default)]
+    pub path: String,
+    /// `https://…` or `file://…` source.
+    #[serde(default)]
+    pub url: String,
+    /// Expected SHA-256 hex of the exact bytes.
+    #[serde(default)]
+    pub sha256: String,
+}
+
+/// One exact rename: replace `find` with `replace` in `file`.
+/// The file's own bytes are the evidence; anything but exactly one match
+/// blocks (zero = nothing to do honestly about; many = ambiguous).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplacementSpec {
+    #[serde(default)]
+    pub file: String,
+    #[serde(default)]
+    pub find: String,
+    #[serde(default)]
+    pub replace: String,
+}
+
 /// A method as metadata. `op` names a verified operation; the engine
 /// rejects anything outside its vocabulary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -399,6 +440,13 @@ pub struct StructuredIntent {
     /// References to existing symbols
     #[serde(default, deserialize_with = "de_vec_default")]
     pub references: Vec<String>,
+    /// Files to replicate byte-exact (port flows). Each entry carries its
+    /// own hash gate; no code is ever authored from these.
+    #[serde(default, deserialize_with = "de_vec_default")]
+    pub files: Vec<ReplicatedFile>,
+    /// Exact renames applied after replication (package ids, app names).
+    #[serde(default, deserialize_with = "de_vec_default")]
+    pub replacements: Vec<ReplacementSpec>,
 }
 
 /// A concrete sub-task decomposed from a structured intent.
@@ -541,6 +589,35 @@ impl TaskDecomposer {
             tasks.extend(self.form_definition_tasks(def, &intent));
         }
 
+        // Handle replication manifests - one task per file. Each carries
+        // its own hash gate; the engine authors nothing here.
+        for f in &intent.files {
+            let mut t = SubTask::new(
+                TaskKind::ReplicateFile,
+                format!("Replicate {}", f.path),
+                serde_json::json!({"file": f.path, "url": f.url, "sha256": f.sha256}),
+                "intent_files".to_string(),
+            )
+            .with_priority(0.6)
+            .with_deadline(self.tick + 1000);
+            t.target_symbols.push(f.path.clone());
+            tasks.push(t);
+        }
+
+        // Handle exact renames - applied after replication lands them.
+        for r in &intent.replacements {
+            let mut t = SubTask::new(
+                TaskKind::ReplaceExact,
+                format!("Replace in {}", r.file),
+                serde_json::json!({"file": r.file, "find": r.find, "replace": r.replace}),
+                "intent_replacements".to_string(),
+            )
+            .with_priority(0.5)
+            .with_deadline(self.tick + 1000);
+            t.target_symbols.push(r.file.clone());
+            tasks.push(t);
+        }
+
         // Handle tests - create test tasks
         for test in &intent.test {
             if let Some(task) = self.form_test_task(test, &intent) {
@@ -606,7 +683,11 @@ impl TaskDecomposer {
         // Contract present → synthesize a real body; otherwise plan a stub.
         // NO code from LLM either way, only metadata + literal values.
         // Pages (content slots) always synthesize — structure is fixed.
-        let has_contract = !def.cases.is_empty() || def.kind == "page";
+        // Structs with fields synthesize too (fields + method ops are the
+        // contract); without fields there is nothing to build honestly.
+        let has_contract = !def.cases.is_empty()
+            || def.kind == "page"
+            || (def.kind == "struct" && !def.fields.is_empty());
         let kind = if has_contract {
             TaskKind::SynthesizeFunction
         } else {
@@ -713,6 +794,24 @@ impl TaskDecomposer {
                         action
                     );
                     return None;
+                }
+                // Build actions belong to the build oracle (any backend
+                // language, any honest target) — never to stub functions.
+                // A "build android apk" action becomes Build{target:
+                // "android apk"}; the backend parses its own vocabulary.
+                if action_lower.contains("build") {
+                    let task = SubTask::new(
+                        TaskKind::Build,
+                        format!("Build: {}", action),
+                        serde_json::json!({
+                            "target": params.join(" "),
+                            "action": action,
+                        }),
+                        "intent_build".to_string(),
+                    )
+                    .with_priority(0.6)
+                    .with_deadline(self.tick + 1000);
+                    return Some(task);
                 }
                 let target_file = intent
                     .file

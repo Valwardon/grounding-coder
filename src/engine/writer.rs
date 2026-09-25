@@ -45,12 +45,120 @@ pub struct FileSnapshot {
 pub struct CodeWriter {
     project_dir: PathBuf,
     extra: Vec<super::lang::LanguageSpec>,
+    /// Hash-verified staged bytes for ReplicateFile tasks, keyed by task
+    /// id. Filled by `stage_replica` (async fetch lives in run_task);
+    /// planning only ever sees bytes that passed the hash gate.
+    staging: std::collections::HashMap<u64, Vec<u8>>,
 }
 
 impl CodeWriter {
     pub fn new(project_dir: PathBuf) -> Self {
         let extra = super::lang::load_extra(&project_dir);
-        CodeWriter { project_dir, extra }
+        CodeWriter {
+            project_dir,
+            extra,
+            staging: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Project dir accessor for cross-module planning helpers.
+    pub fn project_dir(&self) -> &Path {
+        &self.project_dir
+    }
+
+    /// R-derive-clone: E0277 `` `X` is not satisfied `` for a `Clone`
+    /// bound means a struct lacks the derive the migrated code now needs
+    /// (0.5 reference-clones masked it). Find `struct X` (same file first,
+    /// then project sources) and add `Clone` to its derive list — or fail
+    /// honestly when the shape isn't exactly that.
+    pub fn migrate_derive_clone(
+        project_dir: &Path,
+        error: &super::error::CompileError,
+    ) -> Option<SourceEdit> {
+        if error.code != "E0277" || !error.message.contains("Clone") {
+            return None;
+        }
+        // Type name between backticks: "`TradeEntry: Clone`".
+        let msg = &error.message;
+        let start = msg.find('`')? + 1;
+        let rest = &msg[start..];
+        let end = rest.find([':', '`', ' '])?;
+        let ty = rest[..end].trim().to_string();
+        if ty.is_empty() || !is_ident(&ty) {
+            return None;
+        }
+        // Same file first, then a bounded project search.
+        let here = project_dir.join(&error.file);
+        let mut candidates = vec![here];
+        let mut stack = vec![project_dir.to_path_buf()];
+        let mut seen_dirs = 0;
+        while let Some(current) = stack.pop() {
+            if seen_dirs > 60 {
+                break;
+            }
+            seen_dirs += 1;
+            let Ok(entries) = std::fs::read_dir(&current) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    if name.starts_with('.')
+                        || ["target", "build", ".gradle", "node_modules"].contains(&name.as_str())
+                    {
+                        continue;
+                    }
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs")
+                    && let Ok(content) = std::fs::read_to_string(&path)
+                    && content.contains(&format!("struct {}", ty))
+                    && !candidates.contains(&path)
+                {
+                    candidates.push(path);
+                }
+            }
+        }
+        for path in candidates {
+            if let Some(edit) = add_clone_derive(&path, &ty) {
+                return Some(edit);
+            }
+        }
+        None
+    }
+
+    /// Fetch a URL and gate it on the expected SHA-256. Supports
+    /// `https://` (bundled-roots HTTPS) and `file://` (local template
+    /// trees — same hash discipline, offline-testable).
+    pub async fn fetch_gated(url: &str, sha256: &str) -> Result<Vec<u8>, String> {
+        let bytes: Vec<u8> = if let Some(path) = url.strip_prefix("file://") {
+            std::fs::read(path).map_err(|e| format!("file:// read failed: {}", e))?
+        } else if url.starts_with("https://") {
+            crate::http::get_bytes(url)
+                .await
+                .map_err(|e| format!("fetch failed: {}", e))?
+        } else {
+            return Err(format!("Unsupported URL scheme (need https/file): {}", url));
+        };
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        let hex = format!("{:x}", hasher.finalize());
+        if !hex.eq_ignore_ascii_case(sha256) {
+            return Err(format!(
+                "SHA-256 mismatch (want {}, got {}) — refusing bytes",
+                sha256, hex
+            ));
+        }
+        Ok(bytes)
+    }
+
+    /// Stage verified bytes for a replicate task.
+    pub fn stage_replica(&mut self, task_id: u64, bytes: Vec<u8>) {
+        self.staging.insert(task_id, bytes);
     }
 
     /// Scan the project for source files and extract code symbols.
@@ -208,9 +316,9 @@ impl CodeWriter {
         let content = match fs::read_to_string(&target_file) {
             Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => match task.kind {
-                super::tasks::TaskKind::AddImport | super::tasks::TaskKind::CreateFile => {
-                    String::new()
-                }
+                super::tasks::TaskKind::AddImport
+                | super::tasks::TaskKind::CreateFile
+                | super::tasks::TaskKind::ReplicateFile => String::new(),
                 _ => {
                     return Err(format!(
                         "Failed to read target file {}: {}",
@@ -235,13 +343,26 @@ impl CodeWriter {
             return Err("LLM code in payload rejected: planner-only boundary".to_string());
         }
         match task.kind {
-            super::tasks::TaskKind::SynthesizeFunction | super::tasks::TaskKind::VerifyOnly => {
-                // Handled before file resolution above; this arm exists so
-                // future refactors fail honestly instead of panicking.
+            super::tasks::TaskKind::SynthesizeFunction
+            | super::tasks::TaskKind::VerifyOnly
+            | super::tasks::TaskKind::Build => {
+                // Handled before file resolution above (synthesis loop /
+                // verify-only / build oracle); this arm exists so future
+                // refactors fail honestly instead of panicking.
                 return Err("Internal routing error — BLOCKED".to_string());
             }
             super::tasks::TaskKind::EnsureDep => {
                 let (edit, ev) = self.plan_ensure_dep(task)?;
+                edits.push(edit);
+                evidence.push(ev);
+            }
+            super::tasks::TaskKind::ReplicateFile => {
+                let (edit, ev) = self.plan_replicate(task)?;
+                edits.push(edit);
+                evidence.push(ev);
+            }
+            super::tasks::TaskKind::ReplaceExact => {
+                let (edit, ev) = self.plan_replace_exact(&target_file, &content, task)?;
                 edits.push(edit);
                 evidence.push(ev);
             }
@@ -625,14 +746,19 @@ impl CodeWriter {
     /// - byte range must be valid AND on char boundaries
     /// - current bytes at [start,end) must equal `expected_old` (STALE check)
     /// - no-op inserts (empty replacement at same offset) are skipped
+    /// - multi-edit plans apply bottom-up (descending offsets) so every
+    ///   range stays valid against pristine coordinates; all planners
+    ///   compute offsets against the same pre-apply content
     ///
     /// This replaces the old `apply()` which could replace entire files.
     pub fn apply_plan(&self, plan: &EditPlan) -> Result<Vec<String>, String> {
         // Observability: log the full plan before touching disk.
         log::info!("TASK {}\n{}", plan.task_id, plan);
         let mut changed = Vec::new();
+        let mut ordered: Vec<&SourceEdit> = plan.edits.iter().collect();
+        ordered.sort_by_key(|e| std::cmp::Reverse(e.start));
 
-        for edit in &plan.edits {
+        for edit in ordered {
             // Read current content (missing file = empty base for creation).
             let mut content = match fs::read_to_string(&edit.file) {
                 Ok(c) => c,
@@ -673,7 +799,10 @@ impl CodeWriter {
                 ));
             }
 
-            if edit.start == edit.end && edit.replacement.is_empty() {
+            // No-op skip applies only when the file already exists:
+            // creating a (possibly empty) missing file must proceed.
+            let existed = edit.file.exists();
+            if edit.start == edit.end && edit.replacement.is_empty() && existed {
                 // No-op — already present.
                 continue;
             }
@@ -935,6 +1064,118 @@ impl CodeWriter {
             Evidence::VerifiedSymbol {
                 qname: format!("crates.io/{}@{}", name, version),
                 source: "crates.io".to_string(),
+            },
+        ))
+    }
+
+    /// Plan a byte-exact replication from staged (hash-verified) bytes.
+    /// Missing file → create. Existing identical file → no-op. Existing
+    /// different file → full replace ONLY when the staged bytes are the
+    /// verified payload (expected_old carries current content, so any
+    /// concurrent change trips the stale check at apply).
+    fn plan_replicate(&self, task: &SubTask) -> Result<(SourceEdit, Evidence), String> {
+        let file = task
+            .payload
+            .get("file")
+            .and_then(|v| v.as_str())
+            .ok_or("Replicate task missing file in payload")?;
+        let sha = task
+            .payload
+            .get("sha256")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let staged = self
+            .staging
+            .get(&task.id)
+            .ok_or_else(|| format!("No staged bytes for {} — fetch must precede planning", file))?;
+        let target = self.project_dir.join(file);
+        let replacement = String::from_utf8(staged.clone())
+            .map_err(|_| format!("Staged bytes for {} are not UTF-8 — BLOCKED", file))?;
+        let (start, end, expected_old) = match fs::read_to_string(&target) {
+            Ok(current) => {
+                if current == replacement {
+                    // Identical: empty edit, skipped at apply.
+                    (0, 0, String::new())
+                } else {
+                    (0, current.len(), current)
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Missing: create (even when empty — apply distinguishes
+                // create from no-op by file existence).
+                (0, 0, String::new())
+            }
+            Err(e) => {
+                return Err(format!("Failed to read {}: {}", target.display(), e));
+            }
+        };
+        // Identical existing content collapses to the no-op shape.
+        let replacement = if start == 0 && end == 0 && expected_old.is_empty() && target.exists() {
+            String::new()
+        } else {
+            replacement
+        };
+        Ok((
+            SourceEdit {
+                file: target,
+                start,
+                end,
+                expected_old,
+                replacement,
+            },
+            Evidence::VerifiedSymbol {
+                qname: format!("replicate:{}", file),
+                source: format!("sha256:{}", sha),
+            },
+        ))
+    }
+
+    /// Plan one exact replacement. The file's own bytes are the evidence:
+    /// exactly one occurrence must exist, else BLOCKED (zero = nothing to
+    /// rename; many = ambiguous).
+    fn plan_replace_exact(
+        &self,
+        file: &Path,
+        content: &str,
+        task: &SubTask,
+    ) -> Result<(SourceEdit, Evidence), String> {
+        let find = task
+            .payload
+            .get("find")
+            .and_then(|v| v.as_str())
+            .ok_or("Replace task missing find in payload")?;
+        let replace = task
+            .payload
+            .get("replace")
+            .and_then(|v| v.as_str())
+            .ok_or("Replace task missing replace in payload")?;
+        if find.is_empty() {
+            return Err("Empty find string — BLOCKED".to_string());
+        }
+        let matches: Vec<_> = content.match_indices(find).collect();
+        if matches.is_empty() {
+            return Err(format!("`{}` not found — BLOCKED", truncate_str(find, 80)));
+        }
+        if matches.len() > 1 {
+            return Err(format!(
+                "`{}` matches {} times — ambiguous, BLOCKED",
+                truncate_str(find, 80),
+                matches.len()
+            ));
+        }
+        let (start, _) = matches[0];
+        let end = start + find.len();
+        Ok((
+            SourceEdit {
+                file: file.to_path_buf(),
+                start,
+                end,
+                expected_old: find.to_string(),
+                replacement: replace.to_string(),
+            },
+            Evidence::ExistingPattern {
+                source_file: file.to_string_lossy().to_string(),
+                source_line: (content[..start].lines().count().max(1)) as u32,
             },
         ))
     }
@@ -1608,6 +1849,1536 @@ fn is_ident(s: &str) -> bool {
             .all(|(i, c)| c == '_' || c.is_ascii_alphabetic() || (i > 0 && c.is_ascii_digit()))
 }
 
+/// Try the Dioxus 0.5→0.7 migration transforms for one diagnostic.
+/// Each returns anchored byte-range edits built SOLELY from the file's own
+/// bytes plus fixed templates — no model content anywhere. The caller
+/// applies through the stale-checked path and the compiler judges next.
+pub fn plan_migration_fix(
+    project_dir: &Path,
+    error: &super::error::CompileError,
+) -> Option<(Vec<SourceEdit>, Evidence)> {
+    if error.file.is_empty() || error.line == 0 {
+        return None;
+    }
+    let path = project_dir.join(&error.file);
+    let content = fs::read_to_string(&path).ok()?;
+    let ev = Evidence::CompilerSuggestion {
+        code: error.code.clone(),
+        file: error.file.clone(),
+        line: error.line,
+        col: error.col,
+    };
+    if let Some(edit) = migrate_rsx_let(&path, &content, error.line) {
+        return Some((vec![edit], ev));
+    }
+    if let Some(edits) = migrate_resource_read(&path, &content, error) {
+        return Some((edits, ev));
+    }
+    if let Some(edit) = migrate_await_spawn(&path, &content, error.line) {
+        return Some((vec![edit], ev));
+    }
+    if let Some(edit) = CodeWriter::migrate_derive_clone(project_dir, error) {
+        return Some((vec![edit], ev));
+    }
+    if let Some(edit) = migrate_mut_binding(&path, &content, error) {
+        return Some((vec![edit], ev));
+    }
+    if let Some(edit) = migrate_fnmut_param(&path, &content, error) {
+        return Some((vec![edit], ev));
+    }
+    if let Some(edit) = migrate_fnmut_call(&path, &content, error) {
+        return Some((vec![edit], ev));
+    }
+    if let Some(edit) = migrate_into_to_string(&path, &content, error) {
+        return Some((vec![edit], ev));
+    }
+    None
+}
+
+/// R-mut: E0596 ``cannot borrow `X` as mutable``. Three structural
+/// shapes, each the missing half of a 0.7 Shared borrow chain:
+/// (a) "not declared as mutable" where `X` is a hook binding
+/// (`use_signal` & co. return a handle whose `set` needs `mut`): the
+/// single `let X = …` line becomes `let mut X`.
+/// (b) "not declared as mutable" where `X` is an `impl Fn` parameter
+/// called from inside a `move` handler (`oninput: move |e| oninput(…)`):
+/// the 0.7 handler traits are `FnMut`, so the parameter relaxes to
+/// `mut X: impl FnMut`.
+/// (c) "captured variable in a `Fn` closure" where `X` is a plain local
+/// `let` binding (`expanded` captured by `move || expanded.set(..)`
+/// passed to a (possibly already relaxed) callee): the binding itself
+/// becomes `let mut X` so the `move` capture carries mutability.
+/// Anything else (zero/many lets, non-`Fn` params) refuses.
+fn migrate_mut_binding(
+    path: &Path,
+    content: &str,
+    error: &super::error::CompileError,
+) -> Option<SourceEdit> {
+    if error.code != "E0596" {
+        return None;
+    }
+    // Flavor (c) shares the E0596 code with a different message; the
+    // hook-binding shapes below only apply to the declared-mutable
+    // flavor. Case (c) is handled after the `let` scan.
+    let declared_flavor = error.message.contains("not declared as mutable");
+    let capture_flavor = error
+        .message
+        .contains("captured variable in a `Fn` closure");
+    if !declared_flavor && !capture_flavor {
+        return None;
+    }
+    let msg = &error.message;
+    let start = msg.find('`')? + 1;
+    let name: String = msg[start..].chars().take_while(|c| *c != '`').collect();
+    if !is_ident(&name) {
+        return None;
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    let starts = line_starts(content);
+    let mut found = Vec::new();
+    for (k, line) in lines.iter().enumerate() {
+        let t = line.trim_start();
+        let Some(rest) = t.strip_prefix("let ") else {
+            continue;
+        };
+        if rest == name
+            || rest.starts_with(&format!("{} ", name))
+            || rest.starts_with(&format!("{}:", name))
+            || rest.starts_with(&format!("{}=", name))
+        {
+            // Skip `let mut X` (already mutable — nothing to do honestly).
+            if rest.starts_with(&format!("mut {}", name)) {
+                continue;
+            }
+            found.push(k);
+        }
+    }
+    if std::env::var("GROUNDING_DEBUG_MIGRATE").is_ok() {
+        eprintln!(
+            "[mut] {}:{} name={} lets={}",
+            error.file,
+            error.line,
+            name,
+            found.len()
+        );
+    }
+    if found.len() > 1 {
+        return None;
+    }
+    // Case (c): Fn-closure flavor over a plain local binding — the
+    // binding itself needs `mut` (the callee side is handled, or will
+    // be, by the FnMut recipes across rounds).
+    if capture_flavor && !declared_flavor {
+        if found.len() != 1 {
+            return None;
+        }
+        let k = found[0];
+        let line = lines[k];
+        let pos = line.find(&format!("let {}", name))?;
+        let ls = *starts.get(k)?;
+        let le = starts.get(k + 1).copied().unwrap_or(content.len());
+        let old = content.get(ls..le)?.to_string();
+        let mut fixed = line.to_string();
+        fixed.replace_range(pos + 3..pos + 3, " mut");
+        return Some(SourceEdit {
+            file: path.to_path_buf(),
+            start: ls,
+            end: le,
+            expected_old: old,
+            replacement: fixed + "\n",
+        });
+    }
+    if found.is_empty() {
+        // Case (b): X may be an `impl Fn` parameter of the enclosing fn.
+        if error.line == 0 {
+            return None;
+        }
+        let err_idx = (error.line as usize).saturating_sub(1);
+        if err_idx >= lines.len() {
+            return None;
+        }
+        let mut fn_idx = None;
+        for k in (err_idx.saturating_sub(150)..=err_idx.min(lines.len().saturating_sub(1))).rev() {
+            if fn_def_name(lines[k]).is_some() {
+                fn_idx = Some(k);
+                break;
+            }
+        }
+        // relax_param_in_fn only touches `impl Fn(` params, so plain
+        // parameters (bool, &str) safely refuse here.
+        let out = relax_param_in_fn(path, content, &lines, fn_idx?, &name);
+        if std::env::var("GROUNDING_DEBUG_MIGRATE").is_ok() {
+            eprintln!(
+                "[mut] {}:{} name={} lets=0 fn_idx={:?} -> {}",
+                error.file,
+                error.line,
+                name,
+                fn_idx,
+                if out.is_some() { "edit" } else { "none" }
+            );
+        }
+        return out;
+    }
+    let k = found[0];
+    let line = lines[k];
+    let pos = line.find(&format!("let {}", name))?;
+    let ls = *starts.get(k)?;
+    let le = starts.get(k + 1).copied().unwrap_or(content.len());
+    let old = content.get(ls..le)?.to_string();
+    let mut fixed = line.to_string();
+    fixed.replace_range(pos + 3..pos + 3, " mut");
+    Some(SourceEdit {
+        file: path.to_path_buf(),
+        start: ls,
+        end: le,
+        expected_old: old,
+        replacement: fixed + "\n",
+    })
+}
+
+/// R-fnmut: E0596 ``cannot borrow `V` as mutable, as it is a captured
+/// variable in a `Fn` closure``. In 0.5, `use_state` handles allowed
+/// `set` through `&self`; in 0.7 `Writable::set` takes `&mut self`, so
+/// the handle must be `mut` AND the capturing closure must be `FnMut`.
+/// Two structural shapes, tried in order:
+///
+/// Case A — `V` is a parameter of the enclosing local fn (`ontoggle:
+/// impl Fn() + 'static` called inside the component's own `move |_|`
+/// handler): relax that parameter to `impl FnMut()`.
+/// Case B — `V` is a local binding captured by a `move ||` passed as
+/// argument N to a local fn (`sec(cond, "T", move || v.set(..), …)`):
+/// relax that callee's Nth parameter from `impl Fn` to `impl FnMut`.
+/// Anything else (external callees, non-`impl Fn` params) refuses; the
+/// compiler judges every relaxation next round.
+fn migrate_fnmut_param(
+    path: &Path,
+    content: &str,
+    error: &super::error::CompileError,
+) -> Option<SourceEdit> {
+    if error.code != "E0596"
+        || !error
+            .message
+            .contains("captured variable in a `Fn` closure")
+    {
+        return None;
+    }
+    let msg = &error.message;
+    let start = msg.find('`')? + 1;
+    let name: String = msg[start..].chars().take_while(|c| *c != '`').collect();
+    if !is_ident(&name) {
+        return None;
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    if error.line == 0 {
+        return None;
+    }
+    let err_idx = (error.line as usize).saturating_sub(1);
+    if err_idx >= lines.len() {
+        return None;
+    }
+    // Case A: V is a parameter of the enclosing fn.
+    let mut fn_idx = None;
+    for k in (err_idx.saturating_sub(150)..=err_idx.min(lines.len().saturating_sub(1))).rev() {
+        if fn_def_name(lines[k]).is_some() {
+            fn_idx = Some(k);
+            break;
+        }
+    }
+    let fn_idx = fn_idx?;
+    if let Some(edit) = relax_param_in_fn(path, content, &lines, fn_idx, &name) {
+        return Some(edit);
+    }
+    // Case B: V is a local binding; find the enclosing `move` closure
+    // (cap 40 lines up — the closure may start mid-line as a call
+    // argument), then its call and the argument position.
+    let mut close_idx = None;
+    for k in (err_idx.saturating_sub(40)..=err_idx.min(lines.len().saturating_sub(1))).rev() {
+        if has_move_closure(lines[k]) {
+            close_idx = Some(k);
+            break;
+        }
+    }
+    let close_idx = close_idx?;
+    let (callee, arg_idx) = enclosing_call(&lines, close_idx)?;
+    // Callee must be defined exactly once in this file — and must not be
+    // the enclosing fn itself (that shape means the call was misread;
+    // Case A already covers genuine parameter relaxations).
+    if let Some(enclosing_name) = fn_def_name(lines[fn_idx])
+        && callee == enclosing_name
+    {
+        return None;
+    }
+    let mut defs = Vec::new();
+    for (k, line) in lines.iter().enumerate() {
+        let t = line.trim_start();
+        if t.starts_with(&format!("fn {}(", callee)) || t.starts_with(&format!("fn {}<", callee)) {
+            defs.push(k);
+        }
+    }
+    if defs.len() != 1 {
+        return None;
+    }
+    relax_nth_param(path, content, &lines, defs[0], arg_idx)
+}
+
+/// Binding name of one parameter: leading `mut ` skipped, so
+/// `mut ontoggle: impl FnMut()` yields `ontoggle` (a naive ident scan
+/// would return `mut` and miss every already-relaxed signature).
+fn param_binding(p: &str) -> String {
+    let t = p.trim().strip_prefix("mut ").unwrap_or(p.trim());
+    t.chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect()
+}
+
+/// Relax parameter `name` of the fn starting at `fn_idx` from
+/// `impl Fn` to `impl FnMut`. Returns None unless the parameter exists
+/// with exactly that shape.
+fn relax_param_in_fn(
+    path: &Path,
+    content: &str,
+    lines: &[&str],
+    fn_idx: usize,
+    name: &str,
+) -> Option<SourceEdit> {
+    let sig = fn_sig(content, lines, fn_idx)?;
+    for param in sig.params.iter() {
+        if param_binding(param) != name {
+            continue;
+        }
+        let fixed = relax_fn_param(param)?;
+        let fixed_params: Vec<String> = sig
+            .params
+            .iter()
+            .map(|p| {
+                if param_binding(p) == name {
+                    fixed.clone()
+                } else {
+                    p.to_string()
+                }
+            })
+            .collect();
+        return splice_fn_sig(path, content, lines, &sig, &fixed_params);
+    }
+    None
+}
+
+/// Relax the Nth parameter of the fn at `fn_idx` from `impl Fn` to
+/// `impl FnMut`. Positional: for closures passed as arguments.
+fn relax_nth_param(
+    path: &Path,
+    content: &str,
+    lines: &[&str],
+    fn_idx: usize,
+    arg_idx: usize,
+) -> Option<SourceEdit> {
+    let sig = fn_sig(content, lines, fn_idx)?;
+    let param = sig.params.get(arg_idx)?;
+    let fixed = relax_fn_param(param)?;
+    let fixed_params: Vec<String> = sig
+        .params
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            if i == arg_idx {
+                fixed.clone()
+            } else {
+                p.to_string()
+            }
+        })
+        .collect();
+    splice_fn_sig(path, content, lines, &sig, &fixed_params)
+}
+
+/// Relax one parameter from `impl Fn(…)` to `mut …: impl FnMut(…)`.
+/// Both halves are required in 0.7: `Writable::set` and `FnMut` calls
+/// borrow mutably, and a `move` closure can only carry a mutable
+/// capture from a `mut` binding (the compiler suggests exactly this).
+/// Refuses anything already `FnMut`/`mut` or not shaped `impl Fn(`.
+fn relax_fn_param(p: &str) -> Option<String> {
+    if !p.contains("impl Fn(") || p.contains("FnMut") {
+        return None;
+    }
+    let mut q = p.replacen("impl Fn(", "impl FnMut(", 1);
+    if !q.trim_start().starts_with("mut ") {
+        let ws = q.len() - q.trim_start().len();
+        q.insert_str(ws, "mut ");
+    }
+    Some(q)
+}
+
+/// A fn signature located in the file: line span, top-level params,
+/// and absolute byte offsets of the head end (`fn f(`), the matching
+/// close paren, and its end. All scanning is string-aware over the
+/// ORIGINAL bytes (a `","` or paren inside a literal never counts), so
+/// the splice below cannot unbalance the file.
+struct FnSig {
+    ps: usize,
+    pe: usize,
+    params: Vec<String>,
+    head_end: usize,
+    close_end: usize,
+}
+
+fn fn_sig(content: &str, lines: &[&str], fn_idx: usize) -> Option<FnSig> {
+    let starts = line_starts(content);
+    // End line: first line where parens balance (strings stripped).
+    let mut depth = 0i32;
+    let mut started = false;
+    let mut pe = None;
+    for (k, line) in lines.iter().enumerate().skip(fn_idx).take(30) {
+        let s = strip_line_strings(line);
+        for c in s.chars() {
+            if c == '(' {
+                depth += 1;
+                started = true;
+            } else if c == ')' {
+                depth -= 1;
+            }
+        }
+        if started && depth == 0 {
+            pe = Some(k);
+            break;
+        }
+    }
+    let pe = pe?;
+    let ls = *starts.get(fn_idx)?;
+    let le = starts.get(pe + 1).copied().unwrap_or(content.len());
+    let span = content.get(ls..le)?;
+    // String-aware scan over original bytes: head end, matching close.
+    let mut in_str = false;
+    let mut esc = false;
+    let mut d = 0i32;
+    let mut head_end = None;
+    let mut close_end = None;
+    for (i, c) in span.char_indices() {
+        if in_str {
+            if esc {
+                esc = false;
+            } else if c == '\\' {
+                esc = true;
+            } else if c == '"' {
+                in_str = false;
+            }
+            continue;
+        }
+        if c == '"' {
+            in_str = true;
+        } else if c == '(' {
+            if head_end.is_none() {
+                head_end = Some(ls + i + c.len_utf8());
+            }
+            d += 1;
+        } else if c == ')' {
+            d -= 1;
+            if head_end.is_some() && d == 0 {
+                close_end = Some(ls + i + c.len_utf8());
+                break;
+            }
+        }
+    }
+    let (head_end, close_end) = (head_end?, close_end?);
+    // Split the inner text on top-level commas (string- and bracket-aware).
+    let inner = content.get(head_end..close_end - 1)?;
+    let mut params = Vec::new();
+    let mut cur = String::new();
+    let mut in_s = false;
+    let mut es = false;
+    let mut dd = 0i32;
+    for c in inner.chars() {
+        if in_s {
+            cur.push(c);
+            if es {
+                es = false;
+            } else if c == '\\' {
+                es = true;
+            } else if c == '"' {
+                in_s = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => {
+                in_s = true;
+                cur.push(c);
+            }
+            '(' | '<' | '[' => {
+                dd += 1;
+                cur.push(c);
+            }
+            ')' | '>' | ']' => {
+                dd -= 1;
+                cur.push(c);
+            }
+            ',' if dd == 0 => {
+                params.push(cur.trim().to_string());
+                cur = String::new();
+            }
+            _ => cur.push(c),
+        }
+    }
+    if !cur.trim().is_empty() {
+        params.push(cur.trim().to_string());
+    }
+    Some(FnSig {
+        ps: fn_idx,
+        pe,
+        params,
+        head_end,
+        close_end,
+    })
+}
+
+/// Replace the fn's parameter list with rebuilt params (one per line,
+/// original indentation kept). The head (`fn f(`), the matching close
+/// paren, and everything after it are preserved byte-exact — the splice
+/// provably preserves bracket balance. Byte-anchored; the compiler
+/// judges the semantics.
+fn splice_fn_sig(
+    path: &Path,
+    content: &str,
+    lines: &[&str],
+    sig: &FnSig,
+    params: &[String],
+) -> Option<SourceEdit> {
+    let starts = line_starts(content);
+    let ls = *starts.get(sig.ps)?;
+    let le = starts.get(sig.pe + 1).copied().unwrap_or(content.len());
+    let old = content.get(ls..le)?.to_string();
+    let head = content.get(ls..sig.head_end)?;
+    let tail = content.get(sig.close_end..le)?;
+    let indent: String = lines[sig.ps]
+        .chars()
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .collect();
+    let mut out = String::new();
+    out.push_str(head);
+    out.push('\n');
+    for (i, p) in params.iter().enumerate() {
+        out.push_str(&indent);
+        out.push_str("    ");
+        out.push_str(p);
+        if i + 1 < params.len() {
+            out.push(',');
+        }
+        out.push('\n');
+    }
+    // Re-emit the matching closer the scanner stopped after, then the
+    // untouched tail (`-> Ret {`, `where …`). Balance preserved.
+    out.push_str(&indent);
+    out.push(')');
+    out.push_str(tail.trim_start());
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    Some(SourceEdit {
+        file: path.to_path_buf(),
+        start: ls,
+        end: le,
+        expected_old: old,
+        replacement: out,
+    })
+}
+
+/// Name defined by a fn-definition line, if any. Handles qualifiers
+/// (`pub`, `pub(crate)`, `async`, `unsafe`, `extern`) — a bare
+/// `starts_with("fn ")` misses `pub fn` items and misattributes the
+/// enclosing scope (the bot once blamed `sec` for `Settings`' body).
+fn fn_def_name(line: &str) -> Option<String> {
+    let mut t = line.trim_start();
+    if let Some(rest) = t.strip_prefix("pub") {
+        // `pub`, `pub(crate)`, `pub(super)`, …
+        if rest.starts_with('(') {
+            let end = rest.find(')')?;
+            t = rest[end + 1..].trim_start();
+        } else if rest.starts_with([' ', '\t']) {
+            t = rest.trim_start();
+        } else {
+            return None;
+        }
+    }
+    t = t.strip_prefix("async ").unwrap_or(t);
+    t = t.strip_prefix("unsafe ").unwrap_or(t);
+    t = t.strip_prefix("extern ").unwrap_or(t);
+    // `extern "C" fn` form.
+    if t.starts_with('"') {
+        let end = t[1..].find('"')?;
+        t = t[1 + end + 1..].trim_start();
+    }
+    let rest = t.strip_prefix("fn ")?;
+    if !rest.contains('(') {
+        return None;
+    }
+    let name: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    if name.is_empty() {
+        return None;
+    }
+    Some(name)
+}
+
+/// True when the line holds a `move ||` / `move |…|` closure opener
+/// (`move` as a standalone keyword — `remove |x|` must not match).
+fn has_move_closure(line: &str) -> bool {
+    let bytes: Vec<char> = line.chars().collect();
+    let mut i = 0;
+    while i + 4 < bytes.len() {
+        if bytes[i..].starts_with(&['m', 'o', 'v', 'e'])
+            && (i == 0 || (!bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != '_'))
+            && (bytes[i + 4] == ' ' || bytes[i + 4] == '|' || bytes[i + 4] == '\t')
+        {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Enclosing call of the closure starting at `close_idx`: scan upward
+/// (cap 25 lines) for the topmost line that leaves parens unbalanced
+/// through the closure start and holds a `name(` call. Returns the
+/// callee name plus the closure's 0-based argument index (top-level
+/// commas before `move`, strings stripped).
+fn enclosing_call(lines: &[&str], close_idx: usize) -> Option<(String, usize)> {
+    let lo = close_idx.saturating_sub(25);
+    // Closure start offset within its line: first standalone `move`
+    // (byte index — `move` is ASCII so char/byte offsets coincide here).
+    let cline = lines.get(close_idx)?;
+    let bytes = cline.as_bytes();
+    let mut move_pos = None;
+    for i in 0..bytes.len().saturating_sub(4) {
+        if &bytes[i..i + 4] == b"move"
+            && (i == 0 || (!bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_'))
+            && (bytes[i + 4] == b' ' || bytes[i + 4] == b'|' || bytes[i + 4] == b'\t')
+        {
+            // Byte index == char index only if the prefix is ASCII.
+            if cline[..i].is_ascii() {
+                move_pos = Some(i);
+                break;
+            }
+            return None;
+        }
+    }
+    let move_pos = move_pos?;
+    // Byte prefix for arg counting: lines[lo..close] + line head.
+    // All three bracket kinds nest: `&[(a, b), (c, d)]` holds commas
+    // at paren-depth 1 that belong to the bracket, not the call.
+    for s in (lo..=close_idx).rev() {
+        let region: String = lines[s..close_idx].join("\n") + "\n" + &cline[..move_pos];
+        let stripped = strip_line_strings(&region);
+        let depth: i32 = stripped
+            .chars()
+            .map(|c| match c {
+                '(' | '[' | '{' => 1,
+                ')' | ']' | '}' => -1,
+                _ => 0,
+            })
+            .sum();
+        if depth <= 0 {
+            continue;
+        }
+        // Topmost unclosed line holding a call: take the FIRST ident(
+        // on line s... but the call may start earlier; s is our window
+        // start only when s == lo. Prefer: find call on the earliest
+        // line of the region that opens an unbalanced paren.
+        let sline = strip_line_strings(lines[s]);
+        let mut callee = None;
+        let mut idx = 0;
+        let chars: Vec<char> = sline.chars().collect();
+        while idx < chars.len() {
+            if chars[idx] == '(' {
+                let mut j = idx;
+                while j > 0
+                    && (chars[j - 1].is_ascii_alphanumeric()
+                        || chars[j - 1] == '_'
+                        || chars[j - 1] == ':')
+                {
+                    j -= 1;
+                }
+                // Skip method calls (`x.f(`) and paths keep last ident.
+                let raw: String = chars[j..idx].iter().collect();
+                let last_seg = raw.rsplit("::").next().unwrap_or("");
+                let last_seg = last_seg.rsplit('.').next().unwrap_or("");
+                if last_seg.contains('.') || last_seg.is_empty() {
+                    // method call — not our callee; keep scanning
+                } else if is_ident(last_seg) && !last_seg.starts_with('.') {
+                    // Heuristic: first free-function call on the line.
+                    if raw.contains('.') {
+                        // method call like `a.b(`: skip
+                    } else {
+                        callee = Some(last_seg.to_string());
+                        break;
+                    }
+                }
+                idx += 1;
+            } else {
+                idx += 1;
+            }
+        }
+        if callee.is_none() {
+            continue;
+        }
+        // Argument index: top-level commas between the call paren and
+        // `move`, at depth 1 relative to the call. The head line is
+        // truncated at `move` FIRST (a trailing `, vec![]` after the
+        // closure must never count), then stripped, then counted.
+        let head = &cline[..move_pos];
+        let text = if s == close_idx {
+            let shead = strip_line_strings(head);
+            let call_start = shead.find(&format!("{}(", callee.clone().unwrap()))?;
+            shead[call_start..].to_string()
+        } else {
+            let call_start = sline.find(&format!("{}(", callee.clone().unwrap()))?;
+            let seg = &sline[call_start..];
+            // Multi-line args: extend with following lines up to close_idx.
+            let mut text = seg.to_string();
+            for (k, line) in lines.iter().enumerate().take(close_idx + 1).skip(s + 1) {
+                if k == close_idx {
+                    text.push_str(head);
+                } else {
+                    text.push('\n');
+                    text.push_str(line);
+                }
+            }
+            text
+        };
+        let tstripped = strip_line_strings(&text);
+        let mut d = 0i32;
+        let mut commas = 0usize;
+        let mut seen_open = false;
+        for c in tstripped.chars() {
+            if c == '(' || c == '[' || c == '{' {
+                d += 1;
+                if c == '(' {
+                    seen_open = true;
+                }
+            } else if c == ')' || c == ']' || c == '}' {
+                d -= 1;
+            } else if c == ',' && seen_open && d == 1 {
+                commas += 1;
+            }
+        }
+        return Some((callee.unwrap(), commas));
+    }
+    None
+}
+
+/// R-fnmut-call: E0277 ``expected an `Fn()` closure, found `impl
+/// FnMut() + 'static``` at a call `callee(a, b, f, …)` where one bare
+/// argument `f` is an `impl FnMut` parameter of the enclosing fn (it
+/// flowed down from an already-relaxed helper like `sec`). The callee's
+/// same-index parameter relaxes `impl Fn` → `mut …: impl FnMut`, pushing
+/// the relaxation upstream one level per round until the chain compiles.
+/// Anything else (no such argument, external callee) refuses.
+fn migrate_fnmut_call(
+    path: &Path,
+    content: &str,
+    error: &super::error::CompileError,
+) -> Option<SourceEdit> {
+    if error.code != "E0277"
+        || !error.message.contains("expected an `Fn")
+        || !error.message.contains("FnMut")
+        || error.line == 0
+    {
+        return None;
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    let idx = (error.line as usize).checked_sub(1)?;
+    let line = lines.get(idx)?;
+    let sline = strip_line_strings(line);
+    // Outermost call on the line: first bare `ident(`. Method calls
+    // (`x.f(`), paths (`a::f(`), and macros (`rsx!(` — the walk stops
+    // at `!`, leaving a name not followed by `(`) never match.
+    let (callee, paren_at) = {
+        let chars: Vec<char> = sline.chars().collect();
+        let mut found = None;
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == '(' {
+                let mut j = i;
+                while j > 0 && (chars[j - 1].is_ascii_alphanumeric() || chars[j - 1] == '_') {
+                    j -= 1;
+                }
+                let name: String = chars[j..i].iter().collect();
+                let rooted = j == 0 || (chars[j - 1] != '.' && chars[j - 1] != ':');
+                if rooted && is_ident(&name) {
+                    found = Some((name, i));
+                    break;
+                }
+            }
+            i += 1;
+        }
+        found?
+    };
+    // Top-level arguments of that call (may run past the line end for
+    // multi-line calls — cap 10 lines). Starts AFTER the opening paren
+    // (char-indexed: `paren_at` counts chars, and the paren itself is
+    // ASCII, so skipping it cannot split a boundary).
+    let schars: Vec<char> = sline.chars().collect();
+    let mut text: String = schars.get(paren_at + 1..).unwrap_or(&[]).iter().collect();
+    for line in lines.iter().take((idx + 10).min(lines.len())).skip(idx + 1) {
+        text.push('\n');
+        text.push_str(&strip_line_strings(line));
+    }
+    let mut args: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    // Depth starts at 1: `text` begins right after the call's opening
+    // paren, whose match ends the argument list (the final argument is
+    // pushed there — a trailing `cur` after the loop means the call ran
+    // past the 10-line window and is unusable).
+    let mut d = 1i32;
+    let mut closed = false;
+    for c in text.chars() {
+        match c {
+            '(' | '[' | '{' => {
+                d += 1;
+                cur.push(c);
+            }
+            ')' | ']' | '}' => {
+                d -= 1;
+                if d == 0 {
+                    if !cur.trim().is_empty() {
+                        args.push(cur.trim().to_string());
+                    }
+                    closed = true;
+                    break;
+                }
+                cur.push(c);
+            }
+            ',' if d == 1 => {
+                args.push(cur.trim().to_string());
+                cur = String::new();
+            }
+            _ => cur.push(c),
+        }
+    }
+    if !closed {
+        return None;
+    }
+    // Enclosing fn and its signature (qualifier-aware).
+    let err_cap = idx.min(lines.len().saturating_sub(1));
+    let mut fn_idx = None;
+    for k in (err_cap.saturating_sub(150)..=err_cap).rev() {
+        if fn_def_name(lines[k]).is_some() {
+            fn_idx = Some(k);
+            break;
+        }
+    }
+    let fn_idx = fn_idx?;
+    if fn_def_name(lines[fn_idx]).as_deref() == Some(callee.as_str()) {
+        return None; // recursive call — not a relaxation chain
+    }
+    let sig = fn_sig(content, &lines, fn_idx)?;
+    for (ai, arg) in args.iter().enumerate() {
+        let arg = arg.trim().trim_start_matches('&');
+        if !is_ident(arg) {
+            continue;
+        }
+        // The argument must be an `impl FnMut` parameter of the
+        // enclosing fn — proof the value already carries FnMut-ness.
+        let is_fnmut_param = sig
+            .params
+            .iter()
+            .any(|p| param_binding(p) == arg && p.contains("FnMut"));
+        if !is_fnmut_param {
+            continue;
+        }
+        // Callee: local, single definition; relax its same-index param.
+        let mut defs = Vec::new();
+        for (k, line) in lines.iter().enumerate() {
+            let t = line.trim_start();
+            if t.starts_with(&format!("fn {}(", callee))
+                || t.starts_with(&format!("fn {}<", callee))
+            {
+                defs.push(k);
+            }
+        }
+        if defs.len() != 1 {
+            continue;
+        }
+        if let Some(edit) = relax_nth_param(path, content, &lines, defs[0], ai) {
+            return Some(edit);
+        }
+    }
+    None
+}
+
+/// R-string: E0283 on a line holding a string-literal `.into()`. The
+/// common cause is an ambiguous `Into` (a third-party `Into<SafeString>`
+/// collides with the blanket `Into<String>`); knock-on inference
+/// failures on the same line share the code and the cure. Component
+/// props take `String`, so rewrite every string-literal `.into()` on
+/// the flagged line to `.to_string()`. Gated on code + line shape only
+/// (the parser keeps just the header line, so sub-notes are invisible).
+/// One line-span edit; the compiler judges whether `String` was right —
+/// a wrong guess surfaces as a fresh error, never silence.
+fn migrate_into_to_string(
+    path: &Path,
+    content: &str,
+    error: &super::error::CompileError,
+) -> Option<SourceEdit> {
+    if error.code != "E0283" {
+        return None;
+    }
+    if error.line == 0 {
+        return None;
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    let idx = (error.line as usize).checked_sub(1)?;
+    let line = lines.get(idx)?.to_string();
+    // Walk the line: clean `"lit"` immediately followed by `.into()`.
+    // A literal is clean when it holds no backslash or braces (so
+    // `format!("…")` strings and interpolated shapes copy through
+    // verbatim — never rewritten, never aborting the scan).
+    let bytes: Vec<char> = line.chars().collect();
+    let mut i = 0;
+    let mut fixed = String::with_capacity(line.len() + 16);
+    let mut n = 0u32;
+    while i < bytes.len() {
+        if bytes[i] != '"' {
+            fixed.push(bytes[i]);
+            i += 1;
+            continue;
+        }
+        let mut j = i + 1;
+        let mut lit = String::new();
+        let mut clean = true;
+        while j < bytes.len() && bytes[j] != '"' {
+            if bytes[j] == '\\' || bytes[j] == '{' || bytes[j] == '}' {
+                clean = false;
+            }
+            lit.push(bytes[j]);
+            j += 1;
+        }
+        if j >= bytes.len() {
+            return None; // unmatched quote: refuse, never half-rewrite
+        }
+        let after: String = bytes[j + 1..].iter().collect();
+        if clean && after.starts_with(".into()") {
+            fixed.push_str(&format!("\"{}\".to_string()", lit));
+            i = j + 1 + ".into()".len();
+            n += 1;
+        } else {
+            // Copy the whole literal through untouched.
+            fixed.push('"');
+            fixed.push_str(&lit);
+            fixed.push('"');
+            i = j + 1;
+        }
+    }
+    if n == 0 {
+        return None;
+    }
+    let starts = line_starts(content);
+    let ls = *starts.get(idx)?;
+    let le = starts.get(idx + 1).copied().unwrap_or(content.len());
+    let old = content.get(ls..le)?.to_string();
+    Some(SourceEdit {
+        file: path.to_path_buf(),
+        start: ls,
+        end: le,
+        expected_old: old,
+        replacement: fixed + "\n",
+    })
+}
+
+/// Byte offset where each line starts (line 0 → 0). `\n`-based; every
+/// produced offset is a char boundary.
+fn line_starts(content: &str) -> Vec<usize> {
+    let mut starts = vec![0];
+    for (i, c) in content.char_indices() {
+        if c == '\n' {
+            starts.push(i + 1);
+        }
+    }
+    starts
+}
+
+/// Strip double-quoted spans from a line so brace counting never trips on
+/// `"{"` inside strings. Naive but sound for this purpose: an unmatched
+/// quote degrades to counting everything (a missed transform, never a
+/// wrong one — the compiler still judges).
+fn strip_line_strings(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut in_str = false;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if in_str {
+            if c == '\\' {
+                chars.next();
+            } else if c == '"' {
+                in_str = false;
+            }
+            continue;
+        }
+        if c == '"' {
+            in_str = true;
+            continue;
+        }
+        // Line comments end string scanning for brace purposes.
+        if c == '/' && chars.peek() == Some(&'/') {
+            break;
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn count_char(s: &str, target: char) -> usize {
+    s.chars().filter(|c| *c == target).count()
+}
+
+/// Backward brace match: enclosing `{` opener strictly above `from_idx`.
+/// The diagnostic line itself is excluded: a trailing `{` there (e.g. the
+/// `if … {` of a multi-line `let`) is not an enclosing block.
+fn block_open(lines: &[&str], from_idx: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    for i in (0..from_idx.min(lines.len())).rev() {
+        let s = strip_line_strings(lines[i]);
+        // Walk right-to-left: `}` deepens, `{` may open.
+        let mut chars: Vec<char> = s.chars().collect();
+        while let Some(c) = chars.pop() {
+            if c == '}' {
+                depth += 1;
+            } else if c == '{' {
+                if depth == 0 {
+                    return Some(i);
+                }
+                depth -= 1;
+            }
+        }
+    }
+    None
+}
+
+/// Forward match from an opener line to its closing line.
+fn block_close(lines: &[&str], open_idx: usize) -> Option<usize> {
+    let open_line = strip_line_strings(lines.get(open_idx)?);
+    let first = open_line.find('{')?;
+    let mut depth = 1i32;
+    let rest = &open_line[first + 1..];
+    depth += count_char(rest, '{') as i32 - count_char(rest, '}') as i32;
+    if depth <= 0 {
+        return Some(open_idx);
+    }
+    for (k, line) in lines.iter().enumerate().skip(open_idx + 1) {
+        let s = strip_line_strings(line);
+        depth += count_char(&s, '{') as i32 - count_char(&s, '}') as i32;
+        if depth <= 0 {
+            return Some(k);
+        }
+    }
+    None
+}
+
+/// R-let: `let` bindings directly inside an rsx `for` body or element
+/// body fail 0.7 parsing. Wrap: `{ lets… rsx! { element } }`.
+/// Triggers on the diagnostic line; validates lets-then-one-element shape.
+fn migrate_rsx_let(path: &Path, content: &str, line_1based: u32) -> Option<SourceEdit> {
+    if line_1based == 0 {
+        return None;
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    let idx = (line_1based as usize).checked_sub(1)?;
+    // The diagnostic may point mid-statement (a continuation line of the
+    // `let`). Resolve to the statement's opening `let` line: nearest
+    // `let ` at most 3 lines above, with no blank lines, closers, or
+    // unrelated statements between.
+    let mut start_idx = None;
+    for back in 0..=3 {
+        let k = idx.checked_sub(back)?;
+        let t = lines.get(k)?.trim();
+        if t.is_empty() || (t.starts_with('}') && !t.contains('{')) {
+            break;
+        }
+        if t.starts_with("let ") {
+            start_idx = Some(k);
+            break;
+        }
+    }
+    let idx = start_idx?;
+    let open_idx = block_open(&lines, idx)?;
+    let open_trimmed = lines[open_idx].trim();
+    // Only rewrite inside rsx! territory: scan upward for the nearest
+    // `rsx!` vs item boundary. Plain-Rust `if` blocks with lets must
+    // never be touched (wrapping them in rsx! would corrupt logic).
+    if !in_rsx_context(&lines, open_idx) {
+        return None;
+    }
+    // `if COND {` blocks with lets fail identically to for-bodies, and
+    // wrap the same way (the `} else {` line stays put as the close edge).
+    let is_if = open_trimmed.starts_with("if ") && !open_trimmed.contains("let ");
+    let is_for = open_trimmed.starts_with("for ");
+    let is_element = !is_for && !is_if && {
+        let first_tok: String = open_trimmed
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        !first_tok.is_empty()
+            && !matches!(
+                first_tok.as_str(),
+                "fn" | "if"
+                    | "else"
+                    | "match"
+                    | "while"
+                    | "loop"
+                    | "unsafe"
+                    | "impl"
+                    | "mod"
+                    | "struct"
+                    | "enum"
+                    | "trait"
+                    | "pub"
+                    | "use"
+                    | "const"
+                    | "static"
+                    | "extern"
+                    | "return"
+                    | "break"
+                    | "continue"
+                    | "async"
+                    | "move"
+                    | "in"
+                    | "where"
+                    | "let"
+                    | "mut"
+                    | "ref"
+                    | "self"
+                    | "Self"
+                    | "true"
+                    | "false"
+            )
+            && open_trimmed.contains('{')
+            && !open_trimmed.contains("=>")
+    };
+    if !is_for && !is_if && !is_element {
+        return None;
+    }
+    let close_idx = block_close(&lines, open_idx)?;
+    if close_idx <= idx + 1 {
+        return None;
+    }
+    // Partition inner into statements: leading `let` statements (which may
+    // span lines via braces AND via parens/method chains like
+    // `.map(|t| …)`), then the element. Once a `let` opens, lines belong
+    // to it until `;` at brace depth 0 — line starts mean nothing mid
+    // statement.
+    let mut let_end = idx;
+    let mut depth = 0i32;
+    let mut saw_let = false;
+    let mut in_let_stmt = false;
+    let mut k = idx;
+    while k < close_idx {
+        let t = lines[k].trim();
+        if t.is_empty() || t.starts_with("//") {
+            k += 1;
+            continue;
+        }
+        if !in_let_stmt {
+            // Between statements: only a `let` continues the run.
+            if depth != 0 {
+                break; // malformed; element validation below decides
+            }
+            if t.starts_with("let ") {
+                saw_let = true;
+                in_let_stmt = true;
+            } else {
+                break; // element begins
+            }
+        }
+        let s = strip_line_strings(t);
+        depth += count_char(&s, '{') as i32 - count_char(&s, '}') as i32;
+        if depth < 0 {
+            break;
+        }
+        if in_let_stmt && depth == 0 && t.contains(';') {
+            let_end = k;
+            in_let_stmt = false;
+        }
+        k += 1;
+    }
+    if !saw_let {
+        return None;
+    }
+    // Element chunk: everything after the lets — non-blank, balanced,
+    // and opening like an rsx child (element, macro, or control flow).
+    // Anything else (a stray statement, an item) refuses here instead of
+    // manufacturing a broken wrap the compiler must then reject.
+    let elem_text = lines[let_end + 1..close_idx].join("\n");
+    if elem_text.trim().is_empty() {
+        return None;
+    }
+    let elem_first = elem_text
+        .lines()
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty() && !l.starts_with("//"));
+    match elem_first {
+        Some(f)
+            if f.starts_with("let ")
+                || f.starts_with("fn ")
+                || f.starts_with("pub ")
+                || f.starts_with("use ")
+                || f.starts_with("struct ")
+                || f.starts_with("enum ")
+                || f.starts_with("impl ")
+                || f.starts_with("mod ")
+                || f.starts_with("const ")
+                || f.starts_with("static ")
+                || f.starts_with("return ") =>
+        {
+            return None;
+        }
+        None => return None,
+        _ => {}
+    }
+    let elem_stripped = strip_line_strings(&elem_text);
+    if count_char(&elem_stripped, '{') != count_char(&elem_stripped, '}') {
+        return None;
+    }
+    let starts = line_starts(content);
+    let range_start = *starts.get(open_idx + 1)?;
+    let range_end = *starts.get(close_idx)?;
+    let expected_old = content.get(range_start..range_end)?.to_string();
+    let indent: String = lines[open_idx]
+        .chars()
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .collect();
+    let lets: String = lines[idx..=let_end]
+        .iter()
+        .map(|l| format!("{}{}", indent, l.trim_start()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    // The element may already be an `rsx!` block (nested rsx! is illegal),
+    // in which case wrap only the lets around it verbatim.
+    let replacement = if elem_text.trim_start().starts_with("rsx!") {
+        format!(
+            "\n{}    {{\n{}\n{}{}}}\n{}",
+            indent, lets, elem_text, indent, indent
+        )
+    } else {
+        format!(
+            "\n{}    {{\n{}\n{}    rsx! {{\n{}\n{}    }}\n{}}}\n{}",
+            indent, lets, indent, elem_text, indent, indent, indent
+        )
+    };
+    Some(SourceEdit {
+        file: path.to_path_buf(),
+        start: range_start,
+        end: range_end,
+        expected_old,
+        replacement,
+    })
+}
+
+/// True when the block at `open_idx` sits inside an `rsx!` invocation:
+/// nearest `rsx!` token above wins over item boundaries. Guards plain-Rust
+/// blocks (whose lets must never gain an `rsx!` wrapper) from migration.
+fn in_rsx_context(lines: &[&str], open_idx: usize) -> bool {
+    for (checked, i) in (0..open_idx.min(lines.len())).rev().enumerate() {
+        if checked > 80 {
+            break;
+        }
+        let t = lines[i].trim();
+        if t.contains("rsx!") {
+            return true;
+        }
+        if t.starts_with("fn ")
+            || t.starts_with("pub ")
+            || t.starts_with("impl ")
+            || t.starts_with("mod ")
+            || t.starts_with("struct ")
+            || t.starts_with("enum ")
+            || t.starts_with("trait ")
+            || t.starts_with("const ")
+            || t.starts_with("static ")
+        {
+            return false;
+        }
+    }
+    false
+}
+
+/// Closing line of the `match` starting at `match_idx` (brace match).
+/// `None` when unbalanced — the caller refuses rather than guessing.
+fn match_span_end(lines: &[&str], match_idx: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut opened = false;
+    for (k, line) in lines.iter().enumerate().skip(match_idx) {
+        let s = strip_line_strings(line.trim());
+        for c in s.chars() {
+            if c == '{' {
+                depth += 1;
+                opened = true;
+            } else if c == '}' {
+                depth -= 1;
+                if opened && depth == 0 {
+                    return Some(k);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// R-resource: 0.5 `match X()` on a `Resource` → 0.7 `match &*X.read()`,
+/// plus `Some(ref name)` → `Some(name)` arm normalization in the same
+/// match span (the scrutinee is already borrowed — `ref` would double it).
+/// Returns every edit; all apply atomically or not at all.
+fn migrate_resource_read(
+    path: &Path,
+    content: &str,
+    error: &super::error::CompileError,
+) -> Option<Vec<SourceEdit>> {
+    if error.code != "E0618" || error.line == 0 {
+        return None;
+    }
+    if !error.message.contains("Resource") {
+        return None;
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    let idx = (error.line as usize).checked_sub(1)?;
+    let line = lines.get(idx)?.to_string();
+    // `match tokens() {` — callee must be a bare identifier call.
+    let mpos = line.find("match")?;
+    let after = line[mpos + "match".len()..].trim_start();
+    let paren = after.find('(')?;
+    let callee = after[..paren].trim();
+    if !is_ident(callee) {
+        return None;
+    }
+    let rest = after[paren..].trim_start_matches('(');
+    if !rest.trim_start().starts_with(')') {
+        return None;
+    }
+    let starts = line_starts(content);
+    let line_start = *starts.get(idx)?;
+    // Span the whole line including its newline when present, so the
+    // replacement preserves file shape exactly.
+    let end = starts.get(idx + 1).copied().unwrap_or(content.len());
+    let expected_old = content.get(line_start..end)?.to_string();
+    let new_line = line.replacen(&format!("{}()", callee), &format!("&*{}.read()", callee), 1);
+    let mut edits = vec![SourceEdit {
+        file: path.to_path_buf(),
+        start: line_start,
+        end,
+        expected_old,
+        replacement: new_line,
+    }];
+    // The scrutinee is now `&*…`: a `Some(ref name)` arm pattern would
+    // double-borrow (`&&Vec`), so normalize arm patterns in the match span.
+    // Only the exact `Some(ref IDENT)` shape is touched. Bound names are
+    // collected: their `.clone()` calls below must become `.to_vec()`,
+    // because the binding changed from owned Vec to borrowed &Vec and
+    // `Clone for &T` would clone the reference instead of the vector.
+    // One edit per line max: overlapping ranges would stale-check each
+    // other at apply time.
+    let mut bound: Vec<String> = Vec::new();
+    let mut touched: Vec<usize> = Vec::new();
+    if let Some(span_end) = match_span_end(&lines, idx) {
+        for (k, span_line) in lines.iter().enumerate().skip(idx + 1).take(span_end - idx) {
+            let t = span_line.trim();
+            if !(t.starts_with("Some(ref ") && t.contains("=>")) {
+                continue;
+            }
+            // Binding ident between `Some(ref ` and the next delimiter.
+            let after = &t["Some(ref ".len()..];
+            let name: String = after
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if name.is_empty() {
+                continue;
+            }
+            bound.push(name.clone());
+            touched.push(k);
+            let fixed = t.replacen("Some(ref ", "Some(", 1);
+            let ls = *starts.get(k)?;
+            let le = starts.get(k + 1).copied().unwrap_or(content.len());
+            let old = content.get(ls..le)?.to_string();
+            edits.push(SourceEdit {
+                file: path.to_path_buf(),
+                start: ls,
+                end: le,
+                expected_old: old,
+                replacement: fixed + "\n",
+            });
+        }
+        // Carry-through: `<binding>.clone()` → `<binding>.to_vec()` for
+        // normalized bindings anywhere in the span. Other `.clone()` calls
+        // (autoderef on owned fields) are provably unaffected — untouched.
+        for (k, span_line) in lines.iter().enumerate().skip(idx + 1).take(span_end - idx) {
+            if touched.contains(&k) {
+                continue;
+            }
+            for name in &bound {
+                let needle = format!("{}.clone()", name);
+                if !span_line.contains(&needle) {
+                    continue;
+                }
+                let fixed_line = span_line.replacen(&needle, &format!("{}.to_vec()", name), 1);
+                let ls = *starts.get(k)?;
+                let le = starts.get(k + 1).copied().unwrap_or(content.len());
+                let old = content.get(ls..le)?.to_string();
+                edits.push(SourceEdit {
+                    file: path.to_path_buf(),
+                    start: ls,
+                    end: le,
+                    expected_old: old,
+                    replacement: fixed_line,
+                });
+                touched.push(k);
+                break;
+            }
+        }
+    }
+    Some(edits)
+}
+
+/// Add `Clone` to `struct X`'s derive list in the file, or insert a fresh
+/// `#[derive(Clone)]` when no derive attribute exists. Exactly one
+/// `struct X` must exist, else refuse (zero = elsewhere, many = unclear).
+fn add_clone_derive(path: &Path, ty: &str) -> Option<SourceEdit> {
+    let content = fs::read_to_string(path).ok()?;
+    let lines: Vec<&str> = content.lines().collect();
+    let mut defs = Vec::new();
+    for (k, line) in lines.iter().enumerate() {
+        let t = line.trim();
+        // `struct X`, `pub struct X`, `pub(crate) struct X` + optional `<T>`.
+        let rest = t
+            .strip_prefix("pub(crate) struct ")
+            .or_else(|| t.strip_prefix("pub struct "))
+            .or_else(|| t.strip_prefix("struct "))
+            .unwrap_or("");
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if name == ty {
+            defs.push(k);
+        }
+    }
+    if defs.len() != 1 {
+        return None;
+    }
+    let def_idx = defs[0];
+    let starts = line_starts(&content);
+    // Walk upward past attributes: extend an existing derive or insert one.
+    let mut k = def_idx;
+    let mut derive_idx = None;
+    while k > 0 {
+        k -= 1;
+        let t = lines[k].trim();
+        if t.is_empty() || t.starts_with("//") {
+            continue;
+        }
+        if t.starts_with("#[derive(") && t.ends_with(")]") {
+            derive_idx = Some(k);
+        }
+        break;
+    }
+    if let Some(d) = derive_idx {
+        let line = lines[d];
+        if line.contains("Clone") {
+            return None; // already derived — nothing to do honestly
+        }
+        // `#[derive(A, B)]\n` → `#[derive(A, B, Clone)]\n`, same span.
+        let trimmed = line.trim();
+        let inner = trimmed.strip_prefix("#[derive(")?.strip_suffix(")]")?;
+        let indent: String = line
+            .chars()
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .collect();
+        let ls = *starts.get(d)?;
+        let le = starts.get(d + 1).copied().unwrap_or(content.len());
+        let old = content.get(ls..le)?.to_string();
+        Some(SourceEdit {
+            file: path.to_path_buf(),
+            start: ls,
+            end: le,
+            expected_old: old,
+            replacement: format!("{}#[derive({}, Clone)]\n", indent, inner),
+        })
+    } else {
+        // Fresh attribute above the struct.
+        let ls = *starts.get(def_idx)?;
+        let indent: String = lines[def_idx]
+            .chars()
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .collect();
+        Some(SourceEdit {
+            file: path.to_path_buf(),
+            start: ls,
+            end: ls,
+            expected_old: String::new(),
+            replacement: format!("{}#[derive(Clone)]\n", indent),
+        })
+    }
+}
+
+/// R-await: `.await` inside a sync `move ||` closure → wrap the closure
+/// body in `spawn(async move { … })`.
+fn migrate_await_spawn(path: &Path, content: &str, line_1based: u32) -> Option<SourceEdit> {
+    if line_1based == 0 {
+        return None;
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    let idx = (line_1based as usize).checked_sub(1)?;
+    if !lines.get(idx)?.contains(".await") {
+        return None;
+    }
+    // Nearest `move … {` opener above, without crossing item/lone-close
+    // boundaries (those mean we already left the closure).
+    let mut open_idx = None;
+    for i in (0..=idx.min(lines.len().saturating_sub(1))).rev() {
+        let t = lines[i].trim();
+        if t.starts_with("fn ")
+            || t.starts_with("pub ")
+            || t.starts_with("#[")
+            || (t.starts_with('}') && !t.contains('{'))
+        {
+            break;
+        }
+        if t.contains("move") && t.contains('{') && !t.contains("async") {
+            open_idx = Some(i);
+            break;
+        }
+    }
+    let open_idx = open_idx?;
+    let close_idx = block_close(&lines, open_idx)?;
+    if close_idx <= idx {
+        return None;
+    }
+    // Refuse if already inside async/spawn.
+    if lines[open_idx..=close_idx]
+        .iter()
+        .any(|l| l.contains("spawn(") || l.contains("async move"))
+    {
+        return None;
+    }
+    let starts = line_starts(content);
+    let range_start = *starts.get(open_idx + 1)?;
+    let range_end = *starts.get(close_idx)?;
+    let expected_old = content.get(range_start..range_end)?.to_string();
+    let indent: String = lines[open_idx]
+        .chars()
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .collect();
+    let body = &expected_old;
+    let replacement = format!(
+        "\n{}    spawn(async move {{{}\n{}    }});\n{}",
+        indent, body, indent, indent
+    );
+    Some(SourceEdit {
+        file: path.to_path_buf(),
+        start: range_start,
+        end: range_end,
+        expected_old,
+        replacement,
+    })
+}
+
 fn sanitize_fn_name(s: &str) -> String {
     let mut out: String = s
         .to_lowercase()
@@ -1688,5 +3459,460 @@ fn extract_import(line: &str) -> Option<String> {
             .map(|s| s.trim().to_string())
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::error::{CompileError, ErrorKind};
+
+    fn err(code: &str, file: &str, line: u32, message: &str) -> CompileError {
+        CompileError {
+            code: code.to_string(),
+            message: message.to_string(),
+            file: file.to_string(),
+            line,
+            col: 0,
+            suggestion: None,
+            source_line: None,
+            kind: ErrorKind::Other,
+        }
+    }
+
+    const FOR_LET: &str = "fn c() -> Element {\n    rsx! {\n        div {\n            nav { class: \"bottom-nav\",\n                for (i, label) in items.iter().enumerate() {\n                    let active = i as u8 == tab();\n                    button {\n                        span { \"{label}\" }\n                    }\n                }\n            }\n";
+
+    #[test]
+    fn rsx_let_wraps_for_body() {
+        let path = Path::new("t.rs");
+        let edit = migrate_rsx_let(path, FOR_LET, 6).expect("must match");
+        // Applying the edit must yield compiling 0.7 shape: the outer
+        // fixture rsx! plus exactly one wrapped layer (total 2).
+        let mut content = FOR_LET.to_string();
+        content.replace_range(edit.start..edit.end, &edit.replacement);
+        assert!(content.contains("let active"));
+        assert_eq!(content.matches("rsx! {").count(), 2);
+    }
+
+    #[test]
+    fn rsx_let_rejects_non_shapes() {
+        let path = Path::new("t.rs");
+        // Plain fn body lets are not rsx shapes.
+        let src = "fn f() {\n    let x = 1;\n    x + 1\n}\n";
+        assert!(migrate_rsx_let(path, src, 2).is_none());
+        // Bare div with no rsx! above: refused (plain-Rust guard).
+        let src2 = "            div {\n                let a = 1;\n                span { \"x\" }\n                span { \"y\" }\n            }\n";
+        assert!(migrate_rsx_let(path, src2, 2).is_none());
+        // Same shape under rsx!: allowed (compiles).
+        let src3 = "fn c() -> Element {\n    rsx! {\n        div {\n            div {\n                let a = 1;\n                span { \"x\" }\n            }\n        }\n    }\n}\n";
+        assert!(migrate_rsx_let(path, src3, 5).is_some());
+    }
+
+    const MATCH_RES: &str = "            div {\n                match tokens() {\n                    Some(ref list) => rsx! { div { \"{list.len()}\" } },\n                    None => rsx! { div { \"loading\" } },\n                }\n            }\n";
+
+    #[test]
+    fn resource_read_rewrites_match() {
+        let path = Path::new("t.rs");
+        let e = err(
+            "E0618",
+            "t.rs",
+            2,
+            "expected function, found `Resource<Vec<T>>`",
+        );
+        let edits = migrate_resource_read(path, MATCH_RES, &e).expect("must match");
+        // Match line + arm normalization, applied bottom-up.
+        assert_eq!(edits.len(), 2);
+        let mut ordered = edits;
+        ordered.sort_by_key(|e| std::cmp::Reverse(e.start));
+        let mut content = MATCH_RES.to_string();
+        for edit in &ordered {
+            content.replace_range(edit.start..edit.end, &edit.replacement);
+        }
+        assert!(content.contains("match &*tokens.read() {"));
+        assert!(content.contains("Some(list) =>"));
+        assert!(!content.contains("Some(ref "));
+    }
+
+    #[test]
+    fn resource_read_rejects_bare_calls() {
+        let path = Path::new("t.rs");
+        let e = err(
+            "E0618",
+            "t.rs",
+            1,
+            "expected function, found `Resource<Vec<T>>`",
+        );
+        assert!(migrate_resource_read(path, "foo(bar())\n", &e).is_none());
+    }
+
+    const MUT_SRC: &str = "fn c() -> Element {\n    let tab = use_signal(|| 0u8);\n    rsx! { div { \"{tab}\" } }\n}\n";
+
+    #[test]
+    fn mut_binding_adds_mut_once() {
+        let path = Path::new("t.rs");
+        let e = err(
+            "E0596",
+            "t.rs",
+            3,
+            "cannot borrow `tab` as mutable, as it is not declared as mutable",
+        );
+        let edit = migrate_mut_binding(path, MUT_SRC, &e).expect("must match");
+        let mut content = MUT_SRC.to_string();
+        content.replace_range(edit.start..edit.end, &edit.replacement);
+        assert!(content.contains("let mut tab = use_signal"));
+        // Wrong code, missing binding, ambiguous bindings: all refuse.
+        assert!(
+            migrate_mut_binding(
+                path,
+                MUT_SRC,
+                &err("E0000", "t.rs", 3, "cannot borrow `tab` as mutable")
+            )
+            .is_none()
+        );
+        assert!(
+            migrate_mut_binding(
+                path,
+                "fn f() {\n    tab.set(1);\n}\n",
+                &err(
+                    "E0596",
+                    "t.rs",
+                    2,
+                    "cannot borrow `tab` as mutable, as it is not declared as mutable"
+                )
+            )
+            .is_none()
+        );
+        let two = "fn f() {\n    let tab = a();\n    let tab = b();\n}\n";
+        assert!(
+            migrate_mut_binding(
+                path,
+                two,
+                &err(
+                    "E0596",
+                    "t.rs",
+                    2,
+                    "cannot borrow `tab` as mutable, as it is not declared as mutable"
+                )
+            )
+            .is_none()
+        );
+    }
+
+    const MUT_PARAM_SRC: &str = "fn field(label: &str, oninput: impl Fn(String) + 'static) -> Element {\n    rsx! {\n        div {\n            input {\n                oninput: move |e| oninput(e.value()),\n            }\n        }\n    }\n}\n";
+
+    #[test]
+    fn mut_binding_relaxes_fn_param() {
+        let path = Path::new("t.rs");
+        let e = err(
+            "E0596",
+            "t.rs",
+            5,
+            "cannot borrow `oninput` as mutable, as it is not declared as mutable",
+        );
+        let edit = migrate_mut_binding(path, MUT_PARAM_SRC, &e).expect("must match");
+        let mut content = MUT_PARAM_SRC.to_string();
+        content.replace_range(edit.start..edit.end, &edit.replacement);
+        assert!(content.contains("mut oninput: impl FnMut(String) + 'static"));
+        assert_eq!(content.matches('(').count(), content.matches(')').count());
+        // Plain (non-Fn) parameters refuse.
+        let plain = "fn f(flag: bool) -> Element {\n    rsx! { div { \"{flag}\" } }\n}\n";
+        assert!(
+            migrate_mut_binding(
+                path,
+                plain,
+                &err(
+                    "E0596",
+                    "t.rs",
+                    2,
+                    "cannot borrow `flag` as mutable, as it is not declared as mutable"
+                )
+            )
+            .is_none()
+        );
+    }
+
+    const MUT_CAPTURE_SRC: &str = "fn c() -> Element {\n    let expanded = use_signal(|| 0u8);\n    rsx! {\n        div {\n            {sec(true, \"T\", move || expanded.set(3), vec![])}\n        }\n    }\n}\n";
+
+    #[test]
+    fn mut_binding_muts_captured_local() {
+        let path = Path::new("t.rs");
+        let e = err(
+            "E0596",
+            "t.rs",
+            5,
+            "cannot borrow `expanded` as mutable, as it is a captured variable in a `Fn` closure",
+        );
+        let edit = migrate_mut_binding(path, MUT_CAPTURE_SRC, &e).expect("must match");
+        let mut content = MUT_CAPTURE_SRC.to_string();
+        content.replace_range(edit.start..edit.end, &edit.replacement);
+        assert!(content.contains("let mut expanded = use_signal"));
+        // A captured parameter is not a let: refuse (FnMut recipes own it).
+        let param_src = "fn s(flag: bool, ontoggle: impl Fn() + 'static) -> Element {\n    rsx! {\n        div { onclick: move |_| ontoggle(), }\n    }\n}\n";
+        assert!(
+            migrate_mut_binding(
+                path,
+                param_src,
+                &err(
+                    "E0596",
+                    "t.rs",
+                    3,
+                    "cannot borrow `ontoggle` as mutable, as it is a captured variable in a `Fn` closure"
+                )
+            )
+            .is_none()
+        );
+    }
+
+    const INTO_SRC: &str = "                        SummaryCard { label: \"Balance\".into(), value: format!(\"{:.3} SOL\", x), color: \"var(--accent)\".into() }\n";
+
+    #[test]
+    fn into_to_string_rewrites_literal_intos() {
+        let path = Path::new("t.rs");
+        let e = err(
+            "E0283",
+            "t.rs",
+            1,
+            "multiple `impl`s satisfying `&str: Into<_>` found",
+        );
+        let edit = migrate_into_to_string(path, INTO_SRC, &e).expect("must match");
+        let mut content = INTO_SRC.to_string();
+        content.replace_range(edit.start..edit.end, &edit.replacement);
+        assert!(content.contains("label: \"Balance\".to_string()"));
+        assert!(content.contains("color: \"var(--accent)\".to_string()"));
+        assert!(!content.contains(".into()"));
+        // format!() output untouched (String::into is unambiguous).
+        assert!(content.contains("format!(\"{:.3} SOL\", x)"));
+        // Knock-on inference flavors share the code and the cure: any
+        // E0283 on a literal-.into() line fires (the parser keeps only
+        // the header line, so sub-notes are invisible by design).
+        assert!(
+            migrate_into_to_string(
+                path,
+                INTO_SRC,
+                &err("E0283", "t.rs", 1, "type annotations needed")
+            )
+            .is_some()
+        );
+        // Other codes and lines without literal .into(): refuse.
+        assert!(
+            migrate_into_to_string(
+                path,
+                INTO_SRC,
+                &err("E0000", "t.rs", 1, "multiple `impl`s satisfying")
+            )
+            .is_none()
+        );
+        assert!(
+            migrate_into_to_string(
+                path,
+                "    let x = y.into();\n",
+                &err(
+                    "E0283",
+                    "t.rs",
+                    1,
+                    "multiple `impl`s satisfying `u32: Into<_>` found"
+                )
+            )
+            .is_none()
+        );
+    }
+
+    const FNMUT_A: &str = "fn section(expanded: bool, ontoggle: impl Fn() + 'static) -> Element {\n    rsx! {\n        div { onclick: move |_| ontoggle(), }\n    }\n}\n";
+
+    #[test]
+    fn fnmut_relaxes_enclosing_param() {
+        let path = Path::new("t.rs");
+        let e = err(
+            "E0596",
+            "t.rs",
+            3,
+            "cannot borrow `ontoggle` as mutable, as it is a captured variable in a `Fn` closure",
+        );
+        let edit = migrate_fnmut_param(path, FNMUT_A, &e).expect("must match");
+        let mut content = FNMUT_A.to_string();
+        content.replace_range(edit.start..edit.end, &edit.replacement);
+        assert!(content.contains("mut ontoggle: impl FnMut() + 'static"));
+        assert!(!content.contains("impl Fn()"));
+        // The splice provably preserves paren balance.
+        assert_eq!(content.matches('(').count(), content.matches(')').count());
+    }
+
+    const FNMUT_B: &str = "fn sec(flag: bool, title: &str, ontoggle: impl Fn() + 'static) -> Element {\n    rsx! {}\n}\n\nfn c() -> Element {\n    let expanded = use_signal(|| 0u8);\n    rsx! {\n        div {\n            {sec(expanded() == 3, \"Trading\", move || expanded.set(3), vec![])}\n        }\n    }\n}\n";
+
+    #[test]
+    fn fnmut_relaxes_callee_param_positionally() {
+        let path = Path::new("t.rs");
+        let e = err(
+            "E0596",
+            "t.rs",
+            9,
+            "cannot borrow `expanded` as mutable, as it is a captured variable in a `Fn` closure",
+        );
+        let edit = migrate_fnmut_param(path, FNMUT_B, &e).expect("must match");
+        let mut content = FNMUT_B.to_string();
+        content.replace_range(edit.start..edit.end, &edit.replacement);
+        assert!(content.contains("mut ontoggle: impl FnMut() + 'static"));
+        // Other params untouched.
+        assert!(content.contains("flag: bool"));
+        assert!(content.contains("title: &str"));
+        assert_eq!(content.matches('(').count(), content.matches(')').count());
+    }
+
+    const FNMUT_C: &str = "fn sec(\n    expanded: bool,\n    title: &str,\n    ontoggle: impl Fn() + 'static,\n    children: Vec<Element>,\n) -> Element {\n    section(expanded, title, ontoggle)\n}\n\n#[component]\npub fn Settings() -> Element {\n    let mut expanded = use_signal(|| 0u8);\n    rsx! {\n        div {\n            {sec(expanded() == 1, \"RPC\", move || expanded.set(1), vec![])}\n        }\n    }\n}\n";
+
+    #[test]
+    fn fnmut_relaxes_multiline_callee() {
+        let path = Path::new("t.rs");
+        let e = err(
+            "E0596",
+            "t.rs",
+            15,
+            "cannot borrow `expanded` as mutable, as it is a captured variable in a `Fn` closure",
+        );
+        let edit = migrate_fnmut_param(path, FNMUT_C, &e).expect("must match");
+        let mut content = FNMUT_C.to_string();
+        content.replace_range(edit.start..edit.end, &edit.replacement);
+        assert!(content.contains("mut ontoggle: impl FnMut() + 'static"));
+        assert_eq!(content.matches('(').count(), content.matches(')').count());
+    }
+
+    const FNMUT_D: &str = "fn dropdown(label: &str, value: &str, options: &[(&str, &str)], onchange: impl Fn(String) + 'static) -> Element {\n    rsx! {}\n}\n\n#[component]\npub fn Settings() -> Element {\n    let mut settings = use_signal(|| 0u8);\n    rsx! {\n        div {\n            {dropdown(\"Landing Mode\", &\"normal\", &[(\"normal\",\"Normal\"),(\"zeroslot\",\"ZeroSlot\")], move |v| settings.set(v))}\n        }\n    }\n}\n";
+
+    #[test]
+    fn fnmut_relaxes_dropdown_param() {
+        let path = Path::new("t.rs");
+        let e = err(
+            "E0596",
+            "t.rs",
+            10,
+            "cannot borrow `settings` as mutable, as it is a captured variable in a `Fn` closure",
+        );
+        let edit = migrate_fnmut_param(path, FNMUT_D, &e).expect("must match");
+        let mut content = FNMUT_D.to_string();
+        content.replace_range(edit.start..edit.end, &edit.replacement);
+        assert!(content.contains("mut onchange: impl FnMut(String) + 'static"));
+        assert_eq!(content.matches('(').count(), content.matches(')').count());
+    }
+
+    const FNMUT_E: &str = "fn section(expanded: bool, title: &str, ontoggle: impl Fn() + 'static, children: Vec<Element>) -> Element {\n    rsx! {}\n}\n\nfn sec(\n    expanded: bool,\n    title: &str,\n    mut ontoggle: impl FnMut() + 'static,\n    children: Vec<Element>,\n) -> Element {\n    section(expanded, title, ontoggle, rsx! { \"x\" })\n}\n";
+
+    #[test]
+    fn fnmut_call_relaxes_upstream_callee() {
+        let path = Path::new("t.rs");
+        let e = err(
+            "E0277",
+            "t.rs",
+            11,
+            "expected an `Fn()` closure, found `impl FnMut() + 'static`",
+        );
+        let edit = migrate_fnmut_call(path, FNMUT_E, &e).expect("must match");
+        let mut content = FNMUT_E.to_string();
+        content.replace_range(edit.start..edit.end, &edit.replacement);
+        assert!(content.contains("mut ontoggle: impl FnMut() + 'static"));
+        // section got exactly one relaxation (sec's own stays).
+        assert_eq!(content.matches("impl FnMut()").count(), 2);
+        assert_eq!(content.matches('(').count(), content.matches(')').count());
+        // Other E0277 flavors and non-call lines: refuse.
+        assert!(
+            migrate_fnmut_call(path, FNMUT_E, &err("E0277", "t.rs", 12, "expected an `Fn`"))
+                .is_none()
+        );
+        assert!(migrate_fnmut_call(path, "fn f() {}\n", &e).is_none());
+    }
+
+    #[test]
+    fn fnmut_debug_call() {
+        let lines: Vec<&str> = FNMUT_E.lines().collect();
+        eprintln!("line11={:?}", lines.get(10));
+        eprintln!("fnname3={:?}", fn_def_name(lines[3]));
+        eprintln!("fnname4={:?}", fn_def_name(lines[4]));
+    }
+
+    #[test]
+    fn fnmut_refuses_unguessable_shapes() {
+        let path = Path::new("t.rs");
+        let e = |line| {
+            err(
+                "E0596",
+                "t.rs",
+                line,
+                "cannot borrow `v` as mutable, as it is a captured variable in a `Fn` closure",
+            )
+        };
+        // No enclosing fn at all.
+        assert!(migrate_fnmut_param(path, "    v.set(1);\n", &e(1)).is_none());
+        // Enclosing fn is not local (callee undefined).
+        let ext = "fn c() -> Element {\n    rsx! {\n        div {\n            {ext_lib(true, move || v.set(1))}\n        }\n    }\n}\n";
+        assert!(migrate_fnmut_param(path, ext, &e(4)).is_none());
+        // Wrong code.
+        assert!(migrate_fnmut_param(path, FNMUT_A, &err("E0000", "t.rs", 3, "x")).is_none());
+    }
+
+    const AWAIT_CLOSURE: &str = "    let stop = move || {\n        engine::stop();\n        status.set(engine::snapshot().await);\n    };\n";
+
+    #[test]
+    fn await_wraps_in_spawn() {
+        let path = Path::new("t.rs");
+        let edit = migrate_await_spawn(path, AWAIT_CLOSURE, 3).expect("must match");
+        let mut content = AWAIT_CLOSURE.to_string();
+        content.replace_range(edit.start..edit.end, &edit.replacement);
+        assert!(content.contains("spawn(async move {"));
+        assert!(content.contains(".await"));
+    }
+
+    #[test]
+    fn await_refuses_async_contexts() {
+        let path = Path::new("t.rs");
+        let src = "    spawn(async move {\n        foo().await;\n    });\n";
+        assert!(migrate_await_spawn(path, src, 2).is_none());
+    }
+}
+
+#[cfg(test)]
+mod migration_extra_tests {
+    use super::*;
+    use std::path::Path;
+
+    const PREFIXED: &str = "fn c() -> Element {\n    rsx! {\n        div {\n                for token in list {\n                    let m = if a {\n                        b()\n                    } else {\n                        c()\n                    };\n                    rsx! {\n                        div { \"{m}\" }\n                    }\n                }\n";
+
+    #[test]
+    fn rsx_let_skips_second_macro_layer() {
+        let path = Path::new("t.rs");
+        // `let m` moved to line 5 under the fixture's fn/rsx!/div prefix.
+        let edit = migrate_rsx_let(path, PREFIXED, 5).expect("must match");
+        let mut content = PREFIXED.to_string();
+        content.replace_range(edit.start..edit.end, &edit.replacement);
+        // Outer fixture rsx! + element's own: no third layer added.
+        assert_eq!(content.matches("rsx!").count(), 2);
+        assert!(content.contains("let m = if a {"));
+    }
+}
+
+#[cfg(test)]
+mod migration_if_tests {
+    use super::*;
+    use std::path::Path;
+
+    const IF_LET: &str = "fn c() -> Element {\n    rsx! {\n        div {\n            if ok {\n                let v = compute();\n                span { \"{v}\" }\n            }\n        }\n    }\n}\n";
+
+    #[test]
+    fn rsx_let_wraps_if_body() {
+        let path = Path::new("t.rs");
+        // `let v` is line 5 (1-based).
+        let edit = migrate_rsx_let(path, IF_LET, 5).expect("must match");
+        let mut content = IF_LET.to_string();
+        content.replace_range(edit.start..edit.end, &edit.replacement);
+        assert!(content.contains("rsx! {"));
+        // Balanced overall.
+        assert_eq!(content.matches('{').count(), content.matches('}').count());
+    }
+
+    const PLAIN_IF: &str = "fn f(x: bool) -> i32 {\n    if x {\n        let y = 1;\n        y + 1\n    } else {\n        0\n    }\n}\n";
+
+    #[test]
+    fn rsx_let_refuses_plain_rust() {
+        let path = Path::new("t.rs");
+        // `let y` is line 3 and the block is plain Rust: must refuse.
+        assert!(migrate_rsx_let(path, PLAIN_IF, 3).is_none());
     }
 }

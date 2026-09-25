@@ -76,9 +76,94 @@ impl CorrectionPipeline {
     /// Here: "When the bot detects a compilation error, it corrects itself
     /// using a recipe or a pattern from the codebase. If no recipe exists,
     /// it doesn't guess."
+    /// Apply one batch of migration edits through the stale-checked
+    /// EditPlan path (shared by single and batched fixes). Debug snapshots
+    /// via GROUNDING_DEBUG_MIGRATE as before.
+    fn apply_migration_edits(
+        writer: &CodeWriter,
+        edits: Vec<super::plan::SourceEdit>,
+        evidences: Vec<super::plan::Evidence>,
+    ) -> CorrectionResult {
+        // GROUNDING_DEBUG_MIGRATE=1 (or a dir path) prints each
+        // applied span for post-mortems (the transaction rolls
+        // back on failure, so intermediate states are otherwise
+        // invisible). A path value also snapshots whole files.
+        if let Ok(mode) = std::env::var("GROUNDING_DEBUG_MIGRATE") {
+            for e in &edits {
+                eprintln!(
+                    "[migrate] {}:{}-{} {{\n{}\n}}",
+                    e.file.display(),
+                    e.start,
+                    e.end,
+                    e.replacement.lines().take(8).collect::<Vec<_>>().join("\n")
+                );
+                if !mode.is_empty()
+                    && mode != "1"
+                    && let Ok(content) = std::fs::read(&e.file)
+                {
+                    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                    let _ = std::fs::create_dir_all(&mode);
+                    if let Some(name) = e.file.file_name() {
+                        let _ = std::fs::write(
+                            std::path::Path::new(&mode).join(format!(
+                                "{:02}-{}.rs",
+                                SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                                name.to_string_lossy()
+                            )),
+                            &content,
+                        );
+                    }
+                }
+            }
+        }
+        let plan = super::plan::EditPlan {
+            task_id: 0,
+            edits,
+            evidence: evidences,
+        };
+        let files_changed = writer.apply_plan(&plan).unwrap_or_default();
+        // Post-apply snapshots for post-mortems (see above).
+        if let Ok(mode) = std::env::var("GROUNDING_DEBUG_MIGRATE")
+            && !mode.is_empty()
+            && mode != "1"
+            && !files_changed.is_empty()
+        {
+            static SEQ2: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let _ = std::fs::create_dir_all(&mode);
+            for f in &files_changed {
+                let p = std::path::Path::new(f);
+                if let (Some(name), Ok(content)) = (p.file_name(), std::fs::read(p)) {
+                    let _ = std::fs::write(
+                        std::path::Path::new(&mode).join(format!(
+                            "applied-{:02}-{}.rs",
+                            SEQ2.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                            name.to_string_lossy()
+                        )),
+                        &content,
+                    );
+                }
+            }
+        }
+        if !files_changed.is_empty() {
+            return CorrectionResult {
+                fixed: true,
+                files_changed,
+                new_recipes: 0,
+                error: None,
+            };
+        }
+        CorrectionResult {
+            fixed: false,
+            files_changed: Vec::new(),
+            new_recipes: 0,
+            error: Some("Migration edits applied to nothing — BLOCKED".to_string()),
+        }
+    }
+
     pub fn try_correct(
         &mut self,
         error: &CompileError,
+        all_errors: &[CompileError],
         arena: &CodeArena,
         writer: &CodeWriter,
     ) -> CorrectionResult {
@@ -104,6 +189,75 @@ impl CorrectionPipeline {
         let fix = self.synthesize_fix(error, recipe);
 
         if matches!(fix, Fix::None) {
+            // Phase 3b: migration transforms — deterministic structural
+            // rewrites derived from the diagnostic + fixed templates
+            // (e.g. Dioxus 0.5→0.7 idioms). They execute through the same
+            // stale-checked EditPlan path below and face the compiler next.
+            //
+            // Same-code batching: one fix per verify round cannot cross a
+            // 60-error E0596 field (each `let mut` is independent). Errors
+            // sharing a code re-enter the SAME recipe matcher individually
+            // — each must match structurally on its own diagnostic, so
+            // this is parallel evidence, not guessing. Overlapping spans
+            // keep only the first edit (apply is all-or-nothing on stale
+            // ranges); capped to bound the blast radius. The compiler
+            // judges the combined result next round.
+            //
+            // Trigger selection: the run's first error may be an
+            // un-actionable flavor (e.g. an inference knock-on next to a
+            // fixable ambiguity on the same line). Groups are tried in
+            // order of appearance — trigger's code first — and the first
+            // group that plans anything wins the round. Planning is pure
+            // (reads only); only the winning batch touches disk.
+            if !error.file.is_empty() {
+                let mut codes: Vec<&str> = Vec::new();
+                for e in std::iter::once(error).chain(all_errors.iter()) {
+                    if !codes.contains(&e.code.as_str()) {
+                        codes.push(e.code.as_str());
+                    }
+                }
+                for code in codes {
+                    let mut batched: Vec<super::plan::SourceEdit> = Vec::new();
+                    let mut evidences = Vec::new();
+                    for other in all_errors.iter().filter(|e| e.code == code).take(64) {
+                        if batched.len() >= 32 {
+                            break;
+                        }
+                        let planned =
+                            super::writer::plan_migration_fix(writer.project_dir(), other);
+                        if std::env::var("GROUNDING_DEBUG_MIGRATE").is_ok() {
+                            eprintln!(
+                                "[batch] {} {}:{} -> {}",
+                                other.code,
+                                other.file,
+                                other.line,
+                                match &planned {
+                                    Some((edits, _)) => format!("{} edits", edits.len()),
+                                    None => "no recipe".to_string(),
+                                }
+                            );
+                        }
+                        let Some((edits, evidence)) = planned else {
+                            continue;
+                        };
+                        evidences.push(evidence);
+                        for e in edits {
+                            let overlaps = batched
+                                .iter()
+                                .any(|b| b.file == e.file && b.start < e.end && e.start < b.end);
+                            if !overlaps {
+                                batched.push(e);
+                            }
+                            if batched.len() >= 32 {
+                                break;
+                            }
+                        }
+                    }
+                    if !batched.is_empty() {
+                        return Self::apply_migration_edits(writer, batched, evidences);
+                    }
+                }
+            }
             // The bot KNOWS it doesn't know. Reports honestly.
             return CorrectionResult {
                 fixed: false,

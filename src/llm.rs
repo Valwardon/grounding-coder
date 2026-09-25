@@ -118,7 +118,9 @@ impl LlmClient {
             "- constraints: [string]\n",
             "- dependencies: [string]\n",
             "- unknown_requirements: [string] — list what you do NOT know\n",
-            "- confidence: number 0.0-1.0\n"
+            "- confidence: number 0.0-1.0\n",
+            "- files: [{path: string, url: string, sha256: string}] — replicate these byte-exact (https:// or file://); hashes gate every byte\n",
+            "- replacements: [{file: string, find: string, replace: string}] — exact renames, single-match rule\n",
         );
 
         // Free shared-pool models throttle (HTTP 429) routinely. Try the
@@ -354,7 +356,46 @@ fn normalize_intent(v: &serde_json::Value, prompt: &str) -> StructuredIntent {
         define,
         test: Vec::new(),
         references,
+        files: parse_replicated_files(v),
+        replacements: parse_replacements(v),
     }
+}
+
+/// Pass through well-formed replication manifests and renames from model
+/// output. Malformed entries are dropped — the hash gate and single-match
+/// rule downstream reject anything smuggled.
+fn parse_replicated_files(v: &serde_json::Value) -> Vec<crate::engine::ReplicatedFile> {
+    v.get("files")
+        .and_then(|x| x.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|f| {
+                    Some(crate::engine::ReplicatedFile {
+                        path: f.get("path")?.as_str()?.to_string(),
+                        url: f.get("url")?.as_str()?.to_string(),
+                        sha256: f.get("sha256")?.as_str()?.to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_replacements(v: &serde_json::Value) -> Vec<crate::engine::ReplacementSpec> {
+    v.get("replacements")
+        .and_then(|x| x.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|r| {
+                    Some(crate::engine::ReplacementSpec {
+                        file: r.get("file")?.as_str()?.to_string(),
+                        find: r.get("find")?.as_str()?.to_string(),
+                        replace: r.get("replace")?.as_str()?.to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Detected page content: title, (heading, body) sections, footer.

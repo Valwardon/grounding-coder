@@ -161,16 +161,35 @@ impl ErrorClassifier {
                 continue;
             }
 
-            // Match: error: message (no error code)
+            // Match: error: message (no error code). rustc puts the
+            // location on a following `--> file:line:col` line — look
+            // ahead for it so diagnostics stay actionable. Without a
+            // location the repair loop cannot anchor a fix and blocks.
             if line.starts_with("error:") {
                 let message = line.trim_start_matches("error:").trim().to_string();
                 let kind = classify_error("", &message);
+                let (mut file, mut line_no, mut col) = (String::new(), 0u32, 0u32);
+                let mut j = i + 1;
+                while j < lines.len() && j < i + 6 {
+                    if let Some(loc) = parse_location(lines[j]) {
+                        file = loc.0;
+                        line_no = loc.1;
+                        col = loc.2;
+                        break;
+                    }
+                    // A new diagnostic starts: stop looking.
+                    let t = lines[j].trim();
+                    if t.starts_with("error") || t.starts_with("warning") {
+                        break;
+                    }
+                    j += 1;
+                }
                 errors.push(CompileError {
                     code: "error".to_string(),
                     message,
-                    file: String::new(),
-                    line: 0,
-                    col: 0,
+                    file,
+                    line: line_no,
+                    col,
                     suggestion: None,
                     source_line: None,
                     kind,

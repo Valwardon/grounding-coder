@@ -19,14 +19,15 @@ pub use arena::{CodeArena, CodeSymbol, SymbolEdge, SymbolId, SymbolKind, SymbolR
 pub use budget::RetryBudget;
 pub use corrector::CorrectionPipeline;
 pub use error::{CompileError, ErrorClassifier, ErrorKind};
+pub use lang::{BuildOutcome, LanguageBackend};
 pub use plan::{EditPlan, Evidence, SourceEdit, TaskState};
 pub use recipes::RecipeLog;
 pub use research::ResearchOracle;
 pub use symbols::{CodeDef, SymbolTable};
 pub use synthesize::{ContractCase, SynthRequest, Synthesizer};
 pub use tasks::{
-    EditIntent, FieldDef, IntentAction, IntentDefinition, IntentTest, MethodDef, SectionDef,
-    StructuredIntent, SubTask, TaskDecomposer, TaskKind, TestCase,
+    EditIntent, FieldDef, IntentAction, IntentDefinition, IntentTest, MethodDef, ReplacementSpec,
+    ReplicatedFile, SectionDef, StructuredIntent, SubTask, TaskDecomposer, TaskKind, TestCase,
 };
 pub use verifier::CodeVerifier;
 pub use writer::{CodeWriter, FileSnapshot};
@@ -59,6 +60,12 @@ pub struct CodeBot {
     /// GitHub token for the publish actor. `None` = publishing disabled;
     /// the engine never invents credentials.
     github_token: Option<String>,
+    /// Clean-room authorship. `true` (default) = the engine NEVER ingests
+    /// outside bytes: any intent carrying `files[]` replication manifests
+    /// is refused BEFORE any fetch, so every byte on disk is authored by
+    /// synthesis + verified transforms. Replication (even of owned
+    /// templates) requires explicit opt-out via `set_clean_room(false)`.
+    clean_room: bool,
 }
 
 /// Result of a completed coding task.
@@ -115,6 +122,8 @@ pub enum BlockReason {
     NoSafeFix,
     VerificationToolUnavailable,
     StaleEdit,
+    /// Clean-room refusal: intent asked to ingest outside bytes.
+    CleanRoom,
 }
 
 impl std::fmt::Display for BlockReason {
@@ -126,6 +135,7 @@ impl std::fmt::Display for BlockReason {
             BlockReason::NoSafeFix => "NoSafeFix",
             BlockReason::VerificationToolUnavailable => "VerificationToolUnavailable",
             BlockReason::StaleEdit => "StaleEdit",
+            BlockReason::CleanRoom => "CleanRoom",
         };
         write!(f, "{}", s)
     }
@@ -338,6 +348,7 @@ impl CodeBot {
             researcher,
             progress: None,
             github_token: None,
+            clean_room: true,
         };
 
         // Bootstrap: scan the project and build the code symbol graph.
@@ -349,6 +360,14 @@ impl CodeBot {
     /// requests report honestly instead of failing obscurely.
     pub fn set_github_token(&mut self, token: Option<String>) {
         self.github_token = token.filter(|t| !t.trim().is_empty());
+    }
+
+    /// Opt out of clean-room authorship. `false` permits `files[]`
+    /// replication manifests (byte-exact fetch of outside sources, hash
+    /// gated). Pass `false` only for sources you own — e.g. your own
+    /// template trees. Default is `true`: refuse before any fetch.
+    pub fn set_clean_room(&mut self, clean: bool) {
+        self.clean_room = clean;
     }
 
     /// Attach a live progress listener (chat UI, CLI stderr).
@@ -433,6 +452,34 @@ impl CodeBot {
         // Step 0: Parse intent and research unknown symbols
         let mut intent: StructuredIntent = serde_json::from_str(intent_json)
             .map_err(|e| format!("Failed to parse intent: {}", e))?;
+
+        // Clean-room gate FIRST — before any page-create write, research,
+        // or fetch. Replication manifests mean ingesting outside bytes,
+        // which clean-room authorship forbids. Refuse with the disk
+        // untouched and say exactly how to opt out.
+        if self.clean_room && !intent.files.is_empty() {
+            let n = intent.files.len();
+            return Ok(AgentOutcome::Blocked {
+                reason: BlockReason::CleanRoom,
+                diagnostics: vec![CompileError {
+                    code: "CLEAN_ROOM".to_string(),
+                    message: format!(
+                        "Clean-room refusal: intent carries {} file replication \
+                         manifest(s); no bytes fetched, disk untouched. Every \
+                         byte must be authored by synthesis + verified \
+                         transforms. Opt out explicitly with \
+                         set_clean_room(false) for sources you own.",
+                        n
+                    ),
+                    file: String::new(),
+                    line: 0,
+                    col: 0,
+                    suggestion: None,
+                    source_line: None,
+                    kind: crate::engine::error::ErrorKind::Other,
+                }],
+            });
+        }
 
         // A webpage request whose target does not exist yet cannot be served
         // by stub tasks (they fail the read). Inject a page definition from
@@ -603,6 +650,48 @@ impl CodeBot {
             active = deps;
         }
 
+        // Prefetch: replicate tasks fetch their bytes and gate on SHA-256
+        // BEFORE anything is planned or touched. A hash mismatch blocks
+        // with zero disk writes; planning only ever sees verified bytes.
+        for task in &active {
+            if task.kind != crate::engine::tasks::TaskKind::ReplicateFile {
+                continue;
+            }
+            let (url, sha) = match (
+                task.payload.get("url").and_then(|v| v.as_str()),
+                task.payload.get("sha256").and_then(|v| v.as_str()),
+            ) {
+                (Some(u), Some(s)) => (u.to_string(), s.to_string()),
+                _ => {
+                    return Ok(blocked_outcome(
+                        BlockReason::NoVerifiedPattern,
+                        "REPLICATE_ERROR",
+                        format!("Task {} missing url/sha256", task.id),
+                    ));
+                }
+            };
+            self.emit(ProgressEvent::Stage {
+                id: task.id,
+                stage: "fetch",
+                detail: url.clone(),
+            });
+            match CodeWriter::fetch_gated(&url, &sha).await {
+                Ok(bytes) => self.writer.stage_replica(task.id, bytes),
+                Err(e) => {
+                    self.emit(ProgressEvent::Stage {
+                        id: task.id,
+                        stage: "fetch-blocked",
+                        detail: e.clone(),
+                    });
+                    return Ok(blocked_outcome(
+                        BlockReason::NoVerifiedPattern,
+                        "REPLICATE_ERROR",
+                        e,
+                    ));
+                }
+            }
+        }
+
         // Phase A: prove EVERYTHING plannable before touching disk, and
         // collect the file list. Any planning failure blocks with nothing
         // applied — atomicity by construction.
@@ -612,43 +701,46 @@ impl CodeBot {
         // against current disk state (planning is deterministic).
         let mut all_files = self.writer.project_source_files();
         for task in &active {
-            let files: Vec<PathBuf> =
-                if task.kind == crate::engine::tasks::TaskKind::SynthesizeFunction {
-                    match self.writer.plan_synthesis(task) {
-                        Ok(plans) => plans
-                            .iter()
-                            .flat_map(|p| p.edits.iter().map(|e| e.file.clone()))
-                            .collect(),
-                        Err(e) => {
-                            self.emit(ProgressEvent::Stage {
-                                id: task.id,
-                                stage: "plan-blocked",
-                                detail: e.clone(),
-                            });
-                            return Ok(blocked_outcome(
-                                BlockReason::NoVerifiedPattern,
-                                "SYNTH_ERROR",
-                                e,
-                            ));
-                        }
+            let files: Vec<PathBuf> = if task.kind == crate::engine::tasks::TaskKind::Build {
+                // Builds edit no sources — the oracle works on disk
+                // state; sources are already snapshotted above.
+                Vec::new()
+            } else if task.kind == crate::engine::tasks::TaskKind::SynthesizeFunction {
+                match self.writer.plan_synthesis(task) {
+                    Ok(plans) => plans
+                        .iter()
+                        .flat_map(|p| p.edits.iter().map(|e| e.file.clone()))
+                        .collect(),
+                    Err(e) => {
+                        self.emit(ProgressEvent::Stage {
+                            id: task.id,
+                            stage: "plan-blocked",
+                            detail: e.clone(),
+                        });
+                        return Ok(blocked_outcome(
+                            BlockReason::NoVerifiedPattern,
+                            "SYNTH_ERROR",
+                            e,
+                        ));
                     }
-                } else {
-                    match self.writer.plan(task, &self.symbol_table) {
-                        Ok(plan) => plan.edits.iter().map(|e| e.file.clone()).collect(),
-                        Err(e) => {
-                            self.emit(ProgressEvent::Stage {
-                                id: task.id,
-                                stage: "plan-blocked",
-                                detail: e.clone(),
-                            });
-                            return Ok(blocked_outcome(
-                                BlockReason::NoVerifiedPattern,
-                                "PLAN_ERROR",
-                                e,
-                            ));
-                        }
+                }
+            } else {
+                match self.writer.plan(task, &self.symbol_table) {
+                    Ok(plan) => plan.edits.iter().map(|e| e.file.clone()).collect(),
+                    Err(e) => {
+                        self.emit(ProgressEvent::Stage {
+                            id: task.id,
+                            stage: "plan-blocked",
+                            detail: e.clone(),
+                        });
+                        return Ok(blocked_outcome(
+                            BlockReason::NoVerifiedPattern,
+                            "PLAN_ERROR",
+                            e,
+                        ));
                     }
-                };
+                }
+            };
             all_files.extend(files);
         }
 
@@ -712,6 +804,75 @@ impl CodeBot {
                     }
                 }
             }
+            // Build tasks never enter the edit planner: they run the
+            // language backend's build oracle against disk state and
+            // prove by artifact bytes. Handled here, before re-plan.
+            if task.kind == crate::engine::tasks::TaskKind::Build {
+                let target = task
+                    .payload
+                    .get("target")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let language = task
+                    .payload
+                    .get("language")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let extra = crate::engine::lang::load_extra(&self.project_dir);
+                let backend: crate::engine::lang::Backend<'_> = if language.trim().is_empty() {
+                    crate::engine::lang::backend_for_project(&self.project_dir, &extra)
+                } else {
+                    match language.trim().to_lowercase().as_str() {
+                        "rust" => crate::engine::lang::Backend::Rust,
+                        "c" => crate::engine::lang::Backend::C,
+                        "kotlin" | "java" | "jvm" => crate::engine::lang::Backend::Kotlin,
+                        "python" => crate::engine::lang::Backend::Python,
+                        "html" | "web" => crate::engine::lang::Backend::Html,
+                        _ => {
+                            let _ = self.writer.rollback(&global);
+                            return Ok(blocked_outcome(
+                                BlockReason::NoVerifiedPattern,
+                                "BUILD_ERROR",
+                                format!("No backend for language '{}' — BLOCKED", language),
+                            ));
+                        }
+                    }
+                };
+                self.emit(ProgressEvent::Stage {
+                    id: task.id,
+                    stage: "build",
+                    detail: format!(
+                        "{} target={}",
+                        backend.language(),
+                        if target.is_empty() { "native" } else { target }
+                    ),
+                });
+                match backend.build(&self.project_dir, target).await {
+                    Ok(outcome) => {
+                        self.writer.commit(&global).ok();
+                        changes.push(outcome.artifact.display().to_string());
+                        self.emit(ProgressEvent::Stage {
+                            id: task.id,
+                            stage: "artifact-built",
+                            detail: outcome.artifact.display().to_string(),
+                        });
+                        continue;
+                    }
+                    Err(e) => {
+                        let _ = self.writer.rollback(&global);
+                        self.emit(ProgressEvent::Stage {
+                            id: task.id,
+                            stage: "build-failed",
+                            detail: e.clone(),
+                        });
+                        return Ok(blocked_outcome(
+                            BlockReason::NoVerifiedPattern,
+                            "BUILD_ERROR",
+                            e,
+                        ));
+                    }
+                }
+            }
             // Re-plan against current disk (offsets from Phase A are stale
             // once earlier tasks have applied).
             let plan = match self.writer.plan(&task, &self.symbol_table) {
@@ -766,6 +927,105 @@ impl CodeBot {
                 detail: files.join(", "),
             });
 
+            // 3b. Replicated files verify by hash, not by compiler: the
+            // gate already passed at fetch, so re-hash the landed bytes.
+            // A full cargo check per replicated file would take hours and
+            // prove nothing the hash doesn't. No-op skips are fine: they
+            // fire only on content identical to staged (hence hashed).
+            if task.kind == crate::engine::tasks::TaskKind::ReplicateFile {
+                let sha = task
+                    .payload
+                    .get("sha256")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let mut ok = true;
+                for e in &plan.edits {
+                    match std::fs::read(&e.file) {
+                        Ok(bytes) => {
+                            use sha2::{Digest, Sha256};
+                            let mut hasher = Sha256::new();
+                            hasher.update(&bytes);
+                            let hex = format!("{:x}", hasher.finalize());
+                            if !hex.eq_ignore_ascii_case(sha) {
+                                ok = false;
+                            }
+                        }
+                        Err(_) => ok = false,
+                    }
+                }
+                if ok {
+                    self.writer.commit(&global).ok();
+                    changes.extend(files.clone());
+                    self.emit(ProgressEvent::Stage {
+                        id: task.id,
+                        stage: "hash-verified",
+                        detail: String::new(),
+                    });
+                    continue;
+                }
+                let _ = self.writer.rollback(&global);
+                self.emit(ProgressEvent::Stage {
+                    id: task.id,
+                    stage: "hash-mismatch",
+                    detail: String::new(),
+                });
+                return Ok(AgentOutcome::Failed {
+                    reason: "Replicated bytes failed post-apply hash check".to_string(),
+                });
+            }
+
+            // 3c. Renames verify by post-condition, not by compiler: the
+            // `find` bytes must be gone and `replace` present. A compiler
+            // pass over a heterogeneous tree (rust + android + toml) proves
+            // nothing about a package id, and an inapplicable oracle must
+            // not hold exact edits hostage. Recorded as Partial-worthy.
+            if task.kind == crate::engine::tasks::TaskKind::ReplaceExact {
+                let (find, replace) = match (
+                    task.payload.get("find").and_then(|v| v.as_str()),
+                    task.payload.get("replace").and_then(|v| v.as_str()),
+                ) {
+                    (Some(f), Some(r)) => (f, r),
+                    _ => {
+                        let _ = self.writer.rollback(&global);
+                        return Ok(AgentOutcome::Failed {
+                            reason: "Replace task lost its payload".to_string(),
+                        });
+                    }
+                };
+                let mut ok = true;
+                for e in &plan.edits {
+                    match std::fs::read_to_string(&e.file) {
+                        Ok(content) => {
+                            if content.contains(find) || !content.contains(replace) {
+                                ok = false;
+                            }
+                        }
+                        Err(_) => ok = false,
+                    }
+                }
+                if ok {
+                    self.writer.commit(&global).ok();
+                    changes.extend(files.clone());
+                    partial_notes
+                        .push("exact-match renames verified by post-condition only".to_string());
+                    self.emit(ProgressEvent::Stage {
+                        id: task.id,
+                        stage: "postcondition-verified",
+                        detail: String::new(),
+                    });
+                    continue;
+                }
+                let _ = self.writer.rollback(&global);
+                self.emit(ProgressEvent::Stage {
+                    id: task.id,
+                    stage: "postcondition-failed",
+                    detail: String::new(),
+                });
+                return Ok(AgentOutcome::Failed {
+                    reason: "Rename post-condition failed".to_string(),
+                });
+            }
+
             // 4. Verify: run the compiler/tests
             let verdict = self.verifier.verify().await;
             log::info!(
@@ -805,44 +1065,77 @@ impl CodeBot {
                 continue;
             }
 
-            // 5b. Errors detected → CorrectionPipeline
-            //     Bounded fix → re-verify loop. Each attempt consumes budget;
-            //     when budget runs out the bot yields honestly instead of guessing.
+            // 5b. Errors detected → CorrectionPipeline, ONE fix per verify
+            // cycle. Diagnostics go stale the moment an edit lands (line
+            // numbers shift), so each iteration re-verifies fresh and fixes
+            // only the first error. Budget bounds the loop.
+            //
+            // Anti-spin: a "fix" that leaves the identical first error
+            // (code+file+line+message) did nothing — retrying it burns
+            // budget without movement. Block honestly on the repeat
+            // instead of looping vacantly.
             let mut verdict = verdict;
             let mut attempts = 0u32;
-            loop {
-                let mut any_fixed = false;
-                for error in &verdict.errors {
+            let mut last_sig: Option<String> = None;
+            while let Some(error) = verdict.errors.first().cloned() {
+                if std::env::var("GROUNDING_DEBUG_MIGRATE").is_ok() {
+                    eprintln!(
+                        "[round {}] first={} {}:{} ({} errors)",
+                        attempts + 1,
+                        error.code,
+                        error.file,
+                        error.line,
+                        verdict.errors.len()
+                    );
+                }
+                let sig = format!(
+                    "{}|{}|{}|{}",
+                    error.code, error.file, error.line, error.message
+                );
+                if last_sig.as_deref() == Some(sig.as_str()) {
+                    let _ = self.writer.rollback(&global);
                     self.emit(ProgressEvent::Stage {
                         id: task.id,
-                        stage: "repair",
-                        detail: format!("{} {}:{}", error.code, error.file, error.line),
+                        stage: "repair-stalled",
+                        detail: error.code.clone(),
                     });
-                    let correction =
-                        self.corrector
-                            .try_correct(error, &self.arena.read(), &self.writer);
+                    return Ok(AgentOutcome::Blocked {
+                        reason: BlockReason::NoSafeFix,
+                        diagnostics: vec![error.clone()],
+                    });
+                }
+                last_sig = Some(sig);
+                self.emit(ProgressEvent::Stage {
+                    id: task.id,
+                    stage: "repair",
+                    detail: format!("{} {}:{}", error.code, error.file, error.line),
+                });
+                let correction = self.corrector.try_correct(
+                    &error,
+                    &verdict.errors,
+                    &self.arena.read(),
+                    &self.writer,
+                );
 
-                    if correction.fixed {
-                        errors_fixed += 1;
-                        recipes_learned += correction.new_recipes;
-                        changes.extend(correction.files_changed);
-                        any_fixed = true;
-                    } else {
-                        // No recipe found and can't synthesize fix — the bot
-                        // KNOWS it doesn't know. Roll back the whole run so
-                        // no unproven bytes remain, then report honestly
-                        // instead of guessing.
-                        let _ = self.writer.rollback(&global);
-                        self.emit(ProgressEvent::Stage {
-                            id: task.id,
-                            stage: "repair-blocked",
-                            detail: error.code.clone(),
-                        });
-                        return Ok(AgentOutcome::Blocked {
-                            reason: BlockReason::NoSafeFix,
-                            diagnostics: vec![error.clone()],
-                        });
-                    }
+                if correction.fixed {
+                    errors_fixed += 1;
+                    recipes_learned += correction.new_recipes;
+                    changes.extend(correction.files_changed);
+                } else {
+                    // No recipe found and can't synthesize fix — the bot
+                    // KNOWS it doesn't know. Roll back the whole run so
+                    // no unproven bytes remain, then report honestly
+                    // instead of guessing.
+                    let _ = self.writer.rollback(&global);
+                    self.emit(ProgressEvent::Stage {
+                        id: task.id,
+                        stage: "repair-blocked",
+                        detail: error.code.clone(),
+                    });
+                    return Ok(AgentOutcome::Blocked {
+                        reason: BlockReason::NoSafeFix,
+                        diagnostics: vec![error.clone()],
+                    });
                 }
 
                 attempts += 1;
@@ -875,19 +1168,18 @@ impl CodeBot {
                     });
                 }
 
-                if !any_fixed {
-                    // Rollback - fixes applied but verification is not clean
-                    let _ = self.writer.rollback(&global);
-                    return Ok(AgentOutcome::Failed {
-                        reason: format!(
-                            "Fixes applied but verification is not clean after {} attempt(s).",
-                            attempts
-                        ),
-                    });
-                }
-
-                // Re-verify
+                // Re-verify fresh: fixed errors stay fixed, remaining ones
+                // get current line numbers for the next attempt.
                 verdict = self.verifier.verify().await;
+                self.emit(ProgressEvent::Stage {
+                    id: task.id,
+                    stage: "verify",
+                    detail: if verdict.is_clean() {
+                        "clean".to_string()
+                    } else {
+                        format!("{} errors", verdict.errors.len())
+                    },
+                });
                 if verdict.is_clean() {
                     log::info!("Verification passed after {} attempt(s)", attempts);
                     if !verdict.full {

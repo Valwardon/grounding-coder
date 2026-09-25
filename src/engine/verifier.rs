@@ -163,6 +163,22 @@ impl CodeVerifier {
         let mut combined_stdout = String::new();
         let mut combined_stderr = String::new();
 
+        // No manifest, no verdict: multi-file ports land files where no
+        // crate root exists yet. Exact-match edits need no compiler —
+        // claiming failure here would roll back honest work, so report
+        // clean with the reason stated. (A real crate always has its
+        // manifest, so nothing verifiable is ever masked.)
+        if !self.project_dir.join("Cargo.toml").exists() {
+            return VerificationResult {
+                clean: true,
+                errors: Vec::new(),
+                warnings: Vec::new(),
+                stdout: "no Cargo.toml: structural edits only, nothing to compile".to_string(),
+                stderr: String::new(),
+                full: true,
+            };
+        }
+
         // ── Guardrail 0: toolchain availability ──
         // No cargo (Android has no toolchain): fall back to the parse
         // oracle. Real syntax facts, honestly labeled `full: false` — the

@@ -59,6 +59,49 @@ pub const KOTLIN_TOOL: ToolSpec = ToolSpec {
     files: KOTLIN_FILES,
 };
 
+/// Dioxus CLI 0.7.2 driver binaries (GitHub release artifacts; hashes are
+/// the upstream-published `.sha256` files). One per host arch — the engine
+/// picks by `std::env::consts::ARCH` and extracts the `dx` binary itself.
+pub const DX_FILES: &[ToolFile] = &[
+    ToolFile {
+        name: "dx-aarch64-unknown-linux-gnu.tar.gz",
+        url: "https://github.com/DioxusLabs/dioxus/releases/download/v0.7.2/dx-aarch64-unknown-linux-gnu.tar.gz",
+        sha256: "a59c71a4503514fc2ab1943baa157769353c4e83c81954223a8849c5461a1728",
+    },
+    ToolFile {
+        name: "dx-x86_64-unknown-linux-gnu.tar.gz",
+        url: "https://github.com/DioxusLabs/dioxus/releases/download/v0.7.2/dx-x86_64-unknown-linux-gnu.tar.gz",
+        sha256: "83a68cee967bba9e86aa6909c48544c8056be7df6af252517d8014b625314ce6",
+    },
+];
+
+pub const DX_TOOL: ToolSpec = ToolSpec {
+    name: "dx",
+    files: DX_FILES,
+};
+
+/// Per-arch specs so the provisioner downloads one 37 MB tarball,
+/// not both. The engine picks by `std::env::consts::ARCH`. Literals are
+/// duplicated on purpose: const-slice indexing is not portable across
+/// toolchains, and a provision manifest must be boring.
+pub const DX_TOOL_AARCH64: ToolSpec = ToolSpec {
+    name: "dx",
+    files: &[ToolFile {
+        name: "dx-aarch64-unknown-linux-gnu.tar.gz",
+        url: "https://github.com/DioxusLabs/dioxus/releases/download/v0.7.2/dx-aarch64-unknown-linux-gnu.tar.gz",
+        sha256: "a59c71a4503514fc2ab1943baa157769353c4e83c81954223a8849c5461a1728",
+    }],
+};
+
+pub const DX_TOOL_X86_64: ToolSpec = ToolSpec {
+    name: "dx",
+    files: &[ToolFile {
+        name: "dx-x86_64-unknown-linux-gnu.tar.gz",
+        url: "https://github.com/DioxusLabs/dioxus/releases/download/v0.7.2/dx-x86_64-unknown-linux-gnu.tar.gz",
+        sha256: "83a68cee967bba9e86aa6909c48544c8056be7df6af252517d8014b625314ce6",
+    }],
+};
+
 /// Cache root: `GROUNDING_TOOLS_DIR` wins (tests point it at tmp),
 /// then the OS cache dir, then temp. Always writable-or-bust per file.
 pub fn tools_dir() -> std::path::PathBuf {
@@ -125,6 +168,33 @@ mod tests {
                 f.url
             );
             assert!(f.name.ends_with(".jar"));
+        }
+        for f in DX_FILES {
+            assert_eq!(f.sha256.len(), 64, "bad sha for {}", f.name);
+            assert!(
+                f.sha256.chars().all(|c| c.is_ascii_hexdigit()),
+                "non-hex in {}",
+                f.name
+            );
+            assert!(
+                f.url
+                    .starts_with("https://github.com/DioxusLabs/dioxus/releases/download/"),
+                "off-manifest url {}",
+                f.url
+            );
+            assert!(f.name.ends_with(".tar.gz"));
+        }
+        // Per-arch specs must pin exactly the matching DX_FILES entry.
+        for spec in [DX_TOOL_AARCH64, DX_TOOL_X86_64] {
+            assert_eq!(spec.files.len(), 1);
+            let f = &spec.files[0];
+            assert!(
+                DX_FILES
+                    .iter()
+                    .any(|d| d.name == f.name && d.sha256 == f.sha256 && d.url == f.url),
+                "per-arch dx spec drifted from DX_FILES: {}",
+                f.name
+            );
         }
     }
 

@@ -42,6 +42,17 @@ pub trait LanguageBackend {
     fn skip_lines(&self) -> usize {
         0
     }
+    /// Build the project into a real artifact (binary, jar, apk…).
+    /// `target` is a small closed vocabulary per backend (`""`/`native`,
+    /// `release`, `android-apk`, …); anything else refuses honestly.
+    /// The default refuses — a backend without a build oracle must not
+    /// pretend. Artifacts are verified present + non-empty by the caller.
+    async fn build(&self, _project_dir: &Path, _target: &str) -> Result<BuildOutcome, String> {
+        Err(format!(
+            "No build oracle for language {} — BLOCKED",
+            self.language()
+        ))
+    }
     /// Run the language oracle over the project. The default refuses
     /// honestly — a backend without an oracle must not report clean.
     async fn verify(&self, _project_dir: &Path) -> VerificationResult {
@@ -91,6 +102,552 @@ impl LanguageBackend for RustBackend {
 
     fn is_known_std(&self, symbol: &str) -> bool {
         symbol.starts_with("std::") || symbol.starts_with("core::") || symbol.starts_with("alloc::")
+    }
+
+    async fn build(&self, project_dir: &Path, target: &str) -> Result<BuildOutcome, String> {
+        RustBackend::build_rust(project_dir, target).await
+    }
+}
+
+impl RustBackend {
+    async fn build_rust(project_dir: &Path, target: &str) -> Result<BuildOutcome, String> {
+        let t = target.trim().to_lowercase();
+        if t == "android-apk" || t == "apk" || t == "android" {
+            return Self::build_android_apk(project_dir).await;
+        }
+        if !command_available("cargo") {
+            return Err("cargo is not available on PATH — cannot build Rust — BLOCKED".to_string());
+        }
+        if !project_dir.join("Cargo.toml").exists() {
+            return Err("No Cargo.toml in project — nothing to build — BLOCKED".to_string());
+        }
+        // Closed vocabulary: native/debug, release, or an explicit
+        // `--target` triple. Anything else (flags, paths) refuses.
+        let (release, triple): (bool, Option<String>) = match t.as_str() {
+            "" | "native" | "debug" | "bin" => (false, None),
+            "release" => (true, None),
+            _ if t.contains([' ', '/', '\\', ';', '&', '|', '$', '`']) || t.starts_with('-') => {
+                return Err(format!(
+                    "Refusing target '{}' (not a plain profile or triple) — BLOCKED",
+                    target
+                ));
+            }
+            _ if t.contains('-') => (false, Some(t.clone())),
+            _ => {
+                return Err(format!(
+                    "Rust backend has no target '{}' (native, release, <triple>, android-apk) — BLOCKED",
+                    target
+                ));
+            }
+        };
+        let profile = if release { "release" } else { "debug" };
+        let mut cmd = Command::new("cargo");
+        cmd.arg("build");
+        if release {
+            cmd.arg("--release");
+        }
+        if let Some(tri) = &triple {
+            cmd.arg("--target").arg(tri);
+        }
+        let o = cmd
+            .current_dir(project_dir)
+            .output()
+            .map_err(|e| format!("Failed to run cargo: {}", e))?;
+        let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+        if !o.status.success() {
+            return Err(format!(
+                "cargo build failed (exit {}): {}",
+                o.status.code().unwrap_or(-1),
+                tail2k(&stderr)
+            ));
+        }
+        let name = cargo_package_name(project_dir).ok_or_else(|| {
+            "cargo build succeeded but Cargo.toml has no parseable package name — BLOCKED"
+                .to_string()
+        })?;
+        let mut artifact = project_dir.join("target");
+        if let Some(tri) = triple {
+            artifact = artifact.join(tri);
+        }
+        artifact = artifact.join(profile).join(&name);
+        #[cfg(windows)]
+        artifact.set_extension("exe");
+        check_artifact(&artifact)
+            .map(|_| BuildOutcome {
+                artifact,
+                stdout_tail: tail2k(&stdout),
+                stderr_tail: tail2k(&stderr),
+            })
+            .map_err(|e| format!("cargo reported success but {}", e))
+    }
+
+    /// Android APK for Dioxus projects: evidence is `Dioxus.toml`
+    /// carrying `[android]`; the driver is provisioned `dx`; the proof
+    /// is a real `.apk` found in the tree (never a claimed path).
+    async fn build_android_apk(project_dir: &Path) -> Result<BuildOutcome, String> {
+        let toml = std::fs::read_to_string(project_dir.join("Dioxus.toml"))
+            .map_err(|_| "No Dioxus.toml — not a Dioxus android project — BLOCKED".to_string())?;
+        if !toml.contains("[android]") {
+            return Err("Dioxus.toml has no [android] section — BLOCKED".to_string());
+        }
+        if std::env::var("ANDROID_HOME").is_err() {
+            return Err(
+                "ANDROID_HOME is not set — the operator must point at an SDK — BLOCKED".to_string(),
+            );
+        }
+        let dx = ensure_dx().await?;
+        let run_dx = |rustflags: Option<String>| {
+            let mut cmd = Command::new(&dx);
+            cmd.arg("build")
+                .arg("--platform")
+                .arg("android")
+                .current_dir(project_dir);
+            if let Some(flags) = rustflags {
+                cmd.env("RUSTFLAGS", flags);
+            }
+            cmd.output()
+        };
+        let o = run_dx(None).map_err(|e| format!("Failed to run dx: {}", e))?;
+        let mut ok = o.status.success();
+        let mut stdout = String::from_utf8_lossy(&o.stdout).to_string();
+        let mut stderr = String::from_utf8_lossy(&o.stderr).to_string();
+        // Self-solving link step: NDK link lines put `-lunwind` before
+        // the std archives, so `--as-needed` drops it and the link dies
+        // on `_Unwind_*`. One bounded retry with the archive appended
+        // last (pending symbols resolve left-to-right). Only on this
+        // exact signature; anything else fails honestly below.
+        // dx relays cargo's output on either stream; match on both.
+        let combined = format!("{}\n{}", stdout, stderr);
+        if !o.status.success() && needs_unwind_retry(&combined) {
+            let mut flags = std::env::var("RUSTFLAGS").unwrap_or_default();
+            if !flags.is_empty() {
+                flags.push(' ');
+            }
+            flags.push_str("-C link-arg=-lunwind");
+            let o2 = run_dx(Some(flags)).map_err(|e| format!("Failed to re-run dx: {}", e))?;
+            stdout = String::from_utf8_lossy(&o2.stdout).to_string();
+            stderr = String::from_utf8_lossy(&o2.stderr).to_string();
+            ok = o2.status.success();
+            if !ok {
+                return Err(format!(
+                    "dx build failed even with unwind retry (exit {}): {}",
+                    o2.status.code().unwrap_or(-1),
+                    tail2k(&stderr)
+                ));
+            }
+        }
+        if !ok {
+            return Err(format!("dx build failed: {}", tail2k(&stderr)));
+        }
+        let mut apks = crate::github::find_apks(project_dir);
+        apks.sort_by_key(|(_, p)| {
+            std::fs::metadata(p)
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+        });
+        let (_, apk) = apks.into_iter().next_back().ok_or_else(|| {
+            "dx reported success but no .apk exists in the tree — BLOCKED".to_string()
+        })?;
+        check_artifact(&apk)
+            .map(|_| BuildOutcome {
+                artifact: apk,
+                stdout_tail: tail2k(&stdout),
+                stderr_tail: tail2k(&stderr),
+            })
+            .map_err(|e| format!("dx reported success but {}", e))
+    }
+}
+
+/// `name = "…"` under `[package]`. Naive line scan, sound for this
+/// purpose: unparseable manifests block instead of guessing.
+fn cargo_package_name(project_dir: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(project_dir.join("Cargo.toml")).ok()?;
+    let mut in_package = false;
+    for line in content.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            in_package = t == "[package]";
+            continue;
+        }
+        if in_package && let Some(rest) = t.strip_prefix("name") {
+            let rest = rest.trim_start().strip_prefix('=')?.trim();
+            let name = rest.trim_matches('"').trim_matches('\'').trim();
+            if !name.is_empty() && name != "..." {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Does this driver binary actually execute here? Runs `<bin> --version`
+/// and reports success plus a diagnosis. A downloaded binary that cannot
+/// start (stale glibc, wrong arch, dead link) is a fact to route on —
+/// never a binary the builder trusts blindly.
+fn driver_runs(bin: &std::path::Path) -> Result<(), String> {
+    let o = Command::new(bin)
+        .arg("--version")
+        .output()
+        .map_err(|e| format!("cannot execute {}: {}", bin.display(), e))?;
+    if o.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+    let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+    let mut why = format!("exit {}", o.status.code().unwrap_or(-1));
+    for line in stderr.lines().chain(stdout.lines()) {
+        if line.contains("GLIBC") {
+            why = format!("host libc too old ({})", line.trim());
+            break;
+        }
+        if line.contains("No such file") || line.contains("not found") {
+            why = format!("missing loader/interpreter ({})", line.trim());
+            break;
+        }
+    }
+    Err(format!("{} runs but fails: {}", bin.display(), why))
+}
+
+/// Provisioned `dx` 0.7.2 driver with a self-solving chain. Every
+/// candidate is verified by execution (`--version` runs); every failure
+/// is recorded in the trail. Order:
+///
+/// 1. `DX_BIN` (operator-owned).
+/// 2. Checksum-pinned release binary for this arch.
+/// 3. Source build from the `v0.7.2` tag (clone → dependency refresh on
+///    oracle-reported failures → build → verify runs). This is how the
+///    bot solves a stale-glibc host on its own instead of stopping.
+/// 4. BLOCKED with the full trail — a builder that cannot prove its
+///    driver must not run.
+async fn ensure_dx() -> Result<std::path::PathBuf, String> {
+    let mut trail: Vec<String> = Vec::new();
+    if let Ok(bin) = std::env::var("DX_BIN")
+        && !bin.trim().is_empty()
+    {
+        let p = std::path::PathBuf::from(&bin);
+        if !p.is_file() {
+            return Err(format!(
+                "DX_BIN points at {} which is not a file — BLOCKED",
+                bin
+            ));
+        }
+        match driver_runs(&p) {
+            Ok(()) => return Ok(p),
+            Err(e) => {
+                return Err(format!("DX_BIN driver broken: {} — BLOCKED", e));
+            }
+        }
+    }
+    let arch = std::env::consts::ARCH;
+    let spec = match arch {
+        "aarch64" => Some(crate::tool::DX_TOOL_AARCH64),
+        "x86_64" => Some(crate::tool::DX_TOOL_X86_64),
+        _ => None,
+    };
+    if let Some(spec) = spec {
+        match ensure_dx_pinned(&spec).await {
+            Ok(bin) => match driver_runs(&bin) {
+                Ok(()) => return Ok(bin),
+                Err(e) => trail.push(format!("pinned binary unusable: {}", e)),
+            },
+            Err(e) => trail.push(format!("pinned provision failed: {}", e)),
+        }
+    } else {
+        trail.push(format!("no pinned dx driver for host arch {}", arch));
+    }
+    // A cached binary from an earlier run may already work (e.g. placed
+    // by hand or built before) — check before the expensive path.
+    let cached = crate::tool::tools_dir().join("dx").join("dx");
+    if cached.is_file() {
+        match driver_runs(&cached) {
+            Ok(()) => return Ok(cached),
+            Err(e) => trail.push(format!("cached dx unusable: {}", e)),
+        }
+    }
+    match ensure_dx_from_source().await {
+        Ok(bin) => Ok(bin),
+        Err(e) => {
+            trail.push(format!("source build failed: {}", e));
+            Err(format!(
+                "No working dx driver — BLOCKED\ntrail:\n- {}",
+                trail.join("\n- ")
+            ))
+        }
+    }
+}
+
+/// Download the pinned tarball, extract the `dx` binary, make it
+/// executable. Returns the binary path (execution verified by caller).
+async fn ensure_dx_pinned(spec: &crate::tool::ToolSpec) -> Result<std::path::PathBuf, String> {
+    let tarball = spec.files.first().map(|f| f.name).unwrap_or("dx.tar.gz");
+    let dir = crate::tool::ensure_tool(spec).await?;
+    let bin = dir.join("dx");
+    if bin.is_file() {
+        return Ok(bin);
+    }
+    if !command_available("tar") {
+        return Err("tar is not available — cannot extract dx — BLOCKED".to_string());
+    }
+    let tgz = dir.join(tarball);
+    let o = Command::new("tar")
+        .arg("xzf")
+        .arg(&tgz)
+        .arg("-C")
+        .arg(&dir)
+        .output()
+        .map_err(|e| format!("Failed to run tar: {}", e))?;
+    if !o.status.success() {
+        return Err(format!(
+            "Extracting {} failed: {} — BLOCKED",
+            tarball,
+            tail2k(String::from_utf8_lossy(&o.stderr).as_ref())
+        ));
+    }
+    // Tarball may nest one level; accept `dx` at top or one dir down.
+    let nested = std::fs::read_dir(&dir).ok().and_then(|entries| {
+        entries.flatten().find_map(|e| {
+            let p = e.path();
+            (p.is_dir() && p.join("dx").is_file()).then(|| p.join("dx"))
+        })
+    });
+    let found = if bin.is_file() {
+        Some(bin.clone())
+    } else {
+        nested
+    };
+    let found = found.ok_or_else(|| {
+        format!(
+            "Pinned {} extracted but contains no dx binary — BLOCKED",
+            tarball
+        )
+    })?;
+    if found != bin {
+        std::fs::rename(&found, &bin).map_err(|e| format!("Cannot place dx binary: {}", e))?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&bin)
+            .map_err(|e| format!("Cannot stat dx binary: {}", e))?
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&bin, perms)
+            .map_err(|e| format!("Cannot chmod dx binary: {}", e))?;
+    }
+    Ok(bin)
+}
+
+/// Source fallback: shallow-clone the `v0.7.2` tag, discover the `dx`
+/// package via `cargo metadata`, then build with a bounded self-repair
+/// loop — each `could not compile \`X\`` from the oracle triggers one
+/// `cargo update -p X` before the next round (max 3 refreshes). The
+/// resulting binary links the host libc by construction, which is
+/// exactly the stale-glibc escape hatch. Result is cached under the
+/// tools dir; verified by execution before return.
+async fn ensure_dx_from_source() -> Result<std::path::PathBuf, String> {
+    if !command_available("git") {
+        return Err("git missing — cannot fetch dx sources — BLOCKED".to_string());
+    }
+    if !command_available("cargo") {
+        return Err("cargo missing — cannot build dx — BLOCKED".to_string());
+    }
+    let base = crate::tool::tools_dir().join("dx-src");
+    let out_bin = crate::tool::tools_dir().join("dx").join("dx");
+    if out_bin.is_file()
+        && let Ok(()) = driver_runs(&out_bin)
+    {
+        return Ok(out_bin);
+    }
+    std::fs::create_dir_all(&base)
+        .map_err(|e| format!("Cannot create {}: {}", base.display(), e))?;
+    let repo = base.join("dioxus");
+    if !repo.join("Cargo.toml").is_file() {
+        let o = Command::new("git")
+            .arg("clone")
+            .arg("--depth")
+            .arg("1")
+            .arg("--branch")
+            .arg("v0.7.2")
+            .arg("https://github.com/DioxusLabs/dioxus.git")
+            .arg("dioxus")
+            .current_dir(&base)
+            .output()
+            .map_err(|e| format!("Failed to run git: {}", e))?;
+        if !o.status.success() {
+            return Err(format!(
+                "Cloning dioxus v0.7.2 failed: {} — BLOCKED",
+                tail2k(String::from_utf8_lossy(&o.stderr).as_ref())
+            ));
+        }
+    }
+    // Discover the driver package: exact `dx` wins, else `dioxus-cli`.
+    let meta_out = Command::new("cargo")
+        .arg("metadata")
+        .arg("--no-deps")
+        .arg("--format-version")
+        .arg("1")
+        .current_dir(&repo)
+        .output()
+        .map_err(|e| format!("Failed to run cargo metadata: {}", e))?;
+    if !meta_out.status.success() {
+        return Err(format!(
+            "cargo metadata failed: {} — BLOCKED",
+            tail2k(String::from_utf8_lossy(&meta_out.stderr).as_ref())
+        ));
+    }
+    let meta: serde_json::Value = serde_json::from_slice(&meta_out.stdout)
+        .map_err(|e| format!("Unparseable cargo metadata: {} — BLOCKED", e))?;
+    let names: Vec<String> = meta
+        .get("packages")
+        .and_then(|p| p.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|p| {
+                    p.get("name")
+                        .and_then(|n| n.as_str())
+                        .map(|s| s.to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let pkg = names
+        .iter()
+        .find(|n| n.as_str() == "dx")
+        .or_else(|| names.iter().find(|n| n.as_str() == "dioxus-cli"))
+        .cloned()
+        .ok_or_else(|| "No dx/dioxus-cli package in v0.7.2 sources — BLOCKED".to_string())?;
+    // Build with bounded self-repair: the oracle names the failing crate,
+    // one `cargo update -p` per round refreshes it, max 3 refresh rounds.
+    let mut last_err = String::new();
+    for round in 0..=3 {
+        let o = Command::new("cargo")
+            .arg("build")
+            .arg("--release")
+            .arg("-p")
+            .arg(&pkg)
+            .current_dir(&repo)
+            .output()
+            .map_err(|e| format!("Failed to run cargo build: {}", e))?;
+        let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+        if o.status.success() {
+            last_err.clear();
+            break;
+        }
+        last_err = tail2k(&stderr);
+        if round == 3 {
+            break;
+        }
+        let crates = failing_crates(&stderr);
+        if crates.is_empty() {
+            break;
+        }
+        let mut upd = Command::new("cargo");
+        upd.arg("update");
+        for c in crates.iter().take(3) {
+            upd.arg("-p").arg(c);
+        }
+        let uo = upd
+            .current_dir(&repo)
+            .output()
+            .map_err(|e| format!("Failed to run cargo update: {}", e))?;
+        if !uo.status.success() {
+            break;
+        }
+    }
+    if !last_err.is_empty() {
+        return Err(format!("dx source build failed: {} — BLOCKED", last_err));
+    }
+    let built = repo.join("target").join("release").join("dx");
+    if !built.is_file() {
+        return Err("cargo build succeeded but target/release/dx is missing — BLOCKED".to_string());
+    }
+    if let Some(parent) = out_bin.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("Cannot create tools dir: {}", e))?;
+    }
+    std::fs::copy(&built, &out_bin).map_err(|e| format!("Cannot cache dx binary: {}", e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&out_bin)
+            .map_err(|e| format!("Cannot stat dx binary: {}", e))?
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&out_bin, perms)
+            .map_err(|e| format!("Cannot chmod dx binary: {}", e))?;
+    }
+    match driver_runs(&out_bin) {
+        Ok(()) => Ok(out_bin),
+        Err(e) => Err(format!("Source-built dx still fails: {} — BLOCKED", e)),
+    }
+}
+
+/// Crate names from ``error: could not compile `X` `` lines. The oracle
+/// tells us exactly what broke; the repair loop refreshes exactly that.
+fn failing_crates(stderr: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in stderr.lines() {
+        if let Some(rest) = line.strip_prefix("error: could not compile `")
+            && let Some((name, _)) = rest.split_once('`')
+            && !name.is_empty()
+            && !out.contains(&name.to_string())
+        {
+            out.push(name.to_string());
+        }
+    }
+    out
+}
+
+/// True when a failed Android link shows the stale-unwinder signature:
+/// `undefined symbol: _Unwind_*` with the archive ordered before the
+/// objects that need it. Pure predicate, unit-tested.
+fn needs_unwind_retry(stderr: &str) -> bool {
+    stderr.contains("undefined symbol") && stderr.contains("_Unwind_")
+}
+
+/// A built artifact: path on disk plus truncated oracle output.
+// Evidence is the artifact's own bytes (caller checks presence + size),
+// never a claim.
+pub struct BuildOutcome {
+    pub artifact: std::path::PathBuf,
+    pub stdout_tail: String,
+    pub stderr_tail: String,
+}
+
+/// Last 2 KiB on a char boundary — enough for the failing command line,
+// never a dump.
+fn tail2k(s: &str) -> String {
+    const MAX: usize = 2048;
+    if s.len() <= MAX {
+        return s.to_string();
+    }
+    let mut i = s.len() - MAX;
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    s[i..].to_string()
+}
+
+/// Binary name from the project dir; anything weird becomes `app`.
+fn safe_bin_name(project_dir: &Path) -> String {
+    let raw = project_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("app");
+    let clean: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if clean.trim_matches('_').is_empty() {
+        "app".to_string()
+    } else {
+        clean
     }
 }
 
@@ -419,6 +976,10 @@ impl LanguageBackend for CBackend {
         C_STDLIB.contains(&p)
     }
 
+    async fn build(&self, project_dir: &Path, target: &str) -> Result<BuildOutcome, String> {
+        CBackend::build_c(project_dir, target).await
+    }
+
     async fn verify(&self, project_dir: &Path) -> VerificationResult {
         let mut errors = Vec::new();
         let mut stdout = String::new();
@@ -562,6 +1123,66 @@ fn parse_colon_errors(stderr: &str, fallback_file: &str, code: &str) -> Vec<Comp
 
 pub struct KotlinBackend;
 
+impl CBackend {
+    async fn build_c(project_dir: &Path, target: &str) -> Result<BuildOutcome, String> {
+        let t = target.trim().to_lowercase();
+        if !t.is_empty() && t != "native" && t != "debug" && t != "bin" {
+            return Err(format!(
+                "C backend has no target '{}' (native only) — BLOCKED",
+                target
+            ));
+        }
+        if !command_available("gcc") {
+            return Err("gcc is not available on PATH — cannot build C — BLOCKED".to_string());
+        }
+        let files = collect_with(project_dir, &["c"]);
+        if files.is_empty() {
+            return Err("No C sources in project — nothing to build — BLOCKED".to_string());
+        }
+        let out_dir = project_dir.join("target");
+        std::fs::create_dir_all(&out_dir)
+            .map_err(|e| format!("Cannot create target dir: {}", e))?;
+        let out = out_dir.join(safe_bin_name(project_dir));
+        let o = Command::new("gcc")
+            .args(&files)
+            .arg("-O2")
+            .arg("-o")
+            .arg(&out)
+            .current_dir(project_dir)
+            .output()
+            .map_err(|e| format!("Failed to run gcc: {}", e))?;
+        let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+        if !o.status.success() {
+            return Err(format!(
+                "gcc failed (exit {}): {}",
+                o.status.code().unwrap_or(-1),
+                tail2k(&stderr)
+            ));
+        }
+        check_artifact(&out)
+            .map(|_| BuildOutcome {
+                artifact: out,
+                stdout_tail: tail2k(&stdout),
+                stderr_tail: tail2k(&stderr),
+            })
+            .map_err(|e| format!("gcc reported success but {}", e))
+    }
+}
+
+/// Artifact post-condition: present, a file, non-empty.
+fn check_artifact(path: &Path) -> Result<u64, String> {
+    let meta = std::fs::metadata(path)
+        .map_err(|e| format!("artifact {} missing: {}", path.display(), e))?;
+    if !meta.is_file() {
+        return Err(format!("artifact {} is not a file", path.display()));
+    }
+    if meta.len() == 0 {
+        return Err(format!("artifact {} is empty", path.display()));
+    }
+    Ok(meta.len())
+}
+
 /// JVM / Android / Kotlin-stdlib prefixes the planner may import on its own.
 const KOTLIN_STDLIB: &[&str] = &[
     "kotlin.",
@@ -593,6 +1214,107 @@ impl LanguageBackend for KotlinBackend {
 
     fn is_known_std(&self, symbol: &str) -> bool {
         KOTLIN_STDLIB.iter().any(|p| symbol.starts_with(p))
+    }
+
+    /// `.kt` sources compile with provisioned kotlinc into one jar;
+    /// pure-`.java` trees compile with `javac` into classes. Closed
+    /// target vocabulary; missing toolchains block honestly.
+    async fn build(&self, project_dir: &Path, target: &str) -> Result<BuildOutcome, String> {
+        let t = target.trim().to_lowercase();
+        if !t.is_empty() && t != "native" && t != "jar" && t != "classes" {
+            return Err(format!(
+                "JVM backend has no target '{}' (jar, classes) — BLOCKED",
+                target
+            ));
+        }
+        let kts = collect_with(project_dir, &["kt"]);
+        if !kts.is_empty() {
+            let Some((kotlinc_cp, stdlib)) = kotlin_toolchain().await else {
+                return Err(
+                    "No kotlinc found and provisioning failed — cannot build Kotlin — BLOCKED"
+                        .to_string(),
+                );
+            };
+            let out_jar = project_dir.join("target").join("grounding-app.jar");
+            if let Some(parent) = out_jar.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("Cannot create target dir: {}", e))?;
+            }
+            let o = Command::new("java")
+                .arg("-cp")
+                .arg(&kotlinc_cp)
+                .arg("org.jetbrains.kotlin.cli.jvm.K2JVMCompiler")
+                .args(&kts)
+                .arg("-d")
+                .arg(&out_jar)
+                .arg("-cp")
+                .arg(&stdlib)
+                .current_dir(project_dir)
+                .output()
+                .map_err(|e| format!("Failed to run kotlinc: {}", e))?;
+            let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+            if !o.status.success() {
+                return Err(format!(
+                    "kotlinc failed (exit {}): {}",
+                    o.status.code().unwrap_or(-1),
+                    tail2k(&stderr)
+                ));
+            }
+            return check_artifact(&out_jar)
+                .map(|_| BuildOutcome {
+                    artifact: out_jar,
+                    stdout_tail: tail2k(&stdout),
+                    stderr_tail: tail2k(&stderr),
+                })
+                .map_err(|e| format!("kotlinc reported success but {}", e));
+        }
+        let javas = collect_with(project_dir, &["java"]);
+        if !javas.is_empty() {
+            if !command_available("javac") {
+                return Err(
+                    "javac is not available on PATH — cannot build Java — BLOCKED".to_string(),
+                );
+            }
+            let out_dir = project_dir.join("target").join("classes");
+            std::fs::create_dir_all(&out_dir)
+                .map_err(|e| format!("Cannot create target dir: {}", e))?;
+            let o = Command::new("javac")
+                .arg("-d")
+                .arg(&out_dir)
+                .args(&javas)
+                .current_dir(project_dir)
+                .output()
+                .map_err(|e| format!("Failed to run javac: {}", e))?;
+            let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+            if !o.status.success() {
+                return Err(format!(
+                    "javac failed (exit {}): {}",
+                    o.status.code().unwrap_or(-1),
+                    tail2k(&stderr)
+                ));
+            }
+            // Proof is a real .class file, newest wins.
+            let mut classes: Vec<_> = walkdir::WalkDir::new(&out_dir)
+                .into_iter()
+                .flatten()
+                .map(|e| e.path().to_path_buf())
+                .filter(|p| p.extension().is_some_and(|e| e == "class"))
+                .collect();
+            classes.sort();
+            let artifact = classes.into_iter().next_back().ok_or_else(|| {
+                "javac reported success but no .class exists — BLOCKED".to_string()
+            })?;
+            return check_artifact(&artifact)
+                .map(|_| BuildOutcome {
+                    artifact,
+                    stdout_tail: tail2k(&stdout),
+                    stderr_tail: tail2k(&stderr),
+                })
+                .map_err(|e| format!("javac reported success but {}", e));
+        }
+        Err("No .kt or .java sources in project — nothing to build — BLOCKED".to_string())
     }
 
     async fn verify(&self, project_dir: &Path) -> VerificationResult {
@@ -1733,6 +2455,17 @@ impl LanguageBackend for Backend<'_> {
         }
     }
 
+    async fn build(&self, project_dir: &Path, target: &str) -> Result<BuildOutcome, String> {
+        match self {
+            Backend::Rust => RustBackend.build(project_dir, target).await,
+            Backend::Python => PythonBackend.build(project_dir, target).await,
+            Backend::Kotlin => KotlinBackend.build(project_dir, target).await,
+            Backend::C => CBackend.build(project_dir, target).await,
+            Backend::Html => HtmlBackend.build(project_dir, target).await,
+            Backend::Generic(g) => g.build(project_dir, target).await,
+        }
+    }
+
     fn skip_lines(&self) -> usize {
         dispatch!(self, skip_lines())
     }
@@ -1802,4 +2535,38 @@ fn has_pytest_module() -> bool {
         .arg("import pytest")
         .output()
         .is_ok_and(|o| o.status.success())
+}
+
+#[cfg(test)]
+mod build_tests {
+    use super::*;
+
+    #[test]
+    fn failing_crates_parses_oracle_output() {
+        let err = "error: could not compile `rhai` (lib) due to 436 previous errors\n\
+                   error: could not compile `lightningcss` (lib) due to 9 previous errors\n\
+                   error: could not compile `rhai` (lib) due to 436 previous errors\n\
+                   warning: unused import\n";
+        assert_eq!(
+            failing_crates(err),
+            vec!["rhai".to_string(), "lightningcss".to_string()]
+        );
+        assert!(failing_crates("linking everything fine\n").is_empty());
+    }
+
+    #[test]
+    fn driver_runs_rejects_dead_binary() {
+        let miss = std::path::Path::new("/tmp/gc-no-such-driver-xyz");
+        assert!(driver_runs(miss).is_err());
+    }
+
+    #[test]
+    fn unwind_retry_matches_only_its_signature() {
+        assert!(needs_unwind_retry(
+            "ld.lld: error: undefined symbol: _Unwind_DeleteException"
+        ));
+        assert!(!needs_unwind_retry("error[E0596]: cannot borrow"));
+        assert!(!needs_unwind_retry("undefined symbol: foo_bar"));
+        assert!(!needs_unwind_retry(""));
+    }
 }
