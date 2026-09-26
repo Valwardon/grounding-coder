@@ -115,8 +115,57 @@ cargo test --all-features
 - [x] Integration tests for EditPlan (`tests/editplan.rs` — 4 tests)
 - [x] End-to-end safety suite (`tests/end_to_end.rs` — 2 tests)
 - [x] GitHub actor (`src/github.rs`: create repo + contents upload from Chat)
-- [ ] APK pipeline wired to engine outputs
+- [x] Clean-room authorship default + generalized Build op
+- [x] Learning to rank + true-fix outcomes + precedent choice
+- [x] Translator mode + config/component families
+- [ ] Test the current build before any new APK work
 - [ ] Solana sniper demo (watcher project → APK → GitHub)
+
+## v0.7.0 — Clean-room, Build op, migration loop (2026-09-24/25)
+
+- **Clean-room default** (`BlockReason::CleanRoom`): `files[]`
+  replication intents refused before any fetch; explicit opt-out only.
+  Proved: old port manifests refuse with disk untouched.
+- **Generalized `TaskKind::Build`**: per-backend build oracles (C, Rust
+  incl. triples, Kotlin jars, Java classes, Android APK via `dx`) with
+  artifact-bytes proof. `tests/build.rs` (6 tests, incl. binaries that
+  actually run).
+- **Self-solving drivers**: `--version` verification, pinned per-arch
+  downloads, source-build fallback (clone → oracle-driven dep refresh →
+  build), NDK unwind-link retry. Full trails on failure.
+- **Migration transforms**: rsx-let, resource-read, await-spawn,
+  derive-clone, mut-binding, into-string, FnMut chains (param, call,
+  capture), qualifier-aware fn detection, bracket-aware arg counting.
+  Same-code batching with overlap guards, trigger selection across
+  codes, anti-spin stall detection.
+- **Proved live**: 1,142-line Dioxus 0.5 app migrated to green across
+  9 repair rounds (10 + 84 errors → SUCCESS), then compiled through
+  the full Android link.
+- **Private delivery**: created repos are private; APK finder sees
+  `target/dx/…` trees (512MB cap); release uploads get long windows;
+  provisioner follows CDN redirects.
+
+## v0.8.0 — Learning, translator, families (2026-09-25)
+
+- **Learning to rank** (`src/engine/rank.rs`, `linfa` + `ndarray`,
+  pure Rust): per-project `ranklog.jsonl` (plannability) and
+  `outcomes.jsonl` (true fixes). Groups ordered by prediction, recipes
+  chosen by learned P(fix); cold starts and ties fall back to
+  deterministic order. The model proposes order — the compiler keeps
+  every verdict.
+- **Translator mode**: `build_page --prose "<prompt>"` — external model
+  to intent metadata (validated, normalized, never code), key from
+  `OPENROUTER_API_KEY` or config, honest refusal without one. Proven
+  live end-to-end (prose → page).
+- **Config family**: structs with `default()` from typed literals
+  (bool/int/float validated, `String` gets `.to_string()` — the
+  compiler caught the first draft).
+- **Component family**: prop structs with `render()` over layout slots;
+  bare `{name}` becomes positional `{i}` (named captures would bind
+  locals — also caught by the compiler).
+- **Kotlin consistency**: Gradle-cache stdlib must match the compiler
+  major.minor, else fall back to the pinned provisioned set.
+- 96 tests green, clippy `-D warnings` clean, fmt clean.
 
 ## v0.5.0 — External crates, honest Partials, GitHub delivery (2026-09-23)
 

@@ -59,7 +59,7 @@ Oracle verify (compiler / tests / parser per language)
 > target and replacement are justified by project state, compiler
 > diagnostics, or a verified recipe. LLM-provided code is rejected on sight.
 
-## What It Can Do (v0.3, proven by tests)
+## What It Can Do (proven by tests)
 
 - **Real functions from contracts** — `word_counts(text) -> HashMap<String, usize>`
   synthesized from input/output examples, verified by compiler + generated
@@ -98,17 +98,71 @@ Oracle verify (compiler / tests / parser per language)
   "Release … attach the apk" cuts the tag release and uploads project
   APKs as assets. Delivery runs on every terminal outcome (even BLOCKED)
   and never flips it; failures report plainly.
+- **Clean-room authorship (default)** — intents carrying `files[]`
+  replication manifests are refused *before any fetch* with
+  `BLOCKED (CleanRoom)`, disk untouched. Every byte on disk is then
+  authored by synthesis + verified transforms. Replication of owned
+  templates requires explicit opt-out (`set_clean_room(false)` /
+  `GROUNDING_ALLOW_REPLICATION=1`). (`tests/replicate.rs`)
+- **Generalized Build op** — `TaskKind::Build` ("build …" actions) runs
+  the language backend's build oracle: C/`gcc`, Rust/`cargo` (native,
+  release, explicit triples), Kotlin/`kotlinc` jars, Java/`javac`,
+  Android APKs via provisioned `dx`. Proof is the artifact's own bytes
+  (present + non-empty); unknown languages/targets block honestly.
+  (`tests/build.rs`: C hello builds *and runs*, Java classfiles, Rust
+  bins, unknown-target block with no artifact)
+- **Self-solving drivers** — every build driver is verified by execution
+  (`--version` runs) with an ordered fallback chain: operator override
+  → pinned hash-verified download → source build from the release tag
+  (clone → oracle-driven `cargo update` repair loop → build → verify).
+  Full diagnosis trails on failure, never a blind retry.
+  (`src/engine/lang.rs`: `ensure_dx`, `driver_runs`, `failing_crates`)
+- **Migration repair loop** — compiler-anchored structural rewrites
+  (Dioxus 0.5→0.7 idioms and friends): rsx-let wraps, resource reads,
+  await-spawn splits, `Clone` derives, `mut` bindings, `FnMut`
+  relaxation chains, string-ambiguity fixes. Same-code batching with
+  overlap guards, trigger selection across codes, anti-spin stall
+  detection. Proved live: a 1,142-line app migrated to green.
+- **Learning to rank (`linfa`)** — repair history trains a decision tree
+  per project (`.grounding/ranklog.jsonl` + `outcomes.jsonl`,
+  clean-room scoped). Groups are tried in predicted-plannability order;
+  recipes are chosen by learned P(fix). ML proposes *order* —
+  the compiler keeps every verdict. Cold starts and ties fall back to
+  appearance/priority order. (`src/engine/rank.rs`)
+- **True-fix outcomes** — every applied recipe is judged against the
+  next verify (error gone or not), so the model learns what *worked*,
+  not what was *busy*.
+- **Translator mode** — `build_page --prose "<prompt>"` wires the
+  external model (prose in, metadata out, never code) into the
+  deterministic engine. Key from `OPENROUTER_API_KEY` or config; no key
+  means an honest refusal, never a guess.
+- **Config + component families** — `kind: "config"` synthesizes structs
+  with a `default()` constructor from typed literals (bool/int/float
+  validated, `String` correctly gets `.to_string()`); `kind:
+  "component"` synthesizes prop structs with `render()` over layout
+  slots (`{name}` becomes positional `{i}`, unknown slots/braces and
+  non-Display props block). (`tests/synthesize.rs`)
+- **Private GitHub delivery** — created repos are private; the APK
+  finder sees into `target/dx/…` output trees (up to 512MB); release
+  uploads get an 80-minute window for slow uplinks; the provisioner
+  follows release-CDN redirects.
+- **Kotlin toolchain consistency** — Gradle-cache kotlinc pairs only with
+  a major.minor-matching stdlib, else falls back to the pinned
+  provisioned set (a newer cached stdlib once broke metadata compat).
 
 ## Proof, Not Promises
 
-21 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
+96 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
 `fmt --check` clean:
 
 | Suite | Tests | What it proves |
 |---|---|---|
+| lib (unit) | 44 | recipes, ranker, parsers, manifests, guards |
+| `build` | 6 | C/Java/Rust real builds + artifacts run; unknown targets block; dx-output APK discovery |
+| `replicate` | 6 | byte-exact replication, hash-mismatch block, replace-exact rules, clean-room refusal + opt-out |
 | `editplan` | 4 | byte-range apply, stale rejection, invalid-range rejection, LLM-code rejection |
 | `end_to_end` | 2 | boring import path commits; unknown symbols block honestly |
-| `synthesize` | 7 | word_counts, Counter struct, parse_port, new-module wiring, cross-task rollback, unknown-op block, unsupported-shape block |
+| `synthesize` | 10 | word_counts, Counter struct, parse_port, new-module wiring, cross-task rollback, unknown-op block, unsupported-shape block, config defaults, component slots, unknown-slot block |
 | `polyglot` | 5 | Python import, unknown-import block, registry-JS import, TOML-defined language, missing-toolchain block |
 | `webpage` | 4 | homepage build, script-escape safety, empty-title block, strict-intent page injection |
 | `repair` | 2 | missing-import repair + compile, unfixable block with untouched disk |
@@ -116,6 +170,7 @@ Oracle verify (compiler / tests / parser per language)
 | `progress` | 2 | ordered stage trail, silence without listener |
 | `config` | 2 | config path resolution, save/load roundtrip |
 | `fuzz` | 4 | deep JSON, unicode, hostile ranges, garbage intents |
+| `kotlin` | 3 | RNG compiled+run on JVM, unknown-call block, pinned toolchain provisioning |
 
 ### The dentist test
 
@@ -187,20 +242,42 @@ cargo fmt --check
 cargo test --all-features
 ```
 
+## Learning (ML proposes, compiler disposes)
+
+Three slots where machine learning is allowed — none of them can forge
+evidence:
+
+1. **Translator** (external model): prose → intent metadata. Never code.
+2. **Ranking** (`linfa` decision trees, pure Rust, trains in
+   milliseconds): which error group and which recipe to try first, learned
+   from the project's own judged history. Order only.
+3. **Retrieval** (planned): precedent search over verified outputs.
+   Lexical/statistical first (`vtext`-shaped), embeddings (`tract`) later.
+
+Refused: genetic search over code (guessing with extra steps), RL policies
+(wrong data regime), anything with native dependencies beyond the existing
+toolchain. `linfa` + `ndarray` are the only ML crates; both pure Rust.
+
 ## Components
 
 - `src/engine/synthesize.rs` — deterministic synthesizer: verified ingredient
   index, composition families (map-accumulation, struct ops, fallible parse,
-  web pages), contract-test renderer
+  web pages, config defaults, component render), contract-test renderer
 - `src/engine/lang.rs` — language backends: trait + Rust/Python/C/Kotlin/HTML
-  impls + data-driven registry + `.grounding.toml` loading
+  impls + data-driven registry + `.grounding.toml` loading; `build()` oracles
+  (gcc, cargo, kotlinc/javac, provisioned dx) with self-solving drivers
+- `src/engine/rank.rs` — learning-to-rank: per-project rank/outcome logs,
+  linfa trees, cold-start fallbacks
 - `src/engine/plan.rs` — `EditPlan` with `expected_old` stale-checks
 - `src/engine/writer.rs` — planner-only `CodeWriter`, module wiring,
   creation-safe snapshots
 - `src/engine/mod.rs` — plan-all → snapshot-all → execute transaction loop
+- `src/engine/corrector.rs` — migration transforms with same-code
+  batching, trigger selection, anti-spin stall detection, outcome judging
+- `examples/build_page.rs` — drive the engine as a library, now with
+  `--prose "<prompt>" translator mode (`OPENROUTER_API_KEY` or config key)
 - `src/oracle/` — knowledge adapters (Rust, Android, Solana, GitHub)
 - `src/knowledge/` — CastleStore engineering memory
-- `examples/build_page.rs` — drive the engine as a library
 
 ## Deliverables
 
