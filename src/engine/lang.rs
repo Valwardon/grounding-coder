@@ -1555,7 +1555,20 @@ fn search_gradle_kotlin() -> Option<(String, String)> {
     }
     let find = |name_part: &str| walk_find(&cache, name_part);
     let compiler = find("kotlin-compiler-embeddable-")?;
-    let stdlib = find("kotlin-stdlib-2.")?;
+    // The stdlib must share the compiler's major.minor — a newer cached
+    // stdlib (e.g. 2.2.0 from an Android build) against an older compiler
+    // fails with incompatible-metadata errors. No match means fall back
+    // to the pinned provisioned set, never a mixed one.
+    let stdlib = compiler_major_minor(&compiler)
+        .and_then(|mm| find(&format!("kotlin-stdlib-{}.", mm)))
+        .or_else(|| {
+            // Legacy loose match, kept only when it agrees with the
+            // compiler; otherwise provisioning wins.
+            let loose = find("kotlin-stdlib-2.")?;
+            let same = compiler_major_minor(&compiler)
+                .is_some_and(|mm| loose.contains(&format!("kotlin-stdlib-{}.", mm)));
+            same.then_some(loose)
+        })?;
     let coroutines = find("kotlinx-coroutines-core-jvm-")?;
     let annotations = find("annotations-13.0.jar")?;
     let trove = find("trove4j-")?;
@@ -1563,6 +1576,17 @@ fn search_gradle_kotlin() -> Option<(String, String)> {
         [compiler, stdlib.clone(), coroutines, annotations, trove].join(":"),
         stdlib,
     ))
+}
+
+/// `…/kotlin-compiler-embeddable-2.0.20.jar` → `"2.0"`. Pure parsing,
+/// unit-tested; None when the filename carries no version.
+fn compiler_major_minor(path: &str) -> Option<String> {
+    let file = path.rsplit('/').next()?;
+    let ver = file
+        .strip_prefix("kotlin-compiler-embeddable-")?
+        .strip_suffix(".jar")?;
+    let mut parts = ver.split('.');
+    Some(format!("{}.{}", parts.next()?, parts.next()?))
 }
 
 fn dirs_home_fallback() -> Option<std::path::PathBuf> {
@@ -2552,6 +2576,19 @@ mod build_tests {
             vec!["rhai".to_string(), "lightningcss".to_string()]
         );
         assert!(failing_crates("linking everything fine\n").is_empty());
+    }
+
+    #[test]
+    fn compiler_major_minor_parses_jar_names() {
+        assert_eq!(
+            compiler_major_minor("/x/kotlin-compiler-embeddable-2.0.20.jar"),
+            Some("2.0".to_string())
+        );
+        assert_eq!(compiler_major_minor("nope.jar"), None);
+        assert_eq!(
+            compiler_major_minor("/x/kotlin-compiler-embeddable-.jar"),
+            None
+        );
     }
 
     #[test]

@@ -255,6 +255,11 @@ pub struct FieldDef {
     pub name: String,
     #[serde(rename = "type", default)]
     pub ty: String,
+    /// Literal default for the `config` family (`default()` constructor).
+    /// Rendered per the declared type (ints/bools verbatim, strings
+    /// quoted); anything unrenderable blocks instead of guessing.
+    #[serde(default)]
+    pub default: Option<String>,
 }
 
 /// One page section as metadata: heading + body, both plain text.
@@ -335,10 +340,10 @@ pub struct IntentDefinition {
     /// definition to the synthesizer instead of stub planning.
     #[serde(default, deserialize_with = "de_vec_default")]
     pub cases: Vec<TestCase>,
-    /// Struct fields (kind == "struct").
+    /// Struct fields (kind == "struct" | "config" | "component" props).
     #[serde(default, deserialize_with = "de_vec_default")]
     pub fields: Vec<FieldDef>,
-    /// Method specs (kind == "struct").
+    /// Method specs (kind == "struct"; configs/components reuse new/get).
     #[serde(default, deserialize_with = "de_vec_default")]
     pub methods: Vec<MethodDef>,
     /// Page title (kind == "page").
@@ -685,9 +690,13 @@ impl TaskDecomposer {
         // Pages (content slots) always synthesize — structure is fixed.
         // Structs with fields synthesize too (fields + method ops are the
         // contract); without fields there is nothing to build honestly.
+        // Configs are structs with literal defaults; components are
+        // prop structs with layout slots — same contract discipline.
         let has_contract = !def.cases.is_empty()
             || def.kind == "page"
-            || (def.kind == "struct" && !def.fields.is_empty());
+            || (def.kind == "struct" && !def.fields.is_empty())
+            || (def.kind == "config" && !def.fields.is_empty())
+            || (def.kind == "component" && !def.fields.is_empty() && !def.sections.is_empty());
         let kind = if has_contract {
             TaskKind::SynthesizeFunction
         } else {
@@ -703,7 +712,7 @@ impl TaskDecomposer {
                 "signature": def.signature.clone().unwrap_or_default(),
                 "references": def.references,
                 "cases": def.cases.iter().map(|c| serde_json::json!({"input": c.input, "expected": c.expected})).collect::<Vec<_>>(),
-                "fields": def.fields.iter().map(|f| serde_json::json!({"name": f.name, "type": f.ty})).collect::<Vec<_>>(),
+                "fields": def.fields.iter().map(|f| serde_json::json!({"name": f.name, "type": f.ty, "default": f.default})).collect::<Vec<_>>(),
                 "title": def.title,
                 "sections": def.sections.iter().map(|s| serde_json::json!({"heading": s.heading, "body": s.body})).collect::<Vec<_>>(),
                 "footer": def.footer,

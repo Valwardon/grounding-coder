@@ -462,8 +462,13 @@ impl CodeWriter {
         // Structs carry fields + method specs as metadata, pages carry
         // content slots; functions parse the signature string. Either way:
         // metadata in, never code.
-        let struct_def = if kind == "struct" {
+        let struct_def = if kind == "struct" || kind == "config" {
             Some(parse_struct_def(task)?)
+        } else {
+            None
+        };
+        let component_def = if kind == "component" {
+            Some(parse_component_def(task)?)
         } else {
             None
         };
@@ -477,7 +482,8 @@ impl CodeWriter {
         } else {
             None
         };
-        let (params, ret) = if struct_def.is_some() || page_def.is_some() {
+        let (params, ret) = if struct_def.is_some() || page_def.is_some() || component_def.is_some()
+        {
             (Vec::new(), String::new())
         } else {
             parse_fn_signature(&name, sig_raw)?
@@ -516,10 +522,11 @@ impl CodeWriter {
             cases,
             struct_def,
             page_def,
+            component_def,
         };
         let candidates = synth.synthesize(&req)?;
         let contract_test = synth.contract_test(&req);
-        let item_exists = if req.struct_def.is_some() {
+        let item_exists = if req.struct_def.is_some() || req.component_def.is_some() {
             if req.lang == "kotlin" {
                 content.contains(&format!("class {}", req.fn_name))
             } else {
@@ -1675,9 +1682,10 @@ fn parse_page_def(task: &SubTask) -> Result<super::synthesize::PageDef, String> 
 
 /// Parse struct metadata from a task payload into a `StructDef`.
 /// Expected payload shape (all metadata, never code):
-/// `fields: [{name, type}]`, `methods: [{name, self ("none"|"ref"|"mut"),
-/// params: ["n: T"], ret?, op ("new"|"add_assign"|"get"),
-/// field?, amount?}]`.
+/// `fields: [{name, type, default?}]`, `methods: [{name, self
+/// ("none"|"ref"|"mut"), params: ["n: T"], ret?, op ("new"|"add_assign"|
+/// "get"|"default"), field?, amount?}]`. Per-field `default` literals
+/// feed the `config` family; other families ignore them.
 fn parse_struct_def(task: &SubTask) -> Result<super::synthesize::StructDef, String> {
     let fields: Vec<(String, String)> = task
         .payload
@@ -1697,6 +1705,21 @@ fn parse_struct_def(task: &SubTask) -> Result<super::synthesize::StructDef, Stri
     if fields.is_empty() {
         return Err("Struct synthesis needs fields metadata — BLOCKED".to_string());
     }
+    let defaults: Vec<(String, String)> = task
+        .payload
+        .get("fields")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|f| {
+                    Some((
+                        f.get("name")?.as_str()?.to_string(),
+                        f.get("default")?.as_str()?.to_string(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let methods: Vec<super::synthesize::MethodSpec> = task
         .payload
         .get("methods")
@@ -1745,7 +1768,103 @@ fn parse_struct_def(task: &SubTask) -> Result<super::synthesize::StructDef, Stri
     if methods.is_empty() {
         return Err("Struct synthesis needs methods metadata — BLOCKED".to_string());
     }
-    Ok(super::synthesize::StructDef { fields, methods })
+    Ok(super::synthesize::StructDef {
+        fields,
+        methods,
+        defaults,
+    })
+}
+
+/// Parse component metadata: props from `fields` (name/type only —
+/// defaults are meaningless for render props), layout from `sections`
+/// (heading + body template with `{prop}` slots).
+fn parse_component_def(task: &SubTask) -> Result<super::synthesize::ComponentDef, String> {
+    let props: Vec<(String, String)> = task
+        .payload
+        .get("fields")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|f| {
+                    Some((
+                        f.get("name")?.as_str()?.to_string(),
+                        f.get("type")?.as_str()?.to_string(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if props.is_empty() {
+        return Err("Component synthesis needs prop metadata — BLOCKED".to_string());
+    }
+    let sections: Vec<(String, String)> = task
+        .payload
+        .get("sections")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| {
+                    Some((
+                        s.get("heading")?.as_str()?.to_string(),
+                        s.get("body")?.as_str()?.to_string(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if sections.is_empty() {
+        return Err("Component synthesis needs layout sections — BLOCKED".to_string());
+    }
+    let methods: Vec<super::synthesize::MethodSpec> = task
+        .payload
+        .get("methods")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|m| {
+                    Some(super::synthesize::MethodSpec {
+                        name: m.get("name")?.as_str()?.to_string(),
+                        self_kind: m
+                            .get("self")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("ref")
+                            .to_string(),
+                        params: m
+                            .get("params")
+                            .and_then(|v| v.as_array())
+                            .map(|ps| {
+                                ps.iter()
+                                    .filter_map(|p| {
+                                        let s = p.as_str()?;
+                                        let mut kv = s.splitn(2, ':');
+                                        Some((
+                                            kv.next()?.trim().to_string(),
+                                            kv.next()?.trim().to_string(),
+                                        ))
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        ret: m.get("ret").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                        amount_param: m
+                            .get("amount")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                        field: m
+                            .get("field")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                        op: m.get("op")?.as_str()?.to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(super::synthesize::ComponentDef {
+        props,
+        sections,
+        methods,
+    })
 }
 
 /// Parse `fn name(a: T, ...) -> R` (leading `fn name` optional when it
@@ -1893,6 +2012,56 @@ pub fn plan_migration_fix(
         return Some((vec![edit], ev));
     }
     None
+}
+
+/// All migration recipes that match one diagnostic, in deterministic
+/// priority order, each named. The corrector scores candidates by
+/// precedent (learned P(fix)) and applies the winner; first-match
+/// behavior is `plan_migration_fix` above, kept for single-shot use.
+pub fn plan_all_migration_fixes(
+    project_dir: &Path,
+    error: &super::error::CompileError,
+) -> Vec<(&'static str, Vec<SourceEdit>, Evidence)> {
+    if error.file.is_empty() || error.line == 0 {
+        return Vec::new();
+    }
+    let path = project_dir.join(&error.file);
+    let content = match fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let ev = Evidence::CompilerSuggestion {
+        code: error.code.clone(),
+        file: error.file.clone(),
+        line: error.line,
+        col: error.col,
+    };
+    let mut out = Vec::new();
+    if let Some(edit) = migrate_rsx_let(&path, &content, error.line) {
+        out.push(("rsx-let", vec![edit], ev.clone()));
+    }
+    if let Some(edits) = migrate_resource_read(&path, &content, error) {
+        out.push(("resource-read", edits, ev.clone()));
+    }
+    if let Some(edit) = migrate_await_spawn(&path, &content, error.line) {
+        out.push(("await-spawn", vec![edit], ev.clone()));
+    }
+    if let Some(edit) = CodeWriter::migrate_derive_clone(project_dir, error) {
+        out.push(("derive-clone", vec![edit], ev.clone()));
+    }
+    if let Some(edit) = migrate_mut_binding(&path, &content, error) {
+        out.push(("mut-binding", vec![edit], ev.clone()));
+    }
+    if let Some(edit) = migrate_fnmut_param(&path, &content, error) {
+        out.push(("fnmut-param", vec![edit], ev.clone()));
+    }
+    if let Some(edit) = migrate_fnmut_call(&path, &content, error) {
+        out.push(("fnmut-call", vec![edit], ev.clone()));
+    }
+    if let Some(edit) = migrate_into_to_string(&path, &content, error) {
+        out.push(("into-string", vec![edit], ev));
+    }
+    out
 }
 
 /// R-mut: E0596 ``cannot borrow `X` as mutable``. Three structural

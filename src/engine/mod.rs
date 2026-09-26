@@ -1172,6 +1172,27 @@ impl CodeBot {
                 // Re-verify fresh: fixed errors stay fixed, remaining ones
                 // get current line numbers for the next attempt.
                 verdict = self.verifier.verify().await;
+                // True-fix labels: every recipe applied this round is
+                // judged against the fresh verdict — an error with the
+                // same code+file+message still present did NOT fix;
+                // absence means it did. This is the outcome history the
+                // ranker trains on: what worked, not what was busy.
+                {
+                    let mut outcomes = Vec::new();
+                    for m in &correction.planned {
+                        let ext = m.file.rsplit('.').next().unwrap_or("").to_string();
+                        let gone = !verdict.errors.iter().any(|e| {
+                            e.code == m.code && e.file == m.file && e.message == m.message
+                        });
+                        outcomes.push(crate::engine::rank::OutcomeRow {
+                            code: m.code.clone(),
+                            ext,
+                            recipe: m.recipe.clone(),
+                            fixed: gone,
+                        });
+                    }
+                    crate::engine::rank::save_outcomes(&self.project_dir, &outcomes);
+                }
                 self.emit(ProgressEvent::Stage {
                     id: task.id,
                     stage: "verify",

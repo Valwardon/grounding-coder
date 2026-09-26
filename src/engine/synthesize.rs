@@ -38,6 +38,8 @@ pub struct SynthRequest {
     pub struct_def: Option<StructDef>,
     /// Page definition for the page family; content slots as pure data.
     pub page_def: Option<PageDef>,
+    /// Component definition for the component family; props + layout.
+    pub component_def: Option<ComponentDef>,
 }
 
 /// A webpage as pure data: title, sections, footer.
@@ -56,10 +58,25 @@ pub struct PageDef {
 pub struct StructDef {
     pub fields: Vec<(String, String)>,
     pub methods: Vec<MethodSpec>,
+    /// Literal defaults per field name, for the `config` family
+    /// (`default()` constructor). Rendered per declared type; anything
+    /// unrenderable blocks instead of guessing.
+    pub defaults: Vec<(String, String)>,
+}
+
+/// A UI component as pure data: props plus layout sections whose bodies
+/// may reference props as `{name}` slots. The template is fixed; slots
+/// resolve only to declared props, everything else is escaped text.
+#[derive(Debug, Clone)]
+pub struct ComponentDef {
+    pub props: Vec<(String, String)>,
+    pub sections: Vec<(String, String)>,
+    pub methods: Vec<MethodSpec>,
 }
 
 /// One method as pure metadata. `op` must name a verified operation
-/// (`new`, `add_assign`, `get`); anything else blocks synthesis.
+/// (`new`, `add_assign`, `get`, `default`, `render`); anything else
+/// blocks synthesis.
 #[derive(Debug, Clone)]
 pub struct MethodSpec {
     pub name: String,
@@ -188,8 +205,13 @@ impl Synthesizer {
     /// caller turns that into `BLOCKED`, never a fallback guess.
     pub fn synthesize(&self, req: &SynthRequest) -> Result<Vec<Candidate>, String> {
         // Functions prove by contract cases; structs prove by their
-        // field + op contract; pages by their content slots.
-        if req.page_def.is_none() && req.struct_def.is_none() && req.cases.is_empty() {
+        // field + op contract; pages by content slots; components by
+        // props + layout slots.
+        if req.page_def.is_none()
+            && req.struct_def.is_none()
+            && req.component_def.is_none()
+            && req.cases.is_empty()
+        {
             return Err("Synthesize requires at least one contract case — BLOCKED".to_string());
         }
         // Family 4: webpage from content slots.
@@ -211,6 +233,11 @@ impl Synthesizer {
         // Family 3: struct with verified method ops.
         if let Some(def) = &req.struct_def {
             return self.struct_ops(&req.fn_name, def);
+        }
+        // Family 6: UI component — prop struct plus render() over
+        // layout slots. Rust only (gated above with the struct family).
+        if let Some(def) = &req.component_def {
+            return self.component_candidates(&req.fn_name, def);
         }
         // Family 2: fallible parse — (&str) -> Result<Int, String>.
         if req.params.len() == 1 && req.params[0].1 == "&str" && is_parse_result(&req.ret) {
@@ -542,10 +569,137 @@ impl Synthesizer {
                     vec![ev("get", struct_name)],
                 ))
             }
+            // `default()` from per-field literals (the `config` family).
+            // Every field needs a default that renders for its declared
+            // type; anything else blocks instead of inventing a value.
+            "default" => {
+                if m.self_kind != "none" {
+                    return Err("default must have self_kind=none — BLOCKED".to_string());
+                }
+                if !m.params.is_empty() {
+                    return Err("default takes no params — BLOCKED".to_string());
+                }
+                if let Some(r) = &m.ret
+                    && r != struct_name
+                {
+                    return Err(format!(
+                        "default return {} != struct {} — BLOCKED",
+                        r, struct_name
+                    ));
+                }
+                let mut assigns = Vec::new();
+                for (f, t) in &def.fields {
+                    let lit = def
+                        .defaults
+                        .iter()
+                        .find(|(n, _)| n == f)
+                        .map(|(_, l)| l.clone())
+                        .ok_or(format!("default missing literal for field {} — BLOCKED", f))?;
+                    assigns.push(format!("{}: {}", f, render_default_literal(t, &lit)?));
+                }
+                Ok((
+                    format!(
+                        "    pub fn {}() -> {} {{\n        {} {{ {} }}\n    }}\n",
+                        m.name,
+                        struct_name,
+                        struct_name,
+                        assigns.join(", ")
+                    ),
+                    vec![ev("default", struct_name)],
+                ))
+            }
             other => Err(format!("Unknown method op {} — BLOCKED", other)),
         }
     }
+}
 
+/// Render a config literal for its declared type. Ints and bools pass
+/// through verbatim after shape checks; floats must parse; strings are
+/// quoted with escaping. Anything else — including a literal shaped
+/// for the wrong type — blocks instead of emitting a wrong value.
+fn render_default_literal(ty: &str, lit: &str) -> Result<String, String> {
+    let t = lit.trim();
+    match ty.trim() {
+        "bool" => match t {
+            "true" | "false" => Ok(t.to_string()),
+            _ => Err(format!("Bad bool literal {} — BLOCKED", lit)),
+        },
+        "u8" | "u16" | "u32" | "u64" | "usize" => {
+            if !t.is_empty() && t.chars().all(|c| c.is_ascii_digit()) {
+                Ok(t.to_string())
+            } else {
+                Err(format!("Bad uint literal {} — BLOCKED", lit))
+            }
+        }
+        "i8" | "i16" | "i32" | "i64" | "isize" => {
+            let digits = t.strip_prefix('-').unwrap_or(t);
+            if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) {
+                Ok(t.to_string())
+            } else {
+                Err(format!("Bad int literal {} — BLOCKED", lit))
+            }
+        }
+        "f32" | "f64" => t
+            .parse::<f64>()
+            .map(|_| t.to_string())
+            .map_err(|_| format!("Bad float literal {} — BLOCKED", lit)),
+        "String" => {
+            // A quoted literal is &str — the field needs String, so the
+            // template calls .to_string() (verified str method).
+            let mut out = String::from("\"");
+            for c in t.chars() {
+                match c {
+                    '"' => out.push_str("\\\""),
+                    '\\' => out.push_str("\\\\"),
+                    _ => out.push(c),
+                }
+            }
+            out.push_str("\".to_string()");
+            Ok(out)
+        }
+        other => Err(format!("No literal rendering for type {} — BLOCKED", other)),
+    }
+}
+
+/// Types a component prop may take: everything `format!` renders via
+/// `Display` without adornment. Lifetimes and generics are out —
+/// props must be ownable, plain, and printable.
+fn is_display_prop(ty: &str) -> bool {
+    matches!(
+        ty.trim(),
+        "bool"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "usize"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "isize"
+            | "f32"
+            | "f64"
+            | "String"
+    )
+}
+
+/// Escape a literal chunk for embedding in a `format!` string: keep
+/// `{prop}` slots intact (validated separately), escape everything
+/// else that would change meaning.
+fn escape_format_chunk(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+impl Synthesizer {
     /// Candidate bodies for a webpage. The template is fixed and every
     /// slot is HTML-escaped, so content is always inert text. The presence
     /// contract (every slot verbatim in the output) holds by construction
@@ -585,6 +739,170 @@ impl Synthesizer {
                 source: "engine-template".to_string(),
             }],
         }])
+    }
+
+    /// Candidate bodies for a UI component: a prop struct (built through
+    /// the same op vocabulary as plain structs) plus a `render(&self) ->
+    /// String` over layout sections. Section bodies are literal HTML
+    /// with `{prop}` slots; every slot must name a declared Display
+    /// prop, every other brace fails the build. Only slots that appear
+    /// are passed to `format!` (unused arguments would not compile).
+    fn component_candidates(
+        &self,
+        name: &str,
+        def: &ComponentDef,
+    ) -> Result<Vec<Candidate>, String> {
+        if !is_ident(name) {
+            return Err(format!("Bad component name {} — BLOCKED", name));
+        }
+        if def.props.is_empty() {
+            return Err("Component needs at least one prop — BLOCKED".to_string());
+        }
+        for (p, t) in &def.props {
+            if !is_ident(p) {
+                return Err(format!("Bad prop name {} — BLOCKED", p));
+            }
+            if !is_display_prop(t) {
+                return Err(format!("Prop {} has non-Display type {} — BLOCKED", p, t));
+            }
+        }
+        if def.sections.is_empty() {
+            return Err("Component needs at least one layout section — BLOCKED".to_string());
+        }
+        let sdef = StructDef {
+            fields: def.props.clone(),
+            methods: Vec::new(),
+            defaults: Vec::new(),
+        };
+        let fields: Vec<String> = def
+            .props
+            .iter()
+            .map(|(f, t)| format!("    pub {}: {},", f, t))
+            .collect();
+        let mut impl_body = String::new();
+        let mut evidence = Vec::new();
+        let mut saw_render = false;
+        for m in &def.methods {
+            if m.op == "render" {
+                if m.self_kind != "ref" {
+                    return Err("render needs self_kind=ref — BLOCKED".to_string());
+                }
+                if !m.params.is_empty() {
+                    return Err("render takes no params — BLOCKED".to_string());
+                }
+                if let Some(r) = &m.ret
+                    && r != "String"
+                {
+                    return Err(format!("render return {} != String — BLOCKED", r));
+                }
+                if !is_ident(&m.name) {
+                    return Err(format!("Bad render name {} — BLOCKED", m.name));
+                }
+                impl_body.push_str(&Self::render_fn(name, &m.name, def)?);
+                evidence.push(Evidence::VerifiedSymbol {
+                    qname: "component-render-template".to_string(),
+                    source: "engine-template".to_string(),
+                });
+                saw_render = true;
+            } else {
+                let (body, ev) = self.method_body(name, &sdef, m)?;
+                impl_body.push_str(&body);
+                evidence.extend(ev);
+            }
+        }
+        if !saw_render {
+            return Err("Component needs a render method — BLOCKED".to_string());
+        }
+        let body = format!(
+            "#[derive(Debug)]\npub struct {} {{\n{}\n}}\n\nimpl {} {{\n{}}}\n",
+            name,
+            fields.join("\n"),
+            name,
+            impl_body
+        );
+        Ok(vec![Candidate { body, evidence }])
+    }
+
+    /// Render one `render()` body: fixed section template, `{prop}`
+    /// slots resolved positionally in first-use order. Any brace that
+    /// is not exactly a declared prop slot blocks the whole component.
+    fn render_fn(name: &str, method: &str, def: &ComponentDef) -> Result<String, String> {
+        let _ = name;
+        let mut html = String::new();
+        let mut used: Vec<String> = Vec::new();
+        for (heading, body) in &def.sections {
+            if heading.trim().is_empty() || body.trim().is_empty() {
+                return Err("Component sections need heading and body — BLOCKED".to_string());
+            }
+            let mut tpl = String::new();
+            let chars: Vec<char> = body.chars().collect();
+            let mut i = 0;
+            while i < chars.len() {
+                if chars[i] == '{' {
+                    let mut j = i + 1;
+                    while j < chars.len() && chars[j] != '}' && chars[j] != '{' {
+                        j += 1;
+                    }
+                    if j >= chars.len() || chars[j] != '}' {
+                        return Err(format!(
+                            "Unbalanced brace in layout for {} — BLOCKED",
+                            heading
+                        ));
+                    }
+                    let slot: String = chars[i + 1..j].iter().collect();
+                    if !def.props.iter().any(|(p, _)| *p == slot) {
+                        return Err(format!(
+                            "Unknown slot {{{}}} (not a prop of {}) — BLOCKED",
+                            slot, name
+                        ));
+                    }
+                    // Numbered positional slots: a bare `{name}` would
+                    // capture a same-named local instead of taking the
+                    // positional argument that follows.
+                    let pos = if let Some(k) = used.iter().position(|p| *p == slot) {
+                        k
+                    } else {
+                        used.push(slot.clone());
+                        used.len() - 1
+                    };
+                    tpl.push('{');
+                    tpl.push_str(&pos.to_string());
+                    tpl.push('}');
+                    i = j + 1;
+                } else if chars[i] == '}' {
+                    return Err(format!(
+                        "Stray closing brace in layout for {} — BLOCKED",
+                        heading
+                    ));
+                } else {
+                    tpl.push(chars[i]);
+                    i += 1;
+                }
+            }
+            html.push_str(&format!(
+                "<section><h2>{}</h2><p>{}</p></section>",
+                escape_html(heading),
+                escape_format_chunk(&tpl)
+            ));
+        }
+        // The scanner above guarantees `html` holds ONLY valid `{prop}`
+        // slots (anything else blocked), and the chunk escaper leaves
+        // braces alone — so the format string is exact. A slot-free
+        // layout holds no braces at all.
+        let args: Vec<String> = used.iter().map(|p| format!("self.{}", p)).collect();
+        let call = if args.is_empty() {
+            format!("format!(\"{}\")", escape_format_chunk(&html))
+        } else {
+            format!(
+                "format!(\"{}\", {})",
+                escape_format_chunk(&html),
+                args.join(", ")
+            )
+        };
+        Ok(format!(
+            "    pub fn {}(&self) -> String {{\n        {}\n    }}\n",
+            method, call
+        ))
     }
 
     /// Candidate bodies for a Kotlin class over `kotlin.random.Random`.
@@ -915,4 +1233,175 @@ fn sanitize(s: &str) -> String {
     s.chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect()
+}
+
+#[cfg(test)]
+mod family_tests {
+    use super::*;
+
+    fn method(op: &str) -> MethodSpec {
+        MethodSpec {
+            name: op.to_string(),
+            self_kind: "none".to_string(),
+            params: Vec::new(),
+            ret: None,
+            amount_param: None,
+            field: None,
+            op: op.to_string(),
+        }
+    }
+
+    #[test]
+    fn default_literals_render_per_type() {
+        assert_eq!(render_default_literal("bool", "true").unwrap(), "true");
+        assert_eq!(render_default_literal("u64", "3000").unwrap(), "3000");
+        assert_eq!(render_default_literal("i32", "-5").unwrap(), "-5");
+        assert_eq!(render_default_literal("f64", "1.5").unwrap(), "1.5");
+        assert_eq!(
+            render_default_literal("String", "a\"b\\c").unwrap(),
+            "\"a\\\"b\\\\c\".to_string()"
+        );
+        assert!(render_default_literal("bool", "yes").is_err());
+        assert!(render_default_literal("u64", "-1").is_err());
+        assert!(render_default_literal("u64", "3.5").is_err());
+        assert!(render_default_literal("f64", "abc").is_err());
+        assert!(render_default_literal("Vec<u8>", "[]").is_err());
+    }
+
+    #[test]
+    fn config_default_constructor_uses_literals() {
+        let s = Synthesizer::new();
+        let def = StructDef {
+            fields: vec![
+                ("slippage".to_string(), "u64".to_string()),
+                ("endpoint".to_string(), "String".to_string()),
+            ],
+            methods: vec![method("default")],
+            defaults: vec![
+                ("slippage".to_string(), "3000".to_string()),
+                ("endpoint".to_string(), "https://x".to_string()),
+            ],
+        };
+        let req = SynthRequest {
+            fn_name: "Cfg".to_string(),
+            lang: "rust".to_string(),
+            params: Vec::new(),
+            ret: String::new(),
+            cases: Vec::new(),
+            struct_def: Some(def),
+            page_def: None,
+            component_def: None,
+        };
+        let cands = s.synthesize(&req).expect("config must synthesize");
+        assert!(cands[0].body.contains("slippage: 3000"));
+        assert!(
+            cands[0]
+                .body
+                .contains("endpoint: \"https://x\".to_string()")
+        );
+    }
+
+    #[test]
+    fn config_missing_or_bad_literal_blocks() {
+        let s = Synthesizer::new();
+        let mk = |defaults: Vec<(String, String)>| SynthRequest {
+            fn_name: "Cfg".to_string(),
+            lang: "rust".to_string(),
+            params: Vec::new(),
+            ret: String::new(),
+            cases: Vec::new(),
+            struct_def: Some(StructDef {
+                fields: vec![("n".to_string(), "u64".to_string())],
+                methods: vec![method("default")],
+                defaults,
+            }),
+            page_def: None,
+            component_def: None,
+        };
+        assert!(s.synthesize(&mk(vec![])).is_err());
+        assert!(
+            s.synthesize(&mk(vec![("n".to_string(), "abc".to_string())]))
+                .is_err()
+        );
+    }
+
+    fn comp_def() -> ComponentDef {
+        ComponentDef {
+            props: vec![
+                ("title".to_string(), "String".to_string()),
+                ("count".to_string(), "u64".to_string()),
+            ],
+            sections: vec![(
+                "Head".to_string(),
+                "Count is {count} of {title}".to_string(),
+            )],
+            methods: vec![
+                MethodSpec {
+                    name: "new".to_string(),
+                    self_kind: "none".to_string(),
+                    params: vec![
+                        ("title".to_string(), "String".to_string()),
+                        ("count".to_string(), "u64".to_string()),
+                    ],
+                    ret: None,
+                    amount_param: None,
+                    field: None,
+                    op: "new".to_string(),
+                },
+                MethodSpec {
+                    name: "render".to_string(),
+                    self_kind: "ref".to_string(),
+                    params: Vec::new(),
+                    ret: Some("String".to_string()),
+                    amount_param: None,
+                    field: None,
+                    op: "render".to_string(),
+                },
+            ],
+        }
+    }
+
+    fn comp_req(def: ComponentDef) -> SynthRequest {
+        SynthRequest {
+            fn_name: "Card".to_string(),
+            lang: "rust".to_string(),
+            params: Vec::new(),
+            ret: String::new(),
+            cases: Vec::new(),
+            struct_def: None,
+            page_def: None,
+            component_def: Some(def),
+        }
+    }
+
+    #[test]
+    fn component_renders_slots_positionally() {
+        let s = Synthesizer::new();
+        let cands = s.synthesize(&comp_req(comp_def())).expect("component");
+        let body = &cands[0].body;
+        assert!(body.contains("pub struct Card"));
+        assert!(body.contains("self.count, self.title"), "args:\n{}", body);
+        assert!(body.contains("Count is {0} of {1}"), "slots:\n{}", body);
+    }
+
+    #[test]
+    fn component_rejects_bad_shapes() {
+        let s = Synthesizer::new();
+        // Unknown slot.
+        let mut d = comp_def();
+        d.sections = vec![("H".to_string(), "See {nope}".to_string())];
+        assert!(s.synthesize(&comp_req(d)).is_err());
+        // Stray brace.
+        let mut d = comp_def();
+        d.sections = vec![("H".to_string(), "See } here".to_string())];
+        assert!(s.synthesize(&comp_req(d)).is_err());
+        // Non-Display prop.
+        let mut d = comp_def();
+        d.props = vec![("cb".to_string(), "Vec<u8>".to_string())];
+        assert!(s.synthesize(&comp_req(d)).is_err());
+        // No render method.
+        let mut d = comp_def();
+        d.methods.retain(|m| m.op != "render");
+        assert!(s.synthesize(&comp_req(d)).is_err());
+    }
 }

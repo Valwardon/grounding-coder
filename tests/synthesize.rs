@@ -402,3 +402,176 @@ async fn failed_second_task_rolls_back_first() {
     );
     let _ = fs::remove_dir_all(&base);
 }
+
+#[tokio::test]
+async fn synthesizes_config_with_defaults() {
+    let base = tmp_rust_project();
+    let project = base.to_string_lossy().to_string();
+    let mut bot = CodeBot::new(&project, 5);
+    let intent = serde_json::json!({
+        "goal": "Connection config with literal defaults",
+        "file": "src/lib.rs",
+        "language": "rust",
+        "actions": [],
+        "references": [],
+        "define": [{
+            "name": "Conn",
+            "kind": "config",
+            "references": [],
+            "fields": [
+                {"name": "retries", "type": "u64", "default": "3"},
+                {"name": "endpoint", "type": "String", "default": "https://x"}
+            ],
+            "methods": [
+                {"name": "new", "self": "none", "params": ["retries: u64", "endpoint: String"], "op": "new"},
+                {"name": "default", "self": "none", "params": [], "op": "default"}
+            ]
+        }],
+        "test": [],
+        "imports": [],
+        "platform": "desktop",
+        "architecture": "native",
+        "runtime": "",
+        "capabilities": [],
+        "domains": [],
+        "constraints": [],
+        "dependencies": [],
+        "unknown_requirements": [],
+        "confidence": 1.0
+    });
+    let outcome = bot
+        .run_task(&serde_json::to_string(&intent).unwrap())
+        .await
+        .expect("run");
+    let rendered = format!("{}", outcome);
+    assert!(
+        rendered.contains("SUCCESS"),
+        "expected synthesis SUCCESS, got: {}",
+        rendered
+    );
+    let lib = fs::read_to_string(base.join("src/lib.rs")).unwrap();
+    assert!(lib.contains("pub struct Conn"), "missing struct:\n{}", lib);
+    assert!(lib.contains("retries: 3"), "missing literal:\n{}", lib);
+    assert!(
+        lib.contains("endpoint: \"https://x\".to_string()"),
+        "missing String literal:\n{}",
+        lib
+    );
+    let _ = fs::remove_dir_all(&base);
+}
+
+#[tokio::test]
+async fn synthesizes_component_with_slots() {
+    let base = tmp_rust_project();
+    let project = base.to_string_lossy().to_string();
+    let mut bot = CodeBot::new(&project, 5);
+    let intent = serde_json::json!({
+        "goal": "A greeting card component",
+        "file": "src/lib.rs",
+        "language": "rust",
+        "actions": [],
+        "references": [],
+        "define": [{
+            "name": "Card",
+            "kind": "component",
+            "references": [],
+            "fields": [
+                {"name": "title", "type": "String"},
+                {"name": "count", "type": "u64"}
+            ],
+            "sections": [
+                {"heading": "Head", "body": "Count is {count} of {title}"}
+            ],
+            "methods": [
+                {"name": "new", "self": "none", "params": ["title: String", "count: u64"], "op": "new"},
+                {"name": "render", "self": "ref", "params": [], "ret": "String", "op": "render"}
+            ]
+        }],
+        "test": [],
+        "imports": [],
+        "platform": "desktop",
+        "architecture": "native",
+        "runtime": "",
+        "capabilities": [],
+        "domains": [],
+        "constraints": [],
+        "dependencies": [],
+        "unknown_requirements": [],
+        "confidence": 1.0
+    });
+    let outcome = bot
+        .run_task(&serde_json::to_string(&intent).unwrap())
+        .await
+        .expect("run");
+    let rendered = format!("{}", outcome);
+    assert!(
+        rendered.contains("SUCCESS"),
+        "expected synthesis SUCCESS, got: {}",
+        rendered
+    );
+    let lib = fs::read_to_string(base.join("src/lib.rs")).unwrap();
+    assert!(lib.contains("pub struct Card"), "missing struct:\n{}", lib);
+    assert!(
+        lib.contains("fn render(&self) -> String"),
+        "missing render:\n{}",
+        lib
+    );
+    assert!(
+        lib.contains("self.count, self.title"),
+        "missing positional args:\n{}",
+        lib
+    );
+    let _ = fs::remove_dir_all(&base);
+}
+
+#[tokio::test]
+async fn component_unknown_slot_blocks_clean() {
+    let base = tmp_rust_project();
+    let before = fs::read_to_string(base.join("src/lib.rs")).unwrap();
+    let project = base.to_string_lossy().to_string();
+    let mut bot = CodeBot::new(&project, 5);
+    let intent = serde_json::json!({
+        "goal": "A broken card",
+        "file": "src/lib.rs",
+        "language": "rust",
+        "actions": [],
+        "references": [],
+        "define": [{
+            "name": "Card",
+            "kind": "component",
+            "references": [],
+            "fields": [{"name": "title", "type": "String"}],
+            "sections": [{"heading": "H", "body": "See {nope}"}],
+            "methods": [
+                {"name": "new", "self": "none", "params": ["title: String"], "op": "new"},
+                {"name": "render", "self": "ref", "params": [], "ret": "String", "op": "render"}
+            ]
+        }],
+        "test": [],
+        "imports": [],
+        "platform": "desktop",
+        "architecture": "native",
+        "runtime": "",
+        "capabilities": [],
+        "domains": [],
+        "constraints": [],
+        "dependencies": [],
+        "unknown_requirements": [],
+        "confidence": 1.0
+    });
+    let outcome = bot
+        .run_task(&serde_json::to_string(&intent).unwrap())
+        .await
+        .expect("run");
+    assert!(
+        format!("{}", outcome).contains("BLOCKED"),
+        "expected BLOCKED, got: {}",
+        outcome
+    );
+    assert_eq!(
+        before,
+        fs::read_to_string(base.join("src/lib.rs")).unwrap(),
+        "disk must be untouched"
+    );
+    let _ = fs::remove_dir_all(&base);
+}

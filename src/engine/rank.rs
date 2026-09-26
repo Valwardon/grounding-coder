@@ -25,6 +25,33 @@ pub struct RankRow {
     pub planned: bool,
 }
 
+/// One judged OUTCOME: a recipe was applied for an error, and the next
+/// verify either still shows it (fixed=false) or not (fixed=true).
+/// This is what "smarter" trains on — what worked, not what was busy.
+#[derive(Debug, Clone)]
+pub struct OutcomeRow {
+    pub code: String,
+    pub ext: String,
+    pub recipe: String,
+    pub fixed: bool,
+}
+
+/// Recipe vocabulary index. Unknown/future names share one bucket so
+/// new recipes start neutral instead of invisible.
+fn recipe_idx(name: &str) -> f64 {
+    match name {
+        "rsx-let" => 0.0,
+        "resource-read" => 1.0,
+        "await-spawn" => 2.0,
+        "derive-clone" => 3.0,
+        "mut-binding" => 4.0,
+        "fnmut-param" => 5.0,
+        "fnmut-call" => 6.0,
+        "into-string" => 7.0,
+        _ => 8.0,
+    }
+}
+
 /// Map a diagnostic code to a feature bucket. Unknown codes share one.
 fn code_idx(code: &str) -> f64 {
     match code {
@@ -75,6 +102,112 @@ pub fn load_rows(project_dir: &std::path::Path) -> Vec<RankRow> {
             })
         })
         .collect()
+}
+
+/// Load outcome rows (missing file = cold start).
+pub fn load_outcomes(project_dir: &std::path::Path) -> Vec<OutcomeRow> {
+    let path = project_dir.join(".grounding").join("outcomes.jsonl");
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    content
+        .lines()
+        .filter_map(|l| {
+            let v: serde_json::Value = serde_json::from_str(l).ok()?;
+            Some(OutcomeRow {
+                code: v.get("code")?.as_str()?.to_string(),
+                ext: v.get("ext")?.as_str()?.to_string(),
+                recipe: v.get("recipe")?.as_str()?.to_string(),
+                fixed: v.get("fixed")?.as_bool()?,
+            })
+        })
+        .collect()
+}
+
+/// Append outcome rows (capped like rank rows).
+pub fn save_outcomes(project_dir: &std::path::Path, rows: &[OutcomeRow]) {
+    if rows.is_empty() {
+        return;
+    }
+    let dir = project_dir.join(".grounding");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let path = dir.join("outcomes.jsonl");
+    let mut existing = load_outcomes(project_dir);
+    for r in rows {
+        existing.push(OutcomeRow {
+            code: r.code.clone(),
+            ext: r.ext.clone(),
+            recipe: r.recipe.clone(),
+            fixed: r.fixed,
+        });
+    }
+    if existing.len() > MAX_ROWS {
+        let drop = existing.len() - MAX_ROWS;
+        existing.drain(..drop);
+    }
+    let mut out = String::new();
+    for r in &existing {
+        out.push_str(
+            &serde_json::json!({
+                "code": r.code,
+                "ext": r.ext,
+                "recipe": r.recipe,
+                "fixed": r.fixed,
+            })
+            .to_string(),
+        );
+        out.push('\n');
+    }
+    let _ = std::fs::write(&path, out);
+}
+
+/// Choose among candidate recipe names for one error: highest learned
+/// P(fix | code, ext, recipe), ties and cold starts take index 0
+/// (the deterministic priority order). Pure, testable.
+pub fn choose_recipe(outcomes: &[OutcomeRow], code: &str, ext: &str, candidates: &[&str]) -> usize {
+    if candidates.is_empty() || outcomes.len() < MIN_ROWS {
+        return 0;
+    }
+    use linfa::prelude::*;
+    let n = outcomes.len();
+    let mut feats = Vec::with_capacity(n * 3);
+    let mut labels = Vec::with_capacity(n);
+    for r in outcomes {
+        let f = [code_idx(&r.code), ext_idx(&r.ext), recipe_idx(&r.recipe)];
+        feats.extend_from_slice(&f);
+        labels.push(usize::from(r.fixed));
+    }
+    let xs = match ndarray::Array2::from_shape_vec((n, 3), feats) {
+        Ok(a) => a,
+        Err(_) => return 0,
+    };
+    let ds = Dataset::new(xs, ndarray::Array1::from_vec(labels));
+    let model = match linfa_trees::DecisionTree::params()
+        .max_depth(Some(5))
+        .fit(&ds)
+    {
+        Ok(m) => m,
+        Err(_) => return 0,
+    };
+    let mut best = 0;
+    let mut best_score = -1.0f64;
+    // Strictly greater wins; ties keep the earlier (priority-order)
+    // candidate, so learning reorders only on evidence.
+    for (i, name) in candidates.iter().enumerate() {
+        let f = [code_idx(code), ext_idx(ext), recipe_idx(name)];
+        let x = match ndarray::Array2::from_shape_vec((1, 3), vec![f[0], f[1], f[2]]) {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+        let s = model.predict(&x)[0] as f64;
+        if s > best_score {
+            best_score = s;
+            best = i;
+        }
+    }
+    best
 }
 
 /// Append judged rows (capped; oldest dropped first).
@@ -209,6 +342,54 @@ mod tests {
         assert_eq!(out[0], "E0596".to_string());
     }
 
+    fn orow(code: &str, ext: &str, recipe: &str, fixed: bool) -> OutcomeRow {
+        OutcomeRow {
+            code: code.to_string(),
+            ext: ext.to_string(),
+            recipe: recipe.to_string(),
+            fixed,
+        }
+    }
+
+    #[test]
+    fn choose_prefers_learned_winner() {
+        // into-string fixed E0283/rs 8/8; rsx-let never did.
+        let mut outcomes = Vec::new();
+        for _ in 0..8 {
+            outcomes.push(orow("E0283", "rs", "into-string", true));
+            outcomes.push(orow("E0283", "rs", "rsx-let", false));
+        }
+        let pick = choose_recipe(&outcomes, "E0283", "rs", &["rsx-let", "into-string"]);
+        assert_eq!(pick, 1);
+    }
+
+    #[test]
+    fn choose_cold_and_ties_take_priority_order() {
+        assert_eq!(
+            choose_recipe(&[], "E0596", "rs", &["mut-binding", "fnmut-param"]),
+            0
+        );
+        // All-fixed history: every candidate scores 1, earliest wins.
+        let outcomes: Vec<OutcomeRow> = (0..12)
+            .map(|i| {
+                orow(
+                    "E0596",
+                    "rs",
+                    if i % 2 == 0 {
+                        "mut-binding"
+                    } else {
+                        "fnmut-param"
+                    },
+                    true,
+                )
+            })
+            .collect();
+        assert_eq!(
+            choose_recipe(&outcomes, "E0596", "rs", &["mut-binding", "fnmut-param"]),
+            0
+        );
+    }
+
     #[test]
     fn roundtrip_jsonl() {
         let dir = std::env::temp_dir().join(format!(
@@ -223,6 +404,10 @@ mod tests {
         let back = load_rows(&dir);
         assert_eq!(back.len(), 1);
         assert!(back[0].planned);
+        save_outcomes(&dir, &[orow("E0596", "rs", "mut-binding", true)]);
+        let oback = load_outcomes(&dir);
+        assert_eq!(oback.len(), 1);
+        assert_eq!(oback[0].recipe, "mut-binding");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

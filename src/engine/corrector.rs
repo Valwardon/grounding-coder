@@ -26,6 +26,16 @@ pub struct CorrectionPipeline {
     recipes: RecipeLog,
 }
 
+/// One applied recipe choice, for outcome judging next round.
+#[derive(Debug, Clone)]
+pub struct PlannedMark {
+    pub code: String,
+    pub file: String,
+    pub line: u32,
+    pub message: String,
+    pub recipe: String,
+}
+
 /// Result of a correction attempt.
 pub struct CorrectionResult {
     /// Whether the error was fixed.
@@ -36,6 +46,8 @@ pub struct CorrectionResult {
     pub new_recipes: u32,
     /// Error message if the correction failed.
     pub error: Option<String>,
+    /// Every recipe applied this round (for true-fix outcome labels).
+    pub planned: Vec<PlannedMark>,
 }
 
 /// Fix description — what to apply to the code.
@@ -83,6 +95,7 @@ impl CorrectionPipeline {
         writer: &CodeWriter,
         edits: Vec<super::plan::SourceEdit>,
         evidences: Vec<super::plan::Evidence>,
+        marks: Vec<PlannedMark>,
     ) -> CorrectionResult {
         // GROUNDING_DEBUG_MIGRATE=1 (or a dir path) prints each
         // applied span for post-mortems (the transaction rolls
@@ -150,6 +163,7 @@ impl CorrectionPipeline {
                 files_changed,
                 new_recipes: 0,
                 error: None,
+                planned: marks,
             };
         }
         CorrectionResult {
@@ -157,6 +171,7 @@ impl CorrectionPipeline {
             files_changed: Vec::new(),
             new_recipes: 0,
             error: Some("Migration edits applied to nothing — BLOCKED".to_string()),
+            planned: Vec::new(),
         }
     }
 
@@ -223,17 +238,29 @@ impl CorrectionPipeline {
                     }
                 }
                 let rows = super::rank::load_rows(writer.project_dir());
+                let outcomes = super::rank::load_outcomes(writer.project_dir());
                 let codes = super::rank::order_codes(&rows, codes, &first_file);
                 let mut judged: Vec<super::rank::RankRow> = Vec::new();
                 for code in codes {
                     let mut batched: Vec<super::plan::SourceEdit> = Vec::new();
                     let mut evidences = Vec::new();
+                    let mut marks: Vec<PlannedMark> = Vec::new();
                     for other in all_errors.iter().filter(|e| e.code == code).take(64) {
                         if batched.len() >= 32 {
                             break;
                         }
-                        let planned =
-                            super::writer::plan_migration_fix(writer.project_dir(), other);
+                        // All matching recipes, precedent picks the
+                        // winner: highest learned P(fix | code, ext,
+                        // recipe), ties keep priority order.
+                        let candidates =
+                            super::writer::plan_all_migration_fixes(writer.project_dir(), other);
+                        let ext = other.file.rsplit('.').next().unwrap_or("").to_string();
+                        let names: Vec<&str> = candidates.iter().map(|(n, _, _)| *n).collect();
+                        let pick = super::rank::choose_recipe(&outcomes, &other.code, &ext, &names);
+                        let planned = candidates
+                            .into_iter()
+                            .nth(pick)
+                            .map(|(name, edits, evidence)| (name.to_string(), (edits, evidence)));
                         if std::env::var("GROUNDING_DEBUG_MIGRATE").is_ok() {
                             eprintln!(
                                 "[batch] {} {}:{} -> {}",
@@ -241,20 +268,28 @@ impl CorrectionPipeline {
                                 other.file,
                                 other.line,
                                 match &planned {
-                                    Some((edits, _)) => format!("{} edits", edits.len()),
+                                    Some((name, (edits, _))) =>
+                                        format!("{} ({} edits)", name, edits.len()),
                                     None => "no recipe".to_string(),
                                 }
                             );
                         }
                         judged.push(super::rank::RankRow {
                             code: other.code.clone(),
-                            ext: other.file.rsplit('.').next().unwrap_or("").to_string(),
+                            ext: ext.clone(),
                             planned: planned.is_some(),
                         });
-                        let Some((edits, evidence)) = planned else {
+                        let Some((name, (edits, evidence))) = planned else {
                             continue;
                         };
                         evidences.push(evidence);
+                        marks.push(PlannedMark {
+                            code: other.code.clone(),
+                            file: other.file.clone(),
+                            line: other.line,
+                            message: other.message.clone(),
+                            recipe: name,
+                        });
                         for e in edits {
                             let overlaps = batched
                                 .iter()
@@ -269,7 +304,7 @@ impl CorrectionPipeline {
                     }
                     if !batched.is_empty() {
                         super::rank::save_rows(writer.project_dir(), &judged);
-                        return Self::apply_migration_edits(writer, batched, evidences);
+                        return Self::apply_migration_edits(writer, batched, evidences, marks);
                     }
                 }
                 super::rank::save_rows(writer.project_dir(), &judged);
@@ -283,6 +318,7 @@ impl CorrectionPipeline {
                     "No recipe found for {} ({:?}) at {}:{}",
                     error.code, error.kind, error.file, error.line
                 )),
+                planned: Vec::new(),
             };
         }
 
@@ -296,6 +332,7 @@ impl CorrectionPipeline {
                 files_changed: Vec::new(),
                 new_recipes: 0,
                 error: Some(format!("Failed to apply fix: {:?}", fix)),
+                planned: Vec::new(),
             };
         }
 
@@ -313,6 +350,13 @@ impl CorrectionPipeline {
             files_changed,
             new_recipes,
             error: None,
+            planned: vec![PlannedMark {
+                code: error.code.clone(),
+                file: error.file.clone(),
+                line: error.line,
+                message: error.message.clone(),
+                recipe: "legacy-fix".to_string(),
+            }],
         }
     }
 
