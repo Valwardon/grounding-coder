@@ -4,6 +4,7 @@ pub mod corrector;
 pub mod error;
 pub mod lang;
 pub mod plan;
+pub mod rank;
 pub mod recipes;
 pub mod research;
 pub mod symbols;

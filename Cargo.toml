@@ -51,6 +51,14 @@ once_cell = { version = "1", features = ["parking_lot"] }
 chrono = { version = "0.4", features = ["serde"] }
 log = "0.4"
 env_logger = "0.11"
+# Learning-to-rank over the bot's own verified repair outcomes (linfa
+# decision tree on tiny tabular data — no GPU, no weights, trains in
+# milliseconds). ML proposes ORDER; the compiler keeps the verdict.
+linfa = "0.7"
+linfa-trees = { version = "0.7", features = ["serde"] }
+# Must match linfa's own ndarray (0.15) — a second array crate would
+# split the type graph and nothing compiles.
+ndarray = "0.15"
 
 # dioxus UI — only compiled with "ui" feature (Android/iOS mobile targets)
 dioxus = { version = "0.7", features = ["mobile"], optional = true }

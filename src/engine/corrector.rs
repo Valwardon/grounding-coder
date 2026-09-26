@@ -205,17 +205,26 @@ impl CorrectionPipeline {
             //
             // Trigger selection: the run's first error may be an
             // un-actionable flavor (e.g. an inference knock-on next to a
-            // fixable ambiguity on the same line). Groups are tried in
-            // order of appearance — trigger's code first — and the first
-            // group that plans anything wins the round. Planning is pure
-            // (reads only); only the winning batch touches disk.
+            // fixable ambiguity on the same line). Groups are ordered by
+            // the learned plannability rank (ties keep appearance order,
+            // cold starts keep it entirely), and the first group that
+            // plans anything wins the round. Planning is pure (reads
+            // only); only the winning batch touches disk. Every planned
+            // error is judged into the rank log either way — the model
+            // learns from both hits and misses, never from guesses.
             if !error.file.is_empty() {
                 let mut codes: Vec<&str> = Vec::new();
+                let mut first_file: std::collections::HashMap<String, String> =
+                    std::collections::HashMap::new();
                 for e in std::iter::once(error).chain(all_errors.iter()) {
                     if !codes.contains(&e.code.as_str()) {
                         codes.push(e.code.as_str());
+                        first_file.insert(e.code.clone(), e.file.clone());
                     }
                 }
+                let rows = super::rank::load_rows(writer.project_dir());
+                let codes = super::rank::order_codes(&rows, codes, &first_file);
+                let mut judged: Vec<super::rank::RankRow> = Vec::new();
                 for code in codes {
                     let mut batched: Vec<super::plan::SourceEdit> = Vec::new();
                     let mut evidences = Vec::new();
@@ -237,6 +246,11 @@ impl CorrectionPipeline {
                                 }
                             );
                         }
+                        judged.push(super::rank::RankRow {
+                            code: other.code.clone(),
+                            ext: other.file.rsplit('.').next().unwrap_or("").to_string(),
+                            planned: planned.is_some(),
+                        });
                         let Some((edits, evidence)) = planned else {
                             continue;
                         };
@@ -254,9 +268,11 @@ impl CorrectionPipeline {
                         }
                     }
                     if !batched.is_empty() {
+                        super::rank::save_rows(writer.project_dir(), &judged);
                         return Self::apply_migration_edits(writer, batched, evidences);
                     }
                 }
+                super::rank::save_rows(writer.project_dir(), &judged);
             }
             // The bot KNOWS it doesn't know. Reports honestly.
             return CorrectionResult {

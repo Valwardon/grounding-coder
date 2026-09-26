@@ -157,6 +157,27 @@ async fn java_hello_builds_to_class() {
     let _ = fs::remove_dir_all(&project);
 }
 
+#[test]
+fn find_apks_sees_dx_output_only() {
+    let base = tmp_dir();
+    // dx layout: target/dx/<app>/…/app/build/outputs/apk/debug/app.apk
+    let dx_apk = base.join("target/dx/psdr/debug/android/app/app/build/outputs/apk/debug");
+    std::fs::create_dir_all(&dx_apk).unwrap();
+    std::fs::write(dx_apk.join("app-debug.apk"), b"fake-apk").unwrap();
+    // Noise that must stay invisible: other target/build trees.
+    let noise = base.join("target/other");
+    std::fs::create_dir_all(&noise).unwrap();
+    std::fs::write(noise.join("junk.apk"), b"nope").unwrap();
+    let hits = grounding_coder::github::find_apks(&base);
+    assert_eq!(hits.len(), 1, "got: {:?}", hits);
+    assert!(
+        hits[0].1.ends_with(
+            "target/dx/psdr/debug/android/app/app/build/outputs/apk/debug/app-debug.apk"
+        )
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 #[tokio::test]
 async fn rust_bin_builds_native() {
     if std::process::Command::new("cargo")

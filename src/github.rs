@@ -41,7 +41,7 @@ async fn ensure_repo(token: &str, repo: &str) -> Result<(), String> {
         Some(token),
         &serde_json::json!({
             "name": repo,
-            "private": false,
+            "private": true,
             "auto_init": false,
             "description": "Built with grounding-coder",
         }),
@@ -225,14 +225,17 @@ pub async fn upload_asset(
 }
 
 /// APKs under the project worth attaching to a release. Capped: 3 files,
-/// 200MB each. Sources travel via contents; binaries travel via releases.
+/// 512MB each. Sources travel via contents; binaries travel via releases.
 pub fn find_apks(project_dir: &std::path::Path) -> Vec<(String, std::path::PathBuf)> {
     const MAX_APKS: usize = 3;
-    const MAX_BYTES: u64 = 200 * 1024 * 1024;
+    // Debug APKs bundling native Solana stacks run ~250 MB; the cap must
+    // cover real artifacts while still refusing absurd ones.
+    const MAX_BYTES: u64 = 512 * 1024 * 1024;
+    let dx_root = project_dir.join("target").join("dx");
     let mut out = Vec::new();
     let mut stack = vec![(project_dir.to_path_buf(), 0u8)];
     while let Some((current, depth)) = stack.pop() {
-        if out.len() >= MAX_APKS || depth > 6 {
+        if out.len() >= MAX_APKS || depth > 14 {
             continue;
         }
         let Ok(entries) = std::fs::read_dir(&current) else {
@@ -247,7 +250,16 @@ pub fn find_apks(project_dir: &std::path::Path) -> Vec<(String, std::path::PathB
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_default();
-                if name.starts_with('.') || name == "target" || name == "build" {
+                // Build trees are noise — EXCEPT the dx output path
+                // (`target/dx/…/app/build/outputs/apk`), which is where
+                // android artifacts actually land. Ancestors of that root
+                // (`target` itself) must be entered to reach it, but
+                // everything else under any `target/` stays invisible.
+                let on_dx_path = dx_root.starts_with(&path) || path.starts_with(&dx_root);
+                let under_target = path.starts_with(project_dir.join("target"));
+                if name.starts_with('.')
+                    || (!on_dx_path && (name == "target" || name == "build" || under_target))
+                {
                     continue;
                 }
                 stack.push((path, depth + 1));
