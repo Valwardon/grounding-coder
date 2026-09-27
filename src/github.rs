@@ -140,22 +140,43 @@ pub async fn publish(
         return Err("Nothing uploadable in project dir — BLOCKED".to_string());
     }
     let mut skipped = Vec::new();
+    let mut updated = 0u32;
     for (rel, bytes) in &files {
         let url = format!(
             "https://api.github.com/repos/{}/{}/contents/{}",
             owner, repo, rel
         );
-        let body = serde_json::json!({
+        // Updates need the blob sha: fetch it first (404 = create).
+        // Without this, every publish after the first silently skips
+        // all files and sequential work never lands.
+        let sha: Option<String> = crate::http::get_json(&url, Some(token), None)
+            .await
+            .ok()
+            .and_then(|v| v.get("sha")?.as_str().map(|s| s.to_string()));
+        let mut body = serde_json::json!({
             "message": format!("grounding-coder: {}", rel),
             "content": base64::engine::general_purpose::STANDARD.encode(bytes),
         });
-        if let Err(e) = crate::http::put_json(&url, Some(token), &body).await {
-            // Updating an existing file needs its sha; treat as skipped
-            // rather than failing the whole publish.
-            skipped.push(format!("{}: {}", rel, e));
+        if let Some(sha) = sha {
+            body["sha"] = serde_json::Value::String(sha);
+        }
+        match crate::http::put_json(&url, Some(token), &body).await {
+            Ok(_) => {
+                if body.get("sha").is_some() {
+                    updated += 1;
+                }
+            }
+            Err(e) => skipped.push(format!("{}: {}", rel, e)),
         }
     }
-    Ok((format!("https://github.com/{}/{}", owner, repo), skipped))
+    let mut note = format!("https://github.com/{}/{}", owner, repo);
+    if updated > 0 {
+        note.push_str(&format!(" ({} files updated)", updated));
+    }
+    if !skipped.is_empty() {
+        note.push_str(&format!(" ({} files skipped)", skipped.len()));
+    }
+    Ok((note, skipped))
 }
 
 /// Create a release, returning its id. 422 (tag exists) resolves the id
