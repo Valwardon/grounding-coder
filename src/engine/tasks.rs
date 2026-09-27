@@ -355,6 +355,24 @@ pub struct IntentDefinition {
     /// Page footer (kind == "page").
     #[serde(default)]
     pub footer: Option<String>,
+    /// State names (kind == "statemachine").
+    #[serde(default, deserialize_with = "de_vec_default")]
+    pub states: Vec<String>,
+    /// Transitions (kind == "statemachine").
+    #[serde(default, deserialize_with = "de_vec_default")]
+    pub transitions: Vec<TransitionDef>,
+}
+
+/// One state-machine edge as pure metadata: on `event`, move from
+/// `from` to `to`. All three name states/events declared in `states`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransitionDef {
+    #[serde(default)]
+    pub event: String,
+    #[serde(default)]
+    pub from: String,
+    #[serde(default)]
+    pub to: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -696,7 +714,9 @@ impl TaskDecomposer {
             || def.kind == "page"
             || (def.kind == "struct" && !def.fields.is_empty())
             || (def.kind == "config" && !def.fields.is_empty())
-            || (def.kind == "component" && !def.fields.is_empty() && !def.sections.is_empty());
+            || (def.kind == "component" && !def.fields.is_empty() && !def.sections.is_empty())
+            || (def.kind == "statemachine" && !def.states.is_empty())
+            || (def.kind == "asynctask" && !def.fields.is_empty());
         let kind = if has_contract {
             TaskKind::SynthesizeFunction
         } else {
@@ -719,6 +739,10 @@ impl TaskDecomposer {
                 "methods": def.methods.iter().map(|m| serde_json::json!({
                     "name": m.name, "self": m.self_kind, "params": m.params,
                     "ret": m.ret, "op": m.op, "field": m.field, "amount": m.amount,
+                })).collect::<Vec<_>>(),
+                "states": def.states,
+                "transitions": def.transitions.iter().map(|t| serde_json::json!({
+                    "event": t.event, "from": t.from, "to": t.to,
                 })).collect::<Vec<_>>(),
             }),
             "intent_definition".to_string(),

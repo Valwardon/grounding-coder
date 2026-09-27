@@ -462,13 +462,41 @@ impl CodeWriter {
         // Structs carry fields + method specs as metadata, pages carry
         // content slots; functions parse the signature string. Either way:
         // metadata in, never code.
-        let struct_def = if kind == "struct" || kind == "config" {
+        // Struct-shaped kinds (plain structs, configs with defaults,
+        // async tasks over clock fields) all parse the same metadata;
+        // the op vocabulary inside decides the family.
+        let struct_def = if kind == "struct" || kind == "config" || kind == "asynctask" {
             Some(parse_struct_def(task)?)
         } else {
             None
         };
         let component_def = if kind == "component" {
             Some(parse_component_def(task)?)
+        } else {
+            None
+        };
+        let statemachine_def = if kind == "statemachine" {
+            if task
+                .payload
+                .get("methods")
+                .and_then(|v| v.as_array())
+                .is_some_and(|a| !a.is_empty())
+            {
+                return Err(
+                    "State machines take states/transitions, not methods — BLOCKED".to_string(),
+                );
+            }
+            if task
+                .payload
+                .get("cases")
+                .and_then(|v| v.as_array())
+                .is_some_and(|a| !a.is_empty())
+            {
+                return Err(
+                    "State machines prove by exhaustiveness, not cases — BLOCKED".to_string(),
+                );
+            }
+            Some(parse_statemachine_def(task)?)
         } else {
             None
         };
@@ -482,7 +510,10 @@ impl CodeWriter {
         } else {
             None
         };
-        let (params, ret) = if struct_def.is_some() || page_def.is_some() || component_def.is_some()
+        let (params, ret) = if struct_def.is_some()
+            || page_def.is_some()
+            || component_def.is_some()
+            || statemachine_def.is_some()
         {
             (Vec::new(), String::new())
         } else {
@@ -523,10 +554,14 @@ impl CodeWriter {
             struct_def,
             page_def,
             component_def,
+            statemachine_def,
         };
         let candidates = synth.synthesize(&req)?;
         let contract_test = synth.contract_test(&req);
-        let item_exists = if req.struct_def.is_some() || req.component_def.is_some() {
+        let item_exists = if req.struct_def.is_some()
+            || req.component_def.is_some()
+            || req.statemachine_def.is_some()
+        {
             if req.lang == "kotlin" {
                 content.contains(&format!("class {}", req.fn_name))
             } else {
@@ -1869,6 +1904,44 @@ fn parse_component_def(task: &SubTask) -> Result<super::synthesize::ComponentDef
 
 /// Parse `fn name(a: T, ...) -> R` (leading `fn name` optional when it
 /// matches `expected_name`). Returns ((param, type).., return type).
+/// Parse state-machine metadata: `states: ["Idle", …]`,
+/// `transitions: [{event, from, to}]`. All metadata, never code.
+fn parse_statemachine_def(task: &SubTask) -> Result<super::synthesize::StateMachineDef, String> {
+    let states: Vec<String> = task
+        .payload
+        .get("states")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| s.as_str().map(|x| x.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if states.is_empty() {
+        return Err("State machine needs states metadata — BLOCKED".to_string());
+    }
+    let transitions: Vec<(String, String, String)> = task
+        .payload
+        .get("transitions")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|t| {
+                    Some((
+                        t.get("event")?.as_str()?.to_string(),
+                        t.get("from")?.as_str()?.to_string(),
+                        t.get("to")?.as_str()?.to_string(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(super::synthesize::StateMachineDef {
+        states,
+        transitions,
+    })
+}
+
 fn parse_fn_signature(
     expected_name: &str,
     sig: &str,

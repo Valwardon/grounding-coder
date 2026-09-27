@@ -107,7 +107,7 @@ impl LlmClient {
             "- language: \"rust\" | \"kotlin\" | etc.\n",
             "- actions: array of {\"Action\": {\"action\": string, \"params\": [string], \"references\": [string]}} or {\"Research\": {\"topic\": string, \"reason\": string}}\n",
             "- references: array of strings fully qualified (e.g. \"std::collections::HashMap\")\n",
-            "- define: array of null or { name: string, kind: string, references: [string], signature?: string, cases?: [{input: string, expected: string}], fields?: [{name: string, type: string, default?: string}], methods?: [{name: string, self: \"none\"|\"ref\"|\"mut\", params: [\"n: Type\"], ret?: string, op: \"new\"|\"add_assign\"|\"get\"|\"call\"|\"default\"|\"render\"|\"knew\"|\"kcall\", field?: string, amount?: string}], title?: string, sections?: [{heading: string, body: string}], footer?: string } — NO code; cases/sections/defaults are literal values only; kind \"struct\" with fields+methods synthesizes behavior (Rust ops new/add_assign/get/call; Kotlin .kt targets use knew/kcall over kotlin.random.Random); kind \"config\" is a struct whose fields carry literal defaults plus a no-param op \"default\" method; kind \"component\" is props (fields) plus layout (sections) whose bodies may reference props as {name} slots, with op \"render\" (self ref, no params, ret String) emitting the renderer\n",
+            "- define: array of null or { name: string, kind: string, references: [string], signature?: string, cases?: [{input: string, expected: string}], fields?: [{name: string, type: string, default?: string}], methods?: [{name: string, self: \"none\"|\"ref\"|\"mut\", params: [\"n: Type\"], ret?: string, op: \"new\"|\"add_assign\"|\"get\"|\"call\"|\"default\"|\"render\"|\"knew\"|\"kcall\", field?: string, amount?: string}], title?: string, sections?: [{heading: string, body: string}], footer?: string } — NO code; cases/sections/defaults are literal values only; kind \"struct\" with fields+methods synthesizes behavior (Rust ops new/add_assign/get/call; Kotlin .kt targets use knew/kcall over kotlin.random.Random); kind \"config\" is a struct whose fields carry literal defaults plus a no-param op \"default\" method; kind \"component\" is props (fields) plus layout (sections) whose bodies may reference props as {name} slots, with op \"render\" (self ref, no params, ret String) emitting the renderer; kind \"statemachine\" takes states: [names] plus transitions: [{event, from, to}] (no methods, no cases — exhaustiveness is the proof); kind \"asynctask\" is a struct that MUST carry exactly last: std::time::Instant and interval: std::time::Duration with ops due (self ref), mark (self mut), poll (self mut, async) forming a poll scheduler\n",
             "- imports: array of strings\n",
             "- test: array of { name: string, assertions: [string] } — NO code\n",
             "- platform: \"android\" | \"desktop\" | \"web\"\n",
@@ -312,6 +312,8 @@ fn normalize_intent(v: &serde_json::Value, prompt: &str) -> StructuredIntent {
             cases: Vec::new(),
             fields: Vec::new(),
             methods: Vec::new(),
+            states: Vec::new(),
+            transitions: Vec::new(),
             title: Some(p.0.clone()),
             sections: p
                 .1

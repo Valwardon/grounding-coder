@@ -29,6 +29,7 @@ pub use synthesize::{ContractCase, SynthRequest, Synthesizer};
 pub use tasks::{
     EditIntent, FieldDef, IntentAction, IntentDefinition, IntentTest, MethodDef, ReplacementSpec,
     ReplicatedFile, SectionDef, StructuredIntent, SubTask, TaskDecomposer, TaskKind, TestCase,
+    TransitionDef,
 };
 pub use verifier::CodeVerifier;
 pub use writer::{CodeWriter, FileSnapshot};
@@ -210,6 +211,8 @@ fn ensure_page_create(intent: &mut StructuredIntent, project_dir: &std::path::Pa
         cases: Vec::new(),
         fields: Vec::new(),
         methods: Vec::new(),
+        states: Vec::new(),
+        transitions: Vec::new(),
         title: Some(title),
         sections: vec![SectionDef {
             heading: "Welcome".to_string(),

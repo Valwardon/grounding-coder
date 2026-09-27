@@ -575,3 +575,171 @@ async fn component_unknown_slot_blocks_clean() {
     );
     let _ = fs::remove_dir_all(&base);
 }
+
+#[tokio::test]
+async fn synthesizes_statemachine_with_total_transition() {
+    let base = tmp_rust_project();
+    let project = base.to_string_lossy().to_string();
+    let mut bot = CodeBot::new(&project, 5);
+    let intent = serde_json::json!({
+        "goal": "A connection state machine",
+        "file": "src/lib.rs",
+        "language": "rust",
+        "actions": [],
+        "references": [],
+        "define": [{
+            "name": "Conn",
+            "kind": "statemachine",
+            "references": [],
+            "states": ["Idle", "Live"],
+            "transitions": [
+                {"event": "Go", "from": "Idle", "to": "Live"},
+                {"event": "Stop", "from": "Live", "to": "Idle"}
+            ]
+        }],
+        "test": [],
+        "imports": [],
+        "platform": "desktop",
+        "architecture": "native",
+        "runtime": "",
+        "capabilities": [],
+        "domains": [],
+        "constraints": [],
+        "dependencies": [],
+        "unknown_requirements": [],
+        "confidence": 1.0
+    });
+    let outcome = bot
+        .run_task(&serde_json::to_string(&intent).unwrap())
+        .await
+        .expect("run");
+    let rendered = format!("{}", outcome);
+    assert!(
+        rendered.contains("SUCCESS"),
+        "expected synthesis SUCCESS, got: {}",
+        rendered
+    );
+    let lib = fs::read_to_string(base.join("src/lib.rs")).unwrap();
+    assert!(
+        lib.contains("pub enum ConnState"),
+        "missing states:\n{}",
+        lib
+    );
+    assert!(
+        lib.contains("pub fn transition(&mut self, event: ConnEvent) -> bool"),
+        "missing transition:\n{}",
+        lib
+    );
+    let _ = fs::remove_dir_all(&base);
+}
+
+#[tokio::test]
+async fn statemachine_unknown_state_blocks_clean() {
+    let base = tmp_rust_project();
+    let before = fs::read_to_string(base.join("src/lib.rs")).unwrap();
+    let project = base.to_string_lossy().to_string();
+    let mut bot = CodeBot::new(&project, 5);
+    let intent = serde_json::json!({
+        "goal": "A broken machine",
+        "file": "src/lib.rs",
+        "language": "rust",
+        "actions": [],
+        "references": [],
+        "define": [{
+            "name": "Conn",
+            "kind": "statemachine",
+            "references": [],
+            "states": ["Idle"],
+            "transitions": [
+                {"event": "Go", "from": "Idle", "to": "Gone"}
+            ]
+        }],
+        "test": [],
+        "imports": [],
+        "platform": "desktop",
+        "architecture": "native",
+        "runtime": "",
+        "capabilities": [],
+        "domains": [],
+        "constraints": [],
+        "dependencies": [],
+        "unknown_requirements": [],
+        "confidence": 1.0
+    });
+    let outcome = bot
+        .run_task(&serde_json::to_string(&intent).unwrap())
+        .await
+        .expect("run");
+    assert!(
+        format!("{}", outcome).contains("BLOCKED"),
+        "expected BLOCKED, got: {}",
+        outcome
+    );
+    assert_eq!(
+        before,
+        fs::read_to_string(base.join("src/lib.rs")).unwrap(),
+        "disk must be untouched"
+    );
+    let _ = fs::remove_dir_all(&base);
+}
+
+#[tokio::test]
+async fn synthesizes_asynctask_scheduler() {
+    let base = tmp_rust_project();
+    let project = base.to_string_lossy().to_string();
+    let mut bot = CodeBot::new(&project, 5);
+    let intent = serde_json::json!({
+        "goal": "A polling scheduler task",
+        "file": "src/lib.rs",
+        "language": "rust",
+        "actions": [],
+        "references": [],
+        "define": [{
+            "name": "Ticker",
+            "kind": "asynctask",
+            "references": [],
+            "fields": [
+                {"name": "last", "type": "std::time::Instant"},
+                {"name": "interval", "type": "std::time::Duration"}
+            ],
+            "methods": [
+                {"name": "ready", "self": "ref", "params": [], "op": "due"},
+                {"name": "reset", "self": "mut", "params": [], "op": "mark"},
+                {"name": "poll", "self": "mut", "params": [], "op": "poll"}
+            ]
+        }],
+        "test": [],
+        "imports": [],
+        "platform": "desktop",
+        "architecture": "native",
+        "runtime": "",
+        "capabilities": [],
+        "domains": [],
+        "constraints": [],
+        "dependencies": [],
+        "unknown_requirements": [],
+        "confidence": 1.0
+    });
+    let outcome = bot
+        .run_task(&serde_json::to_string(&intent).unwrap())
+        .await
+        .expect("run");
+    let rendered = format!("{}", outcome);
+    assert!(
+        rendered.contains("SUCCESS"),
+        "expected synthesis SUCCESS, got: {}",
+        rendered
+    );
+    let lib = fs::read_to_string(base.join("src/lib.rs")).unwrap();
+    assert!(
+        lib.contains("pub async fn poll(&mut self) -> bool"),
+        "missing poll:\n{}",
+        lib
+    );
+    assert!(
+        lib.contains("std::time::Instant::now()"),
+        "missing clock:\n{}",
+        lib
+    );
+    let _ = fs::remove_dir_all(&base);
+}

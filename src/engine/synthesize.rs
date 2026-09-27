@@ -40,6 +40,8 @@ pub struct SynthRequest {
     pub page_def: Option<PageDef>,
     /// Component definition for the component family; props + layout.
     pub component_def: Option<ComponentDef>,
+    /// State-machine definition; states + edges. Proves by exhaustiveness.
+    pub statemachine_def: Option<StateMachineDef>,
 }
 
 /// A webpage as pure data: title, sections, footer.
@@ -74,9 +76,19 @@ pub struct ComponentDef {
     pub methods: Vec<MethodSpec>,
 }
 
+/// A finite state machine as pure data: state names plus edges
+/// `(event, from, to)`. Emits a `State` enum, an `Event` enum, and a
+/// machine struct with a total `transition` (unlisted pairs map to
+/// `false` via a wildcard arm, so exhaustiveness holds by construction).
+#[derive(Debug, Clone)]
+pub struct StateMachineDef {
+    pub states: Vec<String>,
+    pub transitions: Vec<(String, String, String)>,
+}
+
 /// One method as pure metadata. `op` must name a verified operation
-/// (`new`, `add_assign`, `get`, `default`, `render`); anything else
-/// blocks synthesis.
+/// (`new`, `add_assign`, `get`, `default`, `render`, `due`, `mark`,
+/// `poll`); anything else blocks synthesis.
 #[derive(Debug, Clone)]
 pub struct MethodSpec {
     pub name: String,
@@ -206,10 +218,11 @@ impl Synthesizer {
     pub fn synthesize(&self, req: &SynthRequest) -> Result<Vec<Candidate>, String> {
         // Functions prove by contract cases; structs prove by their
         // field + op contract; pages by content slots; components by
-        // props + layout slots.
+        // props + layout slots; machines by states + edges.
         if req.page_def.is_none()
             && req.struct_def.is_none()
             && req.component_def.is_none()
+            && req.statemachine_def.is_none()
             && req.cases.is_empty()
         {
             return Err("Synthesize requires at least one contract case — BLOCKED".to_string());
@@ -238,6 +251,11 @@ impl Synthesizer {
         // layout slots. Rust only (gated above with the struct family).
         if let Some(def) = &req.component_def {
             return self.component_candidates(&req.fn_name, def);
+        }
+        // Family 7: state machine — enums plus total transition.
+        // Rust only, same gate.
+        if let Some(def) = &req.statemachine_def {
+            return self.statemachine_candidates(&req.fn_name, def);
         }
         // Family 2: fallible parse — (&str) -> Result<Int, String>.
         if req.params.len() == 1 && req.params[0].1 == "&str" && is_parse_result(&req.ret) {
@@ -608,7 +626,73 @@ impl Synthesizer {
                     vec![ev("default", struct_name)],
                 ))
             }
+            // Async-task scheduler ops over the exact fields
+            // `last: std::time::Instant` + `interval: std::time::Duration`
+            // (full paths — no imports needed). `due` reports readiness,
+            // `mark` resets the clock, `poll` does both atomically as a
+            // real `async fn` (compiles without an executor; running one
+            // is the caller's job, honestly out of scope).
+            "due" => {
+                if m.self_kind != "ref" {
+                    return Err("due needs self_kind=ref — BLOCKED".to_string());
+                }
+                if !m.params.is_empty() {
+                    return Err("due takes no params — BLOCKED".to_string());
+                }
+                Self::require_clock_fields(def)?;
+                Ok((
+                    format!(
+                        "    pub fn {}(&self) -> bool {{\n        self.last.elapsed() >= self.interval\n    }}\n",
+                        m.name
+                    ),
+                    vec![ev("due", struct_name)],
+                ))
+            }
+            "mark" => {
+                if m.self_kind != "mut" {
+                    return Err("mark needs self_kind=mut — BLOCKED".to_string());
+                }
+                if !m.params.is_empty() {
+                    return Err("mark takes no params — BLOCKED".to_string());
+                }
+                Self::require_clock_fields(def)?;
+                Ok((
+                    format!(
+                        "    pub fn {}(&mut self) {{\n        self.last = std::time::Instant::now();\n    }}\n",
+                        m.name
+                    ),
+                    vec![ev("mark", struct_name)],
+                ))
+            }
+            "poll" => {
+                if m.self_kind != "mut" {
+                    return Err("poll needs self_kind=mut — BLOCKED".to_string());
+                }
+                if !m.params.is_empty() {
+                    return Err("poll takes no params — BLOCKED".to_string());
+                }
+                Self::require_clock_fields(def)?;
+                Ok((
+                    format!(
+                        "    pub async fn {}(&mut self) -> bool {{\n        if self.last.elapsed() >= self.interval {{\n            self.last = std::time::Instant::now();\n            true\n        }} else {{\n            false\n        }}\n    }}\n",
+                        m.name
+                    ),
+                    vec![ev("poll", struct_name)],
+                ))
+            }
             other => Err(format!("Unknown method op {} — BLOCKED", other)),
+        }
+    }
+
+    /// The clock-field contract for scheduler ops: exactly
+    /// `last: std::time::Instant` and `interval: std::time::Duration`.
+    /// Full paths keep bodies import-free; anything else blocks.
+    fn require_clock_fields(def: &StructDef) -> Result<(), String> {
+        let has = |n: &str, t: &str| def.fields.iter().any(|(f, ty)| f == n && ty == t);
+        if has("last", "std::time::Instant") && has("interval", "std::time::Duration") {
+            Ok(())
+        } else {
+            Err("Scheduler ops need fields last: std::time::Instant and interval: std::time::Duration — BLOCKED".to_string())
         }
     }
 }
@@ -903,6 +987,92 @@ impl Synthesizer {
             "    pub fn {}(&self) -> String {{\n        {}\n    }}\n",
             method, call
         ))
+    }
+
+    /// Candidate bodies for a finite state machine: a `State` enum, an
+    /// `Event` enum, and a machine struct with `new` (first state is
+    /// initial), a `state` reader, and a total `transition` (unlisted
+    /// pairs hit the wildcard arm → `false`, so exhaustiveness holds by
+    /// construction). All names must be unique idents; every edge must
+    /// name known states; duplicate (from, event) pairs block (the
+    /// second would be dead code, and dead arms are lies).
+    fn statemachine_candidates(
+        &self,
+        name: &str,
+        def: &StateMachineDef,
+    ) -> Result<Vec<Candidate>, String> {
+        if !is_ident(name) {
+            return Err(format!("Bad machine name {} — BLOCKED", name));
+        }
+        if def.states.is_empty() {
+            return Err("State machine needs at least one state — BLOCKED".to_string());
+        }
+        let mut seen_states = Vec::new();
+        for s in &def.states {
+            if !is_ident(s) {
+                return Err(format!("Bad state name {} — BLOCKED", s));
+            }
+            if seen_states.contains(s) {
+                return Err(format!("Duplicate state {} — BLOCKED", s));
+            }
+            seen_states.push(s.clone());
+        }
+        if def.transitions.is_empty() {
+            return Err("State machine needs at least one transition — BLOCKED".to_string());
+        }
+        let mut events: Vec<String> = Vec::new();
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        for (ev, from, to) in &def.transitions {
+            if !is_ident(ev) {
+                return Err(format!("Bad event name {} — BLOCKED", ev));
+            }
+            if !seen_states.contains(from) {
+                return Err(format!("Unknown from-state {} — BLOCKED", from));
+            }
+            if !seen_states.contains(to) {
+                return Err(format!("Unknown to-state {} — BLOCKED", to));
+            }
+            if pairs.contains(&(from.clone(), ev.clone())) {
+                return Err(format!("Duplicate edge ({} on {}) — BLOCKED", ev, from));
+            }
+            pairs.push((from.clone(), ev.clone()));
+            if !events.contains(ev) {
+                events.push(ev.clone());
+            }
+        }
+        let state_enum = def.states.join(", ");
+        let event_enum = events.join(", ");
+        let mut arms = String::new();
+        for (from, ev) in &pairs {
+            arms.push_str(&format!(
+                "            ({}State::{}, {}Event::{}) => Some({}State::{}),\n",
+                name,
+                from,
+                name,
+                ev,
+                name,
+                def.transitions
+                    .iter()
+                    .find(|(e, f, _)| e == ev && f == from)
+                    .map(|(_, _, t)| t.clone())
+                    .unwrap_or_default()
+            ));
+        }
+        let body = format!(
+            "#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum {n}State {{\n    {states}\n}}\n\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum {n}Event {{\n    {events}\n}}\n\n#[derive(Debug)]\npub struct {n} {{\n    state: {n}State,\n}}\n\nimpl {n} {{\n    pub fn new() -> {n} {{\n        {n} {{ state: {n}State::{first} }}\n    }}\n    pub fn state(&self) -> {n}State {{\n        self.state\n    }}\n    pub fn transition(&mut self, event: {n}Event) -> bool {{\n        let next = match (self.state, event) {{\n{arms}            _ => None,\n        }};\n        if let Some(s) = next {{\n            self.state = s;\n            true\n        }} else {{\n            false\n        }}\n    }}\n}}\n",
+            n = name,
+            states = state_enum,
+            events = event_enum,
+            first = def.states[0],
+            arms = arms
+        );
+        Ok(vec![Candidate {
+            body,
+            evidence: vec![Evidence::VerifiedSymbol {
+                qname: "statemachine-exhaustive-template".to_string(),
+                source: "engine-template".to_string(),
+            }],
+        }])
     }
 
     /// Candidate bodies for a Kotlin class over `kotlin.random.Random`.
@@ -1291,6 +1461,7 @@ mod family_tests {
             struct_def: Some(def),
             page_def: None,
             component_def: None,
+            statemachine_def: None,
         };
         let cands = s.synthesize(&req).expect("config must synthesize");
         assert!(cands[0].body.contains("slippage: 3000"));
@@ -1317,6 +1488,7 @@ mod family_tests {
             }),
             page_def: None,
             component_def: None,
+            statemachine_def: None,
         };
         assert!(s.synthesize(&mk(vec![])).is_err());
         assert!(
@@ -1371,6 +1543,7 @@ mod family_tests {
             struct_def: None,
             page_def: None,
             component_def: Some(def),
+            statemachine_def: None,
         }
     }
 
@@ -1382,6 +1555,128 @@ mod family_tests {
         assert!(body.contains("pub struct Card"));
         assert!(body.contains("self.count, self.title"), "args:\n{}", body);
         assert!(body.contains("Count is {0} of {1}"), "slots:\n{}", body);
+    }
+
+    fn sm_req(def: StateMachineDef) -> SynthRequest {
+        SynthRequest {
+            fn_name: "Conn".to_string(),
+            lang: "rust".to_string(),
+            params: Vec::new(),
+            ret: String::new(),
+            cases: Vec::new(),
+            struct_def: None,
+            page_def: None,
+            component_def: None,
+            statemachine_def: Some(def),
+        }
+    }
+
+    fn sm_def() -> StateMachineDef {
+        StateMachineDef {
+            states: vec!["Idle".to_string(), "Live".to_string()],
+            transitions: vec![
+                ("Go".to_string(), "Idle".to_string(), "Live".to_string()),
+                ("Stop".to_string(), "Live".to_string(), "Idle".to_string()),
+            ],
+        }
+    }
+
+    #[test]
+    fn statemachine_emits_total_transition() {
+        let s = Synthesizer::new();
+        let cands = s.synthesize(&sm_req(sm_def())).expect("machine");
+        let body = &cands[0].body;
+        assert!(body.contains("pub enum ConnState"));
+        assert!(body.contains("pub enum ConnEvent"));
+        assert!(body.contains("pub fn transition(&mut self, event: ConnEvent) -> bool"));
+        assert!(body.contains("_ => None,"));
+    }
+
+    #[test]
+    fn statemachine_rejects_bad_shapes() {
+        let s = Synthesizer::new();
+        // Unknown state.
+        let mut d = sm_def();
+        d.transitions = vec![("Go".to_string(), "Idle".to_string(), "Gone".to_string())];
+        assert!(s.synthesize(&sm_req(d)).is_err());
+        // Duplicate edge.
+        let mut d = sm_def();
+        d.transitions
+            .push(("Go".to_string(), "Idle".to_string(), "Idle".to_string()));
+        assert!(s.synthesize(&sm_req(d)).is_err());
+        // No states / no transitions.
+        let mut d = sm_def();
+        d.states.clear();
+        assert!(s.synthesize(&sm_req(d)).is_err());
+        let mut d = sm_def();
+        d.transitions.clear();
+        assert!(s.synthesize(&sm_req(d)).is_err());
+    }
+
+    fn task_def() -> StructDef {
+        StructDef {
+            fields: vec![
+                ("last".to_string(), "std::time::Instant".to_string()),
+                ("interval".to_string(), "std::time::Duration".to_string()),
+            ],
+            methods: vec![
+                MethodSpec {
+                    name: "ready".to_string(),
+                    self_kind: "ref".to_string(),
+                    params: Vec::new(),
+                    ret: None,
+                    amount_param: None,
+                    field: None,
+                    op: "due".to_string(),
+                },
+                MethodSpec {
+                    name: "reset".to_string(),
+                    self_kind: "mut".to_string(),
+                    params: Vec::new(),
+                    ret: None,
+                    amount_param: None,
+                    field: None,
+                    op: "mark".to_string(),
+                },
+                MethodSpec {
+                    name: "poll".to_string(),
+                    self_kind: "mut".to_string(),
+                    params: Vec::new(),
+                    ret: None,
+                    amount_param: None,
+                    field: None,
+                    op: "poll".to_string(),
+                },
+            ],
+            defaults: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn asynctask_ops_need_clock_fields() {
+        let s = Synthesizer::new();
+        let mk = |def: StructDef| SynthRequest {
+            fn_name: "Ticker".to_string(),
+            lang: "rust".to_string(),
+            params: Vec::new(),
+            ret: String::new(),
+            cases: Vec::new(),
+            struct_def: Some(def),
+            page_def: None,
+            component_def: None,
+            statemachine_def: None,
+        };
+        let cands = s.synthesize(&mk(task_def())).expect("task");
+        assert!(
+            cands[0]
+                .body
+                .contains("pub async fn poll(&mut self) -> bool")
+        );
+        assert!(cands[0].body.contains("std::time::Instant::now()"));
+        // Wrong fields: block.
+        let mut d = task_def();
+        d.fields = vec![("x".to_string(), "u64".to_string())];
+        assert!(s.synthesize(&mk(d)).is_err());
     }
 
     #[test]
