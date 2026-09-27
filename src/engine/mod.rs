@@ -1,5 +1,6 @@
 pub mod arena;
 pub mod budget;
+pub mod catalog;
 pub mod corrector;
 pub mod error;
 pub mod lang;
@@ -394,6 +395,115 @@ impl CodeBot {
         for symbol in sources {
             arena.insert(symbol);
         }
+        drop(arena);
+        // Catalog: definitions researched and banked by earlier runs
+        // land in the symbol table, so Step 0 already knows them.
+        for def in crate::engine::catalog::load(&self.project_dir) {
+            let qname = def.qname.clone();
+            self.symbol_table.index(&qname, def.into_code_def());
+        }
+    }
+
+    /// Receive → catalog → utilize, when repair meets the unknown.
+    ///
+    /// Extracts an unknown identifier from the diagnostic; asks the
+    /// ResearchOracle (canonical sources only, compiler-verified
+    /// answers); banks the answer in the per-project catalog plus the
+    /// symbol table; and, when the answer names an importable path,
+    /// applies it through the normal `AddImport` plan so the compiler
+    /// judges next round. Bounded: 3 research attempts per run, each
+    /// symbol once. Returns applied files on success; misses still
+    /// leave the catalog richer and report None honestly.
+    async fn research_recovery(
+        &mut self,
+        error: &CompileError,
+        researched: &mut std::collections::HashSet<String>,
+        tries: &mut u32,
+    ) -> Option<Vec<String>> {
+        if *tries >= 3 {
+            return None;
+        }
+        // The compiler's own suggestion comes first: it names exact
+        // bytes, costs no fetch, and previously died unheard inside
+        // synthesize_fix for non-import error kinds.
+        if let Some(path) = crate::engine::corrector::suggested_import(error) {
+            let files = self
+                .writer
+                .apply_fix(&crate::engine::corrector::Fix::AddImport(path));
+            if !files.is_empty() {
+                return Some(files);
+            }
+        }
+        let sym = crate::engine::catalog::unknown_ident(&error.code, &error.message, &error.kind)?;
+        if std::env::var("GROUNDING_DEBUG_MIGRATE").is_ok() {
+            eprintln!(
+                "[recover] {} {}:{} sym={:?} known={}",
+                error.code,
+                error.file,
+                error.line,
+                sym,
+                self.symbol_table.is_known(&sym)
+            );
+        }
+        if self.symbol_table.is_known(&sym) || !researched.insert(sym.clone()) {
+            return None;
+        }
+        let lang = match error.file.rsplit('.').next().unwrap_or("") {
+            "kt" | "java" => "kotlin",
+            "py" => "python",
+            _ => "rust",
+        };
+        self.emit(ProgressEvent::Stage {
+            id: 0,
+            stage: "researching",
+            detail: format!("{} ({})", sym, lang),
+        });
+        *tries += 1;
+        let found = self.researcher.research(&sym, lang).await;
+        if std::env::var("GROUNDING_DEBUG_MIGRATE").is_ok() {
+            eprintln!(
+                "[recover] research {} -> {}",
+                sym,
+                match &found {
+                    Some(d) => format!("hit {} @ {}", d.qname, d.source_url),
+                    None => "miss".to_string(),
+                }
+            );
+        }
+        let found = found?;
+        crate::engine::catalog::save(&self.project_dir, std::slice::from_ref(&found));
+        let qname = found.qname.clone();
+        self.symbol_table
+            .index(&qname, found.clone().into_code_def());
+        self.emit(ProgressEvent::Stage {
+            id: 0,
+            stage: "researched",
+            detail: format!("{} <- {}", sym, found.source_url),
+        });
+        // Utilize: the compiler's own suggestion first (its words),
+        // else the cataloged module joined with the symbol — then the
+        // compiler decides whether the import resolves anything.
+        let last = sym.rsplit("::").next().unwrap_or(&sym).to_string();
+        let candidate = crate::engine::corrector::suggested_import(error).or_else(|| {
+            let module = found.module.trim();
+            if module.is_empty() {
+                return None;
+            }
+            if module == last || module.ends_with(&format!("::{}", last)) {
+                Some(module.to_string())
+            } else if module.contains("::") {
+                Some(format!("{}::{}", module, last))
+            } else {
+                None
+            }
+        })?;
+        let files = self
+            .writer
+            .apply_fix(&crate::engine::corrector::Fix::AddImport(candidate));
+        if files.is_empty() {
+            return None;
+        }
+        Some(files)
     }
 
     /// Run a structured intent through the deterministic pipeline.
@@ -1081,6 +1191,9 @@ impl CodeBot {
             let mut verdict = verdict;
             let mut attempts = 0u32;
             let mut last_sig: Option<String> = None;
+            let mut researched: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            let mut research_tries = 0u32;
             while let Some(error) = verdict.errors.first().cloned() {
                 if std::env::var("GROUNDING_DEBUG_MIGRATE").is_ok() {
                     eprintln!(
@@ -1125,6 +1238,15 @@ impl CodeBot {
                     errors_fixed += 1;
                     recipes_learned += correction.new_recipes;
                     changes.extend(correction.files_changed);
+                } else if let Some(files) = self
+                    .research_recovery(&error, &mut researched, &mut research_tries)
+                    .await
+                {
+                    // Receive → catalog → utilize: an unknown identifier
+                    // was researched, banked, and applied as a verified
+                    // import. The compiler judges next round like any fix.
+                    errors_fixed += 1;
+                    changes.extend(files);
                 } else {
                     // No recipe found and can't synthesize fix — the bot
                     // KNOWS it doesn't know. Roll back the whole run so

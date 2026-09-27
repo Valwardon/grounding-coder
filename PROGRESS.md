@@ -167,6 +167,19 @@ cargo test --all-features
   major.minor, else fall back to the pinned provisioned set.
 - 96 tests green, clippy `-D warnings` clean, fmt clean.
 
+## v0.9.0 — Receive / catalog / utilize (2026-09-27)
+
+- Unknown identifiers met during repair are extracted, researched
+  (canonical sources, compiler-verified), cataloged per-project, and
+  utilized through `AddImport` — compiler judges next round as always.
+- Fixed along the way: fabricated `use {bare_ident};` imports (matched
+  call-site text, reported vacuous success), empty-import no-ops, nested
+  crates.io JSON (versions read "unknown"), unverified flags on verified
+  defs, and a `/dev/null` rustc output that sandboxes reject.
+- Proved live: `serde_json` extracted → researched (v1.0.151, verified)
+  → cataloged; missing-dep cases still block honestly (that's EnsureDep
+  territory, not this loop's).
+
 ## v0.5.0 — External crates, honest Partials, GitHub delivery (2026-09-23)
 
 Driven by a live device report: `rand::…` imports BLOCKED (no registry

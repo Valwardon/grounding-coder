@@ -211,19 +211,34 @@ impl ResearchOracle {
             if let Some(def) = self.fetch_from_source(source, symbol, language).await {
                 self.fetches_used += 1;
 
-                // Validate with compiler oracle
+                // Validate with compiler oracle. Mark the verdict ON the
+                // definition — a cataloged def must not claim unverified
+                // after the compiler passed it.
                 if self.compiler_verify(&def, language) {
-                    let code_def = def.clone().into_code_def();
+                    let mut verified = def.clone();
+                    verified.compiler_verified = true;
+                    let code_def = verified.clone().into_code_def();
                     self.cache.insert(cache_key, code_def);
-                    return Some(def);
+                    return Some(verified);
                 } else {
                     log::warn!(
                         "ResearchOracle: {} definition for '{}' failed compiler verification",
                         source.name,
                         symbol
                     );
+                    if std::env::var("GROUNDING_DEBUG_MIGRATE").is_ok() {
+                        eprintln!(
+                            "[research] {} via {}: parsed sig={:?} examples={} verify=FAIL",
+                            symbol,
+                            source.name,
+                            def.signature,
+                            def.examples.len()
+                        );
+                    }
                     // Don't cache failed definitions — try other sources
                 }
+            } else if std::env::var("GROUNDING_DEBUG_MIGRATE").is_ok() {
+                eprintln!("[research] {} via {}: no parse", symbol, source.name);
             }
         }
 
@@ -409,37 +424,45 @@ impl ResearchOracle {
         _language: &str,
         url: &str,
     ) -> Option<ResearchedDef> {
-        // Parse crates.io API response for crate metadata
-        #[derive(serde::Deserialize)]
-        struct CrateInfo {
+        // Parse crates.io API response for crate metadata. The fields
+        // live nested under `crate` — a top-level parse silently yields
+        // "unknown" versions, so read the nested object explicitly.
+        #[derive(serde::Deserialize, Default)]
+        struct CrateInner {
             #[serde(default)]
             description: Option<String>,
             #[serde(default)]
             max_version: Option<String>,
         }
-
-        match serde_json::from_str::<CrateInfo>(content) {
-            Ok(info) => {
-                let version = info.max_version.unwrap_or_else(|| "unknown".to_string());
-                Some(ResearchedDef {
-                    qname: format!("{}:{}", symbol, version),
-                    language: "rust".to_string(),
-                    kind: "crate".to_string(),
-                    module: symbol.to_string(),
-                    signature: format!("// Crate {} v{}", symbol, version),
-                    description: info
-                        .description
-                        .unwrap_or_else(|| format!("Rust crate {}", symbol)),
-                    examples: vec![format!(
-                        "// Add to Cargo.toml: {} = \"{}\"",
-                        symbol, version
-                    )],
-                    source_url: url.to_string(),
-                    compiler_verified: false,
-                })
-            }
-            Err(_) => None,
+        #[derive(serde::Deserialize, Default)]
+        struct CrateRoot {
+            #[serde(default, rename = "crate")]
+            crate_: Option<CrateInner>,
         }
+        // serde_json is imported in this module as `serde_json` already;
+        // use the fully qualified path to avoid confusion.
+        let root: CrateRoot = serde_json::from_str(content).unwrap_or_default();
+        let info = root.crate_.unwrap_or_default();
+        if info.max_version.is_none() && info.description.is_none() {
+            return None;
+        }
+        let version = info.max_version.unwrap_or_else(|| "unknown".to_string());
+        Some(ResearchedDef {
+            qname: format!("{}:{}", symbol, version),
+            language: "rust".to_string(),
+            kind: "crate".to_string(),
+            module: symbol.to_string(),
+            signature: format!("// Crate {} v{}", symbol, version),
+            description: info
+                .description
+                .unwrap_or_else(|| format!("Rust crate {}", symbol)),
+            examples: vec![format!(
+                "// Add to Cargo.toml: {} = \"{}\"",
+                symbol, version
+            )],
+            source_url: url.to_string(),
+            compiler_verified: false,
+        })
     }
 
     /// Compiler oracle — verify that the extracted definition compiles.
@@ -475,6 +498,10 @@ impl ResearchOracle {
         let temp_dir = std::env::temp_dir().join("grounding_coder_verify");
         let _ = std::fs::create_dir_all(&temp_dir);
         let test_file = temp_dir.join("verify_main.rs");
+        // Output goes beside the source, never to /dev/null: rustc stages
+        // temporaries next to the output, and read-only mounts (some
+        // sandboxes, device partitions) fail the whole check on /dev.
+        let out_file = temp_dir.join("verify_out");
 
         let content = format!("fn main() {{\n{}\n}}\n", examples.join("\n"));
         if std::fs::write(&test_file, &content).is_err() {
@@ -490,7 +517,7 @@ impl ResearchOracle {
                 "--crate-type",
                 "bin",
                 "-o",
-                "/dev/null",
+                out_file.to_str().unwrap(),
                 test_file.to_str().unwrap(),
             ])
             .output();

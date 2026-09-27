@@ -940,6 +940,11 @@ impl CodeWriter {
                     .trim_end_matches(';')
                     .trim()
                     .to_string();
+                // An empty import matches everything (`contains("")`) and
+                // would report a vacuous success while changing nothing.
+                if clean.is_empty() {
+                    return Vec::new();
+                }
                 if let Some(file) = self.find_source_file()
                     && let Ok(content) = fs::read_to_string(&file)
                 {

@@ -324,6 +324,12 @@ impl CorrectionPipeline {
 
         // ── Phase 4: Apply the fix ──
         log::debug!("Phase 4: Applying fix");
+        if std::env::var("GROUNDING_DEBUG_MIGRATE").is_ok() {
+            eprintln!(
+                "[fix] {:?} kind={:?} suggestion={:?}",
+                fix, error.kind, error.suggestion,
+            );
+        }
         let files_changed = writer.apply_fix(&fix);
 
         if files_changed.is_empty() {
@@ -462,7 +468,14 @@ impl CorrectionPipeline {
                 } else {
                     import.clone()
                 };
-                Fix::AddImport(i)
+                // An empty import is not a fix — it would match everything
+                // (`"".contains` is trivially true) and report vacuous
+                // success while changing nothing.
+                if i.trim().is_empty() {
+                    Fix::None
+                } else {
+                    Fix::AddImport(i)
+                }
             }
             super::recipes::FixAction::WrapConversion { method } => {
                 // Wrap a literal on the offending line with the suggested method,
@@ -486,13 +499,22 @@ impl CorrectionPipeline {
 }
 
 fn infer_import_from_error(error: &CompileError) -> String {
-    // Extract the symbol name from "cannot find value `Foo` in this scope"
+    // Extract a use path from "cannot find value `a::b::Foo` in scope".
+    // Bare identifiers (method names like `read_to_string`) are NEVER
+    // valid `use` paths — fabricating `use read_to_string;` matched the
+    // call site text and reported a vacuous success. Only `::` paths
+    // pass; everything else refuses.
     if let Some(start) = error.message.find("`")
         && let Some(end) = error.message[start + 1..].find("`")
     {
         let symbol = &error.message[start + 1..start + 1 + end];
-        // Try common module paths
-        return format!("use {};", symbol);
+        if symbol.contains("::")
+            && symbol
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':')
+        {
+            return format!("use {};", symbol);
+        }
     }
     String::new()
 }
@@ -502,7 +524,7 @@ fn infer_import_from_error(error: &CompileError) -> String {
 /// This is evidence, not inference: rustc named these exact bytes.
 /// Scanning goes through the shared byte-safe scanner — suggestion text
 /// with multibyte characters must never abort the process.
-fn suggested_import(error: &CompileError) -> Option<String> {
+pub(crate) fn suggested_import(error: &CompileError) -> Option<String> {
     let text = error.suggestion.as_deref()?;
     let found = crate::llm::scan_use_paths(text);
     // Verified-shape paths first; anything else still faces the
