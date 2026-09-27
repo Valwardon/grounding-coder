@@ -167,7 +167,20 @@ cargo test --all-features
   major.minor, else fall back to the pinned provisioned set.
 - 96 tests green, clippy `-D warnings` clean, fmt clean.
 
-## v0.9.0 — Receive / catalog / utilize (2026-09-27)
+## v0.9.1 — State machines + async tasks (2026-09-27)
+
+- **State-machine family** (`kind: "statemachine"`): states plus
+  `(event, from, to)` edges become `State`/`Event` enums and a machine
+  with `new` (first state initial), a reader, and a total `transition`
+  returning bool. Duplicate edges, unknown states, bad names, and
+  smuggled methods/cases all block.
+- **Async-task ops** (`due`/`mark`/`poll`) over exact clock fields
+  (`last: std::time::Instant`, `interval: std::time::Duration`, full
+  paths so bodies stay import-free). `poll` is a genuine `async fn`;
+  the executor remains honestly out of scope.
+- **Translator prompt** documents all kinds and ops, so prose can reach
+  the new families without hand-written intents.
+- 106 tests green (51 lib + 13 synthesize), clippy clean, fmt clean.
 
 - Unknown identifiers met during repair are extracted, researched
   (canonical sources, compiler-verified), cataloged per-project, and

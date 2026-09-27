@@ -142,6 +142,15 @@ Oracle verify (compiler / tests / parser per language)
   "component"` synthesizes prop structs with `render()` over layout
   slots (`{name}` becomes positional `{i}`, unknown slots/braces and
   non-Display props block). (`tests/synthesize.rs`)
+- **State-machine family** — `kind: "statemachine"` turns states plus
+  `(event, from, to)` edges into `State`/`Event` enums and a machine
+  struct with a total `transition()` (wildcard arm, so exhaustiveness
+  holds by construction). Duplicate edges, unknown states, smuggled
+  methods/cases all block.
+- **Async-task ops** — `due`/`mark`/`poll` over exact `last:
+  std::time::Instant` + `interval: std::time::Duration` fields (full
+  paths, no imports needed). `poll` is a real `async fn`; anything
+  else shaped refuses.
 - **Private GitHub delivery** — created repos are private; the APK
   finder sees into `target/dx/…` output trees (up to 512MB); release
   uploads get an 80-minute window for slow uplinks; the provisioner
@@ -160,17 +169,17 @@ Oracle verify (compiler / tests / parser per language)
 
 ## Proof, Not Promises
 
-96 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
+106 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
 `fmt --check` clean:
 
 | Suite | Tests | What it proves |
 |---|---|---|
-| lib (unit) | 44 | recipes, ranker, parsers, manifests, guards |
+| lib (unit) | 51 | recipes, ranker, catalog, parsers, manifests, guards, families |
 | `build` | 6 | C/Java/Rust real builds + artifacts run; unknown targets block; dx-output APK discovery |
 | `replicate` | 6 | byte-exact replication, hash-mismatch block, replace-exact rules, clean-room refusal + opt-out |
 | `editplan` | 4 | byte-range apply, stale rejection, invalid-range rejection, LLM-code rejection |
 | `end_to_end` | 2 | boring import path commits; unknown symbols block honestly |
-| `synthesize` | 10 | word_counts, Counter struct, parse_port, new-module wiring, cross-task rollback, unknown-op block, unsupported-shape block, config defaults, component slots, unknown-slot block |
+| `synthesize` | 13 | word_counts, Counter struct, parse_port, new-module wiring, cross-task rollback, unknown-op block, unsupported-shape block, config defaults, component slots, unknown-slot block, statemachine transition, statemachine refusal, asynctask scheduler |
 | `polyglot` | 5 | Python import, unknown-import block, registry-JS import, TOML-defined language, missing-toolchain block |
 | `webpage` | 4 | homepage build, script-escape safety, empty-title block, strict-intent page injection |
 | `repair` | 2 | missing-import repair + compile, unfixable block with untouched disk |
@@ -270,7 +279,11 @@ toolchain. `linfa` + `ndarray` are the only ML crates; both pure Rust.
 
 - `src/engine/synthesize.rs` — deterministic synthesizer: verified ingredient
   index, composition families (map-accumulation, struct ops, fallible parse,
-  web pages, config defaults, component render), contract-test renderer
+  web pages, config defaults, component render, state machines, async-task
+  ops), contract-test renderer
+- `src/engine/catalog.rs` — receive/catalog/utilize: unknown-ident
+  extraction, per-project researched-definitions log, symbol-table
+  indexing on bootstrap
 - `src/engine/lang.rs` — language backends: trait + Rust/Python/C/Kotlin/HTML
   impls + data-driven registry + `.grounding.toml` loading; `build()` oracles
   (gcc, cargo, kotlinc/javac, provisioned dx) with self-solving drivers
