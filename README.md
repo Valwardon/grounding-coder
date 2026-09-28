@@ -159,13 +159,14 @@ Oracle verify (compiler / tests / parser per language)
   a major.minor-matching stdlib, else falls back to the pinned
   provisioned set (a newer cached stdlib once broke metadata compat).
 - **Receive → catalog → utilize** — when repair meets an unknown
-  identifier, the bot extracts it, asks the ResearchOracle (canonical
-  sources, compiler-verified answers), banks the answer in the
-  per-project catalog (`.grounding/catalog.jsonl`, reloaded into the
-  symbol table on bootstrap), and applies it through the normal
-  `AddImport` plan — the compiler judges next round. Bounded
-  (3 research attempts per run, each symbol once); misses still leave
-  the catalog richer and block honestly. (`src/engine/catalog.rs`)
+  identifier, the bot walks from A to B, cheapest source first: the
+  compiler's suggestion, the arena, dependency sources (locked deps,
+  paths rebuilt from file layout), then the network oracle — banking
+  hits in the per-project catalog (`.grounding/catalog.jsonl`,
+  reloaded into the symbol table on bootstrap) and applying through
+  the normal `AddImport` plan. Bounded (3 network attempts per run,
+  each symbol once); every step lands in a research trail attached to
+  dead ends. (`src/engine/catalog.rs`, `src/engine/pathfind.rs`)
 
 ## Proof, Not Promises
 

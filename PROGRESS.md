@@ -185,6 +185,12 @@ cargo test --all-features
 - Unknown identifiers met during repair are extracted, researched
   (canonical sources, compiler-verified), cataloged per-project, and
   utilized through `AddImport` — compiler judges next round as always.
+- **Pathfinding** (`src/engine/pathfind.rs`): arena lookup plus locked
+  dependency sources with layout-rebuilt module paths (incl. enclosing
+  traits for method names). Proved live: unimported `greet()` from a
+  path crate resolved to `helper::greet` and compiled clean.
+- Dead ends carry a `RESEARCH_TRAIL` diagnostic (every source, hit,
+  and miss) instead of a bare block.
 - Fixed along the way: fabricated `use {bare_ident};` imports (matched
   call-site text, reported vacuous success), empty-import no-ops, nested
   crates.io JSON (versions read "unknown"), unverified flags on verified

@@ -4,6 +4,7 @@ pub mod catalog;
 pub mod corrector;
 pub mod error;
 pub mod lang;
+pub mod pathfind;
 pub mod plan;
 pub mod rank;
 pub mod recipes;
@@ -11,6 +12,7 @@ pub mod research;
 pub mod symbols;
 pub mod synthesize;
 pub mod tasks;
+pub mod understand;
 pub mod verifier;
 pub mod writer;
 
@@ -406,30 +408,32 @@ impl CodeBot {
 
     /// Receive → catalog → utilize, when repair meets the unknown.
     ///
-    /// Extracts an unknown identifier from the diagnostic; asks the
-    /// ResearchOracle (canonical sources only, compiler-verified
-    /// answers); banks the answer in the per-project catalog plus the
-    /// symbol table; and, when the answer names an importable path,
-    /// applies it through the normal `AddImport` plan so the compiler
-    /// judges next round. Bounded: 3 research attempts per run, each
-    /// symbol once. Returns applied files on success; misses still
-    /// leave the catalog richer and report None honestly.
+    /// From point A (an unknown identifier in a diagnostic) to point B
+    /// (an importable path), cheapest source first — each step
+    /// deterministic, capped, and compiler-judged next round:
+    /// 1. The compiler's own suggestion (exact bytes, no fetch).
+    /// 2. The arena (symbols already indexed from the project).
+    /// 3. Dependency sources (locked deps, paths rebuilt from layout).
+    /// 4. The network oracle (canonical sources, verified answers),
+    ///    banked into the per-project catalog + symbol table.
+    ///
+    /// Bounded: 3 network attempts per run, each symbol once. Every
+    /// step appends to `trail`, which rides along to the terminal
+    /// diagnostic so a dead end still reports everything tried.
+    /// Returns applied files on success.
     async fn research_recovery(
         &mut self,
         error: &CompileError,
         researched: &mut std::collections::HashSet<String>,
         tries: &mut u32,
+        trail: &mut Vec<String>,
     ) -> Option<Vec<String>> {
-        if *tries >= 3 {
-            return None;
-        }
-        // The compiler's own suggestion comes first: it names exact
-        // bytes, costs no fetch, and previously died unheard inside
-        // synthesize_fix for non-import error kinds.
+        // Step 1: compiler suggestion — exact bytes, no fetch.
         if let Some(path) = crate::engine::corrector::suggested_import(error) {
             let files = self
                 .writer
-                .apply_fix(&crate::engine::corrector::Fix::AddImport(path));
+                .apply_fix(&crate::engine::corrector::Fix::AddImport(path.clone()));
+            trail.push(format!("suggestion:{} -> {} file(s)", path, files.len()));
             if !files.is_empty() {
                 return Some(files);
             }
@@ -445,7 +449,35 @@ impl CodeBot {
                 self.symbol_table.is_known(&sym)
             );
         }
-        if self.symbol_table.is_known(&sym) || !researched.insert(sym.clone()) {
+        if self.symbol_table.is_known(&sym) {
+            trail.push(format!("{}: already known, no fetch", sym));
+            return None;
+        }
+        // Steps 2–3: local pathfinding (arena, then dependency sources).
+        // No budget consumed: these read the reachable tree, not the net.
+        let mut local: Vec<crate::engine::pathfind::PathHit> =
+            crate::engine::pathfind::find_in_arena(&self.arena.read(), &sym);
+        if local.is_empty() {
+            local = crate::engine::pathfind::find_in_deps(&self.project_dir, &sym);
+        }
+        for hit in local {
+            let files = self
+                .writer
+                .apply_verified_import(&hit.import_path, &hit.evidence);
+            trail.push(format!(
+                "pathfind:{} -> {} file(s)",
+                hit.import_path,
+                files.len()
+            ));
+            if std::env::var("GROUNDING_DEBUG_MIGRATE").is_ok() {
+                eprintln!("[recover] pathfind {} ({})", hit.import_path, hit.evidence);
+            }
+            if !files.is_empty() {
+                return Some(files);
+            }
+        }
+        // Step 4: network oracle, bounded per run and per symbol.
+        if *tries >= 3 || !researched.insert(sym.clone()) {
             return None;
         }
         let lang = match error.file.rsplit('.').next().unwrap_or("") {
@@ -469,6 +501,10 @@ impl CodeBot {
                     None => "miss".to_string(),
                 }
             );
+        }
+        match &found {
+            Some(d) => trail.push(format!("research:{} <- {}", sym, d.source_url)),
+            None => trail.push(format!("research:{} -> miss", sym)),
         }
         let found = found?;
         crate::engine::catalog::save(&self.project_dir, std::slice::from_ref(&found));
@@ -499,7 +535,8 @@ impl CodeBot {
         })?;
         let files = self
             .writer
-            .apply_fix(&crate::engine::corrector::Fix::AddImport(candidate));
+            .apply_fix(&crate::engine::corrector::Fix::AddImport(candidate.clone()));
+        trail.push(format!("catalog:{} -> {} file(s)", candidate, files.len()));
         if files.is_empty() {
             return None;
         }
@@ -1194,6 +1231,10 @@ impl CodeBot {
             let mut researched: std::collections::HashSet<String> =
                 std::collections::HashSet::new();
             let mut research_tries = 0u32;
+            // Research trail: every pathfinding step attempted across
+            // rounds. A dead end reports all of it, not just the last
+            // error — the trail IS the work product of failing honestly.
+            let mut trail: Vec<String> = Vec::new();
             while let Some(error) = verdict.errors.first().cloned() {
                 if std::env::var("GROUNDING_DEBUG_MIGRATE").is_ok() {
                     eprintln!(
@@ -1239,7 +1280,7 @@ impl CodeBot {
                     recipes_learned += correction.new_recipes;
                     changes.extend(correction.files_changed);
                 } else if let Some(files) = self
-                    .research_recovery(&error, &mut researched, &mut research_tries)
+                    .research_recovery(&error, &mut researched, &mut research_tries, &mut trail)
                     .await
                 {
                     // Receive → catalog → utilize: an unknown identifier
@@ -1248,19 +1289,34 @@ impl CodeBot {
                     errors_fixed += 1;
                     changes.extend(files);
                 } else {
-                    // No recipe found and can't synthesize fix — the bot
+                    // No recipe, no path, no research hit — the bot
                     // KNOWS it doesn't know. Roll back the whole run so
-                    // no unproven bytes remain, then report honestly
-                    // instead of guessing.
+                    // no unproven bytes remain, and report the error plus
+                    // the full research trail: every source consulted and
+                    // every candidate tried. A dead end with a map is not
+                    // giving up blind.
                     let _ = self.writer.rollback(&global);
                     self.emit(ProgressEvent::Stage {
                         id: task.id,
                         stage: "repair-blocked",
                         detail: error.code.clone(),
                     });
+                    let mut diagnostics = vec![error.clone()];
+                    if !trail.is_empty() {
+                        diagnostics.push(CompileError {
+                            code: "RESEARCH_TRAIL".to_string(),
+                            message: trail.join("; "),
+                            file: String::new(),
+                            line: 0,
+                            col: 0,
+                            suggestion: None,
+                            source_line: None,
+                            kind: crate::engine::error::ErrorKind::Other,
+                        });
+                    }
                     return Ok(AgentOutcome::Blocked {
                         reason: BlockReason::NoSafeFix,
-                        diagnostics: vec![error.clone()],
+                        diagnostics,
                     });
                 }
 

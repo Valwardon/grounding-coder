@@ -945,50 +945,10 @@ impl CodeWriter {
                 if clean.is_empty() {
                     return Vec::new();
                 }
-                if let Some(file) = self.find_source_file()
-                    && let Ok(content) = fs::read_to_string(&file)
-                {
-                    // Build a minimal import task and route through plan/apply.
-                    let task = SubTask {
-                        id: 0,
-                        kind: super::tasks::TaskKind::AddImport,
-                        description: format!("Fix import {}", clean),
-                        target_symbols: vec![
-                            file.strip_prefix(&self.project_dir)
-                                .unwrap_or(&file)
-                                .to_string_lossy()
-                                .to_string(),
-                        ],
-                        required_symbols: vec![],
-                        priority: 0.9,
-                        source: "correction".to_string(),
-                        payload: serde_json::json!({"import": clean}),
-                        deadline: 0,
-                    };
-                    // Use a dummy symbol table that knows std + current content.
-                    let st = SymbolTable::new();
-                    if let Ok((edit, _)) = self.plan_add_import(&file, &content, &task, &st) {
-                        // Already present: desired state holds (idempotent
-                        // success — repeat errors must not read as failure).
-                        if edit.replacement.is_empty() {
-                            return vec![file.to_string_lossy().to_string()];
-                        }
-                        let plan = EditPlan {
-                            task_id: 0,
-                            edits: vec![edit],
-                            evidence: vec![Evidence::CompilerSuggestion {
-                                code: "E0432/E0433".to_string(),
-                                file: file.to_string_lossy().to_string(),
-                                line: 0,
-                                col: 0,
-                            }],
-                        };
-                        if let Ok(ch) = self.apply_plan(&plan) {
-                            return ch;
-                        }
-                    }
-                }
-                Vec::new()
+                // Dummy table: std inventory only. Pathfound imports use
+                // apply_verified_import with a seeded table instead.
+                let st = SymbolTable::new();
+                self.apply_import_with(&clean, &st)
             }
             Fix::Replace { .. } | Fix::InsertAfter { .. } | Fix::ApplySuggestion { .. } => {
                 // Heuristic code replacement is disabled — must come from
@@ -1011,6 +971,87 @@ impl CodeWriter {
             }
             Fix::None => Vec::new(),
         }
+    }
+
+    /// Apply an import pre-verified by pathfinding (`file:line`
+    /// evidence of the real definition). Seeds a one-entry symbol table
+    /// so the planner's evidence gate passes on proof, then routes the
+    /// standard import plan. The compiler judges next round as always.
+    pub fn apply_verified_import(&self, import_path: &str, evidence: &str) -> Vec<String> {
+        let clean = import_path
+            .trim()
+            .trim_start_matches("use ")
+            .trim_end_matches(';')
+            .trim()
+            .to_string();
+        if clean.is_empty() {
+            return Vec::new();
+        }
+        let module = clean
+            .rsplit_once("::")
+            .map(|(m, _)| m.to_string())
+            .unwrap_or_default();
+        let mut st = SymbolTable::new();
+        st.index(
+            &clean,
+            super::symbols::CodeDef {
+                qname: clean.clone(),
+                language: "rust".to_string(),
+                kind: "imported".to_string(),
+                module,
+                signature: String::new(),
+                description: format!("pathfound at {}", evidence),
+                examples: Vec::new(),
+            },
+        );
+        self.apply_import_with(&clean, &st)
+    }
+
+    /// Shared import-plan body: minimal task, evidence-gated plan,
+    /// stale-checked apply. Empty vec on every failure path.
+    fn apply_import_with(&self, clean: &str, table: &SymbolTable) -> Vec<String> {
+        if let Some(file) = self.find_source_file()
+            && let Ok(content) = fs::read_to_string(&file)
+        {
+            // Build a minimal import task and route through plan/apply.
+            let task = SubTask {
+                id: 0,
+                kind: super::tasks::TaskKind::AddImport,
+                description: format!("Fix import {}", clean),
+                target_symbols: vec![
+                    file.strip_prefix(&self.project_dir)
+                        .unwrap_or(&file)
+                        .to_string_lossy()
+                        .to_string(),
+                ],
+                required_symbols: vec![],
+                priority: 0.9,
+                source: "correction".to_string(),
+                payload: serde_json::json!({"import": clean}),
+                deadline: 0,
+            };
+            if let Ok((edit, _)) = self.plan_add_import(&file, &content, &task, table) {
+                // Already present: desired state holds (idempotent
+                // success — repeat errors must not read as failure).
+                if edit.replacement.is_empty() {
+                    return vec![file.to_string_lossy().to_string()];
+                }
+                let plan = EditPlan {
+                    task_id: 0,
+                    edits: vec![edit],
+                    evidence: vec![Evidence::CompilerSuggestion {
+                        code: "E0432/E0433".to_string(),
+                        file: file.to_string_lossy().to_string(),
+                        line: 0,
+                        col: 0,
+                    }],
+                };
+                if let Ok(ch) = self.apply_plan(&plan) {
+                    return ch;
+                }
+            }
+        }
+        Vec::new()
     }
 
     // --- Private planning methods ---

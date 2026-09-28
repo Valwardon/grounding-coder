@@ -1,6 +1,7 @@
 //! Drive the engine as a library:
 //! `cargo run --example build_page -- <project-dir> <intent-json> [budget]`
 //! `cargo run --example build_page -- <project-dir> --prose "<prompt>" [budget]`
+//! `cargo run --example build_page -- <project-dir> --understand "<prompt>"`
 //! prints the outcome; the project dir holds whatever the engine proved
 //! and committed.
 //!
@@ -8,25 +9,34 @@
 //! into a structured intent (prose in, metadata out — never code), and
 //! the deterministic engine takes over from there. Needs a key via
 //! `OPENROUTER_API_KEY` or the config file; without one it says so and
-//! stops instead of guessing.
+//! stops instead of guessing. Successful prose runs are recorded into
+//! the project's translation history (verified outcomes only).
+//!
+//! `--understand` runs no model and touches nothing: the deterministic
+//! lexical parser prints the parsed intent, its confidence receipt, and
+//! any precedent — comprehension you can audit line by line.
 use grounding_coder::engine::CodeBot;
 
-const USAGE: &str =
-    "usage: build_page <project-dir> (<intent-json> | --prose \"<prompt>\") [budget]";
+const USAGE: &str = "usage: build_page <project-dir> (<intent-json> | --prose \"<prompt>\" | --understand \"<prompt>\") [budget]";
 
 #[tokio::main]
 async fn main() {
     let mut args = std::env::args().skip(1);
     let project = args.next().expect(USAGE);
     let second = args.next().expect(USAGE);
-    let (intent_json, budget) = if second == "--prose" {
+    if second == "--understand" {
+        let prompt = args.next().expect(USAGE);
+        show_understanding(&project, &prompt);
+        return;
+    }
+    let (intent_json, budget, prose) = if second == "--prose" {
         let prompt = args.next().expect(USAGE);
         let budget: u32 = args.next().and_then(|b| b.parse().ok()).unwrap_or(5);
-        (translate_prose(&prompt).await, budget)
+        (translate_prose(&prompt).await, budget, Some(prompt))
     } else {
         let budget: u32 = args.next().and_then(|b| b.parse().ok()).unwrap_or(5);
         let intent_json = std::fs::read_to_string(&second).expect("read intent");
-        (intent_json, budget)
+        (intent_json, budget, None)
     };
     let mut bot = CodeBot::new(&project, budget);
     // GITHUB_TOKEN env wires the publish actor when the intent asks for it.
@@ -40,9 +50,48 @@ async fn main() {
         bot.set_clean_room(false);
     }
     match bot.run_task(&intent_json).await {
-        Ok(outcome) => println!("{}", outcome),
+        Ok(outcome) => {
+            println!("{}", outcome);
+            // History learns only from verified outcomes: record the
+            // prose→intent pair when the engine proved something.
+            if let Some(prompt) = prose {
+                let rendered = format!("{}", outcome);
+                if (rendered.contains("SUCCESS") || rendered.contains("PARTIAL"))
+                    && let Ok(intent) = serde_json::from_str::<
+                        grounding_coder::engine::tasks::StructuredIntent,
+                    >(&intent_json)
+                {
+                    grounding_coder::engine::understand::save_history(
+                        std::path::Path::new(&project),
+                        &prompt,
+                        &intent,
+                    );
+                }
+            }
+        }
         Err(e) => {
             eprintln!("ENGINE FAILED: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Deterministic comprehension without any model: parse the prose,
+/// print the intent, the confidence receipt, and any precedent.
+/// Read-only — never touches the project beyond reading history.
+fn show_understanding(project: &str, prompt: &str) {
+    use grounding_coder::engine::understand;
+    let understood = understand::understand(prompt, Some(std::path::Path::new(project)));
+    println!("frame: {}", understood.frame);
+    println!("confidence: {:.2}", understood.confidence);
+    match &understood.similar {
+        Some(hit) => println!("precedent: {:.2} {}", hit.score, hit.goal),
+        None => println!("precedent: none"),
+    }
+    match serde_json::to_string_pretty(&understood.intent) {
+        Ok(json) => println!("{}", json),
+        Err(e) => {
+            eprintln!("UNDERSTAND FAILED to serialize: {}", e);
             std::process::exit(1);
         }
     }
