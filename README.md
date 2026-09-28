@@ -1,17 +1,19 @@
 # grounding-coder
 
 A **deterministic, non-guessing coding agent — in any language it can check**.
-The LLM is only an unverified natural-language→intent translator. All actual
-coding, verification, and correction is driven by a deterministic engine:
-no guessing, no hallucination.
+There is no language model anywhere in the system: prose is understood by a
+built-in lexical parser, and all coding, verification, and correction is
+driven by a deterministic engine. No guessing, no hallucination, no API keys
+for intelligence — none needed.
 
 ## Core Principle
 
 > The compiler is the oracle. Tests are the truth. The codebase is the answer key.
 
-The LLM generates hypotheses (intent). The deterministic engine verifies every
-hypothesis against hard oracles (compilers, interpreters, test runners,
-structure checkers) and corrects failures using a recipe log — never guessing.
+The deterministic parser turns prose into intent (with a confidence receipt).
+The deterministic engine verifies every hypothesis against hard oracles
+(compilers, interpreters, test runners, structure checkers) and corrects
+failures using a recipe log — never guessing.
 Anything it cannot prove, it refuses honestly (`BLOCKED`) with the file left
 byte-identical.
 
@@ -21,9 +23,11 @@ byte-identical.
 Human (messy language)
   │
   ▼
-LLM via OpenRouter ──── UNVERIFIED ────► structured intent JSON
+Lexical parser (verbs, kinds, slots) ──► structured intent JSON
   │                                        (metadata + literal values only,
-  │                                         NEVER code)
+  │                                         NEVER code; confidence receipt
+  │                                         attached, below-threshold
+  │                                         parses refuse)
   ▼
 Intent validation + normalization
   │
@@ -57,7 +61,8 @@ Oracle verify (compiler / tests / parser per language)
 
 > The agent may only modify bytes identified by a structured edit whose
 > target and replacement are justified by project state, compiler
-> diagnostics, or a verified recipe. LLM-provided code is rejected on sight.
+> diagnostics, or a verified recipe. There is no model to provide code;
+> the concept does not exist in this codebase.
 
 ## What It Can Do (proven by tests)
 
@@ -189,12 +194,12 @@ Oracle verify (compiler / tests / parser per language)
 
 ## Proof, Not Promises
 
-120 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
+119 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
 `fmt --check` clean:
 
 | Suite | Tests | What it proves |
 |---|---|---|
-| lib (unit) | 65 | recipes, ranker, catalog, pathfind, parsers, manifests, guards, families, understander |
+| lib (unit) | 64 | recipes, ranker, catalog, pathfind, parsers, manifests, guards, families, understander |
 | `build` | 6 | C/Java/Rust real builds + artifacts run; unknown targets block; dx-output APK discovery |
 | `replicate` | 6 | byte-exact replication, hash-mismatch block, replace-exact rules, clean-room refusal + opt-out |
 | `editplan` | 4 | byte-range apply, stale rejection, invalid-range rejection, LLM-code rejection |
@@ -281,15 +286,33 @@ cargo test --all-features
 
 ## Learning (ML proposes, compiler disposes)
 
-Three slots where machine learning is allowed — none of them can forge
-evidence:
+Two slots where machine learning is allowed — neither can forge evidence:
 
-1. **Translator** (external model): prose → intent metadata. Never code.
-2. **Ranking** (`linfa` decision trees, pure Rust, trains in
+1. **Ranking** (`linfa` decision trees, pure Rust, trains in
    milliseconds): which error group and which recipe to try first, learned
    from the project's own judged history. Order only.
-3. **Retrieval** (planned): precedent search over verified outputs.
-   Lexical/statistical first (`vtext`-shaped), embeddings (`tract`) later.
+2. **Retrieval**: precedent search over verified outputs — lexical
+   history matching today (`translations.jsonl`), statistical
+   (`vtext`-shaped) next, embeddings (`tract`) later.
+
+The old third slot — an external model translating prose — is gone,
+replaced by the deterministic understander below. Refused: genetic
+search over code (guessing with extra steps), RL policies
+(wrong data regime), anything with native dependencies beyond the existing
+toolchain. `linfa` + `ndarray` are the only ML crates; both pure Rust.
+
+## Understanding (no model)
+
+Prose reaches the engine through `src/engine/understand.rs` — a
+hand-built verb/kind lexicon, typo tolerance on verbs only (names pass
+through verbatim), grammar frames (build/create/fix/publish/verify),
+and slot filling from quotes, titled names, and adjacent nouns.
+Every parse carries a confidence receipt (quoted slots solid, inferred
+slots soft); below 0.75 the system states what's missing instead of
+acting. Verified translations accumulate per project and serve as
+lexical precedent. `build_page --understand "<prompt>"` prints the
+parse without touching anything; `--prose` runs the engine on it when
+confidence clears, and refuses with the receipt when it doesn't.
 
 Refused: genetic search over code (guessing with extra steps), RL policies
 (wrong data regime), anything with native dependencies beyond the existing

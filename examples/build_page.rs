@@ -5,12 +5,10 @@
 //! prints the outcome; the project dir holds whatever the engine proved
 //! and committed.
 //!
-//! `--prose` wires the translator: an external model turns the prompt
-//! into a structured intent (prose in, metadata out — never code), and
-//! the deterministic engine takes over from there. Needs a key via
-//! `OPENROUTER_API_KEY` or the config file; without one it says so and
-//! stops instead of guessing. Successful prose runs are recorded into
-//! the project's translation history (verified outcomes only).
+//! `--prose` resolves the prompt through the deterministic understander
+//! (lexicon + frames, no model) and runs the engine on the result when
+//! confidence clears the threshold. Successful prose runs are recorded
+//! into the project's translation history (verified outcomes only).
 //!
 //! `--understand` runs no model and touches nothing: the deterministic
 //! lexical parser prints the parsed intent, its confidence receipt, and
@@ -97,18 +95,18 @@ fn show_understanding(project: &str, prompt: &str) {
     }
 }
 
-/// Resolve prose into an intent, model-free when possible.
-/// The deterministic parser runs first: confidence at or above
-/// [`LOCAL_CONFIDENCE`] with a known frame executes with no model
-/// involved at all. Anything vaguer falls back to the external
-/// translator (prose in, metadata out — never code). Routing is
-/// printed to stderr so the outcome on stdout stays machine-readable.
+/// Resolve prose into an intent with no model anywhere in the path.
+/// Confidence at or above [`LOCAL_CONFIDENCE`] with a known frame
+/// executes; anything vaguer refuses with its receipt (run
+/// `--understand` to see exactly which slots are missing) instead of
+/// running blind. Routing is printed to stderr so the outcome on
+/// stdout stays machine-readable.
 async fn resolve_prose(project: &str, prompt: &str) -> String {
     use grounding_coder::engine::understand;
     let understood = understand::understand(prompt, Some(std::path::Path::new(project)));
     if understood.confidence >= LOCAL_CONFIDENCE && understood.frame != "unknown" {
         eprintln!(
-            "UNDERSTOOD locally (frame={}, confidence={:.2}) — no model involved",
+            "UNDERSTOOD (frame={}, confidence={:.2})",
             understood.frame, understood.confidence
         );
         return serde_json::to_string(&understood.intent).unwrap_or_else(|e| {
@@ -117,45 +115,12 @@ async fn resolve_prose(project: &str, prompt: &str) -> String {
         });
     }
     eprintln!(
-        "UNDERSTOOD confidence {:.2} — falling back to model translator",
-        understood.confidence
+        "UNDERSTOOD confidence {:.2} frame={} — too thin to act on; missing: {:?}. No model fallback exists by design.",
+        understood.confidence, understood.frame, understood.intent.unknown_requirements,
     );
-    translate_prose(prompt).await
+    std::process::exit(2);
 }
 
-/// Minimum deterministic confidence to skip the model. Below this the
-/// parse is too thin to act on blind (missing verb, kind, or name),
-/// so a model takes the attempt — or fails honestly without a key.
+/// Minimum deterministic confidence to act. Below this the parse is
+/// too thin to act on blind (missing verb, kind, or name).
 const LOCAL_CONFIDENCE: f64 = 0.75;
-
-/// Translate prose into an intent through the external model, then
-/// serialize for the engine. The model output is validated and
-/// normalized by the translator (metadata only — planner rejects any
-/// `code` downstream anyway). No key means no translation, stated
-/// plainly.
-async fn translate_prose(prompt: &str) -> String {
-    use grounding_coder::llm::{LlmClient, has_api_key, load_config_default};
-    let mut config = load_config_default();
-    if let Ok(key) = std::env::var("OPENROUTER_API_KEY")
-        && !key.trim().is_empty()
-    {
-        config.openrouter_key = Some(key);
-    }
-    if !has_api_key(&config) {
-        eprintln!(
-            "TRANSLATOR UNAVAILABLE: set OPENROUTER_API_KEY or save a key in Settings; prose cannot become an intent without it."
-        );
-        std::process::exit(2);
-    }
-    let client = LlmClient::new(config);
-    match client.translate(prompt).await {
-        Ok(intent) => serde_json::to_string(&intent).unwrap_or_else(|e| {
-            eprintln!("TRANSLATOR FAILED to serialize intent: {}", e);
-            std::process::exit(1);
-        }),
-        Err(e) => {
-            eprintln!("TRANSLATOR FAILED: {}", e);
-            std::process::exit(1);
-        }
-    }
-}

@@ -18,7 +18,7 @@ pub fn App() -> Element {
     let mut tab = use_signal(|| Screen::Chat);
     // Shared app state lives here so tab switches never destroy it:
     // unmounting Chat used to wipe history + input + working flag.
-    let settings = use_signal(crate::llm::load_config_default);
+    let settings = use_signal(crate::config::load_config_default);
     let mut last_changes = use_signal(Vec::<String>::new);
     let mut refresh = use_signal(|| 0u64);
     let history = use_signal(Vec::<(String, bool)>::new);

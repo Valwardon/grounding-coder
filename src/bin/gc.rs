@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use grounding_coder::{CodeBot, llm};
+use grounding_coder::{CodeBot, config};
 
 #[derive(Parser)]
 #[command(name = "gc", about = "Grounding Coder — deterministic coding agent")]
@@ -46,32 +46,31 @@ fn main() {
                 project,
                 budget,
             } => {
-                let config = llm::load_config_default();
-                if config.openrouter_key.is_none() {
-                    eprintln!("OpenRouter API key not set. Use the UI to configure it.");
-                    std::process::exit(1);
+                // No model anywhere in this path: the deterministic
+                // understander parses, the engine proves. Below-threshold
+                // parses refuse with their receipt.
+                use grounding_coder::engine::understand;
+                let understood =
+                    understand::understand(&prompt, Some(std::path::Path::new(&project)));
+                if understood.confidence < 0.75 || understood.frame == "unknown" {
+                    eprintln!(
+                        "UNDERSTOOD confidence {:.2} frame={} — too thin: {:?}",
+                        understood.confidence,
+                        understood.frame,
+                        understood.intent.unknown_requirements,
+                    );
+                    std::process::exit(2);
                 }
-                let github_key = config.github_key.clone();
-                let llm_client = llm::LlmClient::new(config);
-                match llm_client.translate(&prompt).await {
-                    Ok(intent) => {
-                        let intent_json =
-                            serde_json::to_string(&intent).expect("intent should serialize");
-                        let mut bot = CodeBot::new(&project, budget);
-                        bot.set_progress_listener(std::sync::Arc::new(|ev| {
-                            eprintln!("[progress] {}", ev)
-                        }));
-                        bot.set_github_token(github_key);
-                        match bot.run_task(&intent_json).await {
-                            Ok(result) => println!("{}", result),
-                            Err(e) => {
-                                eprintln!("FAILED: {}", e);
-                                std::process::exit(1);
-                            }
-                        }
-                    }
+                let config = config::load_config_default();
+                let intent_json =
+                    serde_json::to_string(&understood.intent).expect("intent should serialize");
+                let mut bot = CodeBot::new(&project, budget);
+                bot.set_progress_listener(std::sync::Arc::new(|ev| eprintln!("[progress] {}", ev)));
+                bot.set_github_token(config.github_key.clone());
+                match bot.run_task(&intent_json).await {
+                    Ok(result) => println!("{}", result),
                     Err(e) => {
-                        eprintln!("LLM translation error: {}", e);
+                        eprintln!("FAILED: {}", e);
                         std::process::exit(1);
                     }
                 }

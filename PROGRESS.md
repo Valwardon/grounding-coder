@@ -192,6 +192,20 @@ cargo test --all-features
   completion, import targets.
 - 120 tests green (65 lib), clippy clean, fmt clean.
 
+## v0.10.0 — LLM removed (2026-09-28)
+
+- Deleted `src/llm.rs` outright: translator client, prompt,
+  normalization, model config. No model dependency remains in any
+  feature, default or otherwise.
+- New `src/config.rs`: device-local settings only (project path,
+  retries, GitHub token). Old config files still load.
+- `scan_use_paths` moved into the engine (it was always pure
+  byte-scanning, never intelligence).
+- `gc chat`, the Chat tab, and `--prose` all run the deterministic
+  understander; below-threshold parses become chat text or exit codes,
+  never model calls. Settings screen lost its key/model fields.
+- 119 tests green, clippy clean on default AND `ui` features, fmt clean.
+
 ## v0.9.1 — State machines + async tasks (2026-09-27)
 
 - **State-machine family** (`kind: "statemachine"`): states plus

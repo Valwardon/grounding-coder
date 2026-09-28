@@ -519,6 +519,56 @@ fn infer_import_from_error(error: &CompileError) -> String {
     String::new()
 }
 
+/// Scan for `use a::b` paths and bare `std::...` tokens.
+/// Byte-safe by construction: all matching is done on bytes (which never
+/// panic), and string slices are built only over ASCII runs, whose every
+/// index is a char boundary. Untrusted text must never abort this.
+fn scan_use_paths(t: &str) -> Vec<String> {
+    fn push_token(bytes: &[u8], start: usize, end: usize, out: &mut Vec<String>) {
+        if end <= start {
+            return;
+        }
+        let p = String::from_utf8_lossy(&bytes[start..end])
+            .trim_end_matches(':')
+            .to_string();
+        if p.contains("::") && !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    let mut out = Vec::new();
+    let bytes = t.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Match `use <path>` where path looks like a::b::C.
+        if bytes[i..].starts_with(b"use ") || bytes[i..].starts_with(b"use\t") {
+            let mut j = i + 4;
+            while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
+                j += 1;
+            }
+            let start = j;
+            while j < bytes.len()
+                && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_' || bytes[j] == b':')
+            {
+                j += 1;
+            }
+            push_token(bytes, start, j, &mut out);
+            i = j;
+        } else if bytes[i..].starts_with(b"std::") {
+            let mut j = i;
+            while j < bytes.len()
+                && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_' || bytes[j] == b':')
+            {
+                j += 1;
+            }
+            push_token(bytes, i, j, &mut out);
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
 /// Extract a `use` path from the compiler's own suggestion text.
 /// Returns the first plausible path, preferring `std::` ones.
 /// This is evidence, not inference: rustc named these exact bytes.
@@ -526,7 +576,7 @@ fn infer_import_from_error(error: &CompileError) -> String {
 /// with multibyte characters must never abort the process.
 pub(crate) fn suggested_import(error: &CompileError) -> Option<String> {
     let text = error.suggestion.as_deref()?;
-    let found = crate::llm::scan_use_paths(text);
+    let found = scan_use_paths(text);
     // Verified-shape paths first; anything else still faces the
     // planner's own std/symbol check downstream.
     found
@@ -581,4 +631,19 @@ fn wrap_with_method(line: &str, method: &str) -> Option<(String, String)> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Multibyte text must never abort path scanning.
+    /// This class of bug killed the app on-device with no message.
+    #[test]
+    fn use_path_scanner_survives_multibyte() {
+        let t = "Add HashMap — 日本語テスト 🎉 use std::collections::HashMap; done —";
+        let paths = scan_use_paths(t);
+        assert!(paths.contains(&"std::collections::HashMap".to_string()));
+        assert!(scan_use_paths("plain words here").is_empty());
+    }
 }

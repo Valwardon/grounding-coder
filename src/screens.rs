@@ -1,5 +1,5 @@
+use crate::config::AppConfig;
 use crate::engine::{AgentOutcome, CodeBot};
-use crate::llm::ApiConfig;
 use dioxus::prelude::*;
 
 // ---------- Chat ----------
@@ -11,7 +11,7 @@ use dioxus::prelude::*;
 /// wipe the conversation.
 #[component]
 pub fn Chat(
-    settings: Signal<ApiConfig>,
+    settings: Signal<AppConfig>,
     mut history: Signal<Vec<(String, bool)>>,
     mut input: Signal<String>,
     mut working: Signal<bool>,
@@ -22,7 +22,7 @@ pub fn Chat(
         div { class: "screen",
             div { class: "screen-header",
                 h2 { "Chat" }
-                span { class: "subtitle", "LLM translates → engine proves → oracle verifies" }
+                span { class: "subtitle", "Understand → engine proves → oracle verifies" }
                 span { class: "config-line", "{config_summary(&settings())}" }
             }
             div { class: "chat-container",
@@ -43,7 +43,7 @@ pub fn Chat(
                     if let Some(line) = progress().last() {
                         div { class: "chat-bubble bot progress", "⏳ {line}" }
                     } else {
-                        div { class: "chat-bubble bot", "Working… (contacting translator)" }
+                        div { class: "chat-bubble bot", "Working… (parsing intent)" }
                     }
                 }
             }
@@ -158,18 +158,17 @@ fn take_panic_location() -> Option<String> {
     LAST_PANIC.lock().ok().and_then(|mut s| s.take())
 }
 
-/// One-line proof of what the engine is actually using: key presence
-/// (never the key), model, project, budget. Ends "is it reading config"
-/// debates with facts on screen.
-pub fn config_summary(cfg: &ApiConfig) -> String {
+/// One-line proof of what the engine is actually using: publish key
+/// presence (never the key), project, budget. Ends "is it reading
+/// config" debates with facts on screen. No model exists to report.
+pub fn config_summary(cfg: &AppConfig) -> String {
     format!(
-        "key:{} model:{} project:{} budget:{}",
-        if cfg.openrouter_key.is_some() {
+        "github-key:{} project:{} budget:{} parser:builtin",
+        if cfg.github_key.is_some() {
             "set"
         } else {
             "MISSING"
         },
-        cfg.model,
         crate::resolve_project_dir(&cfg.project_path),
         cfg.max_retries
     )
@@ -181,15 +180,9 @@ pub fn config_summary(cfg: &ApiConfig) -> String {
 /// text instead of death.
 async fn run_task_deterministic(
     prompt: &str,
-    cfg: &ApiConfig,
+    cfg: &AppConfig,
     progress: Option<crate::engine::ProgressCallback>,
 ) -> (String, Vec<String>) {
-    if cfg.openrouter_key.is_none() {
-        return (
-            "ERROR: OpenRouter API key not set. Open Settings.".to_string(),
-            Vec::new(),
-        );
-    }
     // Bare "." means the app-private dir handed over via JNI at boot.
     let resolved = crate::resolve_project_dir(&cfg.project_path);
     let project = std::path::Path::new(&resolved);
@@ -234,36 +227,43 @@ async fn run_task_deterministic(
 
 async fn run_task_inner(
     prompt: &str,
-    cfg: &ApiConfig,
+    cfg: &AppConfig,
     progress: Option<crate::engine::ProgressCallback>,
 ) -> (String, Vec<String>) {
-    let llm_client = crate::llm::LlmClient::new(cfg.clone());
-    match llm_client.translate(prompt).await {
-        Ok(intent) => match serde_json::to_string(&intent) {
-            Ok(intent_json) => {
-                let mut bot = CodeBot::new(
-                    &crate::resolve_project_dir(&cfg.project_path),
-                    cfg.max_retries,
-                );
-                if let Some(cb) = progress {
-                    bot.set_progress_listener(cb);
-                }
-                bot.set_github_token(cfg.github_key.clone());
-                match bot.run_task(&intent_json).await {
-                    Ok(outcome) => {
-                        let changed = match &outcome {
-                            AgentOutcome::Success(r) => r.changes.clone(),
-                            AgentOutcome::Partial { result: r, .. } => r.changes.clone(),
-                            _ => Vec::new(),
-                        };
-                        (format!("{}", outcome), changed)
-                    }
-                    Err(e) => (format!("ENGINE: {}", e), Vec::new()),
-                }
+    // No model anywhere: the deterministic understander parses, and
+    // below-threshold parses become chat text naming what's missing.
+    let project_dir = crate::resolve_project_dir(&cfg.project_path);
+    let understood =
+        crate::engine::understand::understand(prompt, Some(std::path::Path::new(&project_dir)));
+    if understood.confidence < 0.75 || understood.frame == "unknown" {
+        return (
+            format!(
+                "UNDERSTOOD confidence {:.2} frame={} — too thin to act on: {:?}",
+                understood.confidence, understood.frame, understood.intent.unknown_requirements,
+            ),
+            Vec::new(),
+        );
+    }
+    match serde_json::to_string(&understood.intent) {
+        Ok(intent_json) => {
+            let mut bot = CodeBot::new(&project_dir, cfg.max_retries);
+            if let Some(cb) = progress {
+                bot.set_progress_listener(cb);
             }
-            Err(e) => (format!("SERIALIZE: {}", e), Vec::new()),
-        },
-        Err(e) => (format!("LLM: {}", e), Vec::new()),
+            bot.set_github_token(cfg.github_key.clone());
+            match bot.run_task(&intent_json).await {
+                Ok(outcome) => {
+                    let changed = match &outcome {
+                        AgentOutcome::Success(r) => r.changes.clone(),
+                        AgentOutcome::Partial { result: r, .. } => r.changes.clone(),
+                        _ => Vec::new(),
+                    };
+                    (format!("{}", outcome), changed)
+                }
+                Err(e) => (format!("ENGINE: {}", e), Vec::new()),
+            }
+        }
+        Err(e) => (format!("SERIALIZE: {}", e), Vec::new()),
     }
 }
 
@@ -273,7 +273,7 @@ async fn run_task_inner(
 /// changed. Read-only — all writes go through the engine from Chat.
 #[component]
 pub fn Code(
-    settings: Signal<ApiConfig>,
+    settings: Signal<AppConfig>,
     last_changes: Signal<Vec<String>>,
     refresh: Signal<u64>,
 ) -> Element {
@@ -411,11 +411,12 @@ fn truncate_file(text: &str) -> String {
 
 // ---------- Settings ----------
 
-/// Settings tab: LLM key + model, GitHub token, project path, budget.
+/// Settings tab: GitHub token, project path, budget. No model keys
+/// exist anymore — prose is understood deterministically on-device.
 /// Saved to the on-device config file; never leaves the device except
-/// for the API calls the user explicitly makes (Chat).
+/// for the GitHub deliveries the user explicitly asks for.
 #[component]
-pub fn Settings(settings: Signal<ApiConfig>) -> Element {
+pub fn Settings(settings: Signal<AppConfig>) -> Element {
     let mut status = use_signal(String::new);
     let mut engine_info = use_signal(String::new);
 
@@ -426,32 +427,9 @@ pub fn Settings(settings: Signal<ApiConfig>) -> Element {
                 span { class: "subtitle", "Keys stay on this device" }
             }
             div { class: "card-block",
-                div { class: "group-title", "LLM Translator (unverified layer)" }
-                div { class: "field",
-                    label { class: "field-label", "OpenRouter API Key" }
-                    input {
-                        class: "input",
-                        r#type: "password",
-                        placeholder: "sk-or-…",
-                        value: "{settings().openrouter_key.clone().unwrap_or_default()}",
-                        oninput: move |e| {
-                            let mut s = settings();
-                            s.openrouter_key = if e.value().is_empty() { None } else { Some(e.value()) };
-                            settings.set(s);
-                        },
-                    }
-                }
-                div { class: "field",
-                    label { class: "field-label", "Model" }
-                    input {
-                        class: "input",
-                        value: "{settings().model}",
-                        oninput: move |e| {
-                            let mut s = settings();
-                            s.model = e.value();
-                            settings.set(s);
-                        },
-                    }
+                div { class: "group-title", "Understanding (on-device, no model)" }
+                div { class: "hint-text",
+                    "Prose is parsed by a built-in grammar — verbs, kinds, quoted slots — with a confidence receipt. Nothing is sent anywhere to understand you."
                 }
             }
             div { class: "card-block",
@@ -508,8 +486,8 @@ pub fn Settings(settings: Signal<ApiConfig>) -> Element {
                 button {
                     class: "btn-primary",
                     onclick: move |_| {
-                        match crate::llm::config_path() {
-                            Ok(path) => match crate::llm::save_config(&settings(), &path) {
+                        match crate::config::config_path() {
+                            Ok(path) => match crate::config::save_config(&settings(), &path) {
                                 Ok(()) => status.set(format!("Saved to {}", path)),
                                 Err(e) => status.set(format!("Save failed: {}", e)),
                             },
