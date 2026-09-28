@@ -290,6 +290,9 @@ Two slots where machine learning is allowed — neither can forge evidence:
 2. **Retrieval**: precedent search over verified outputs — lexical
    history matching today (`translations.jsonl`), statistical
    (`vtext`-shaped) next, embeddings (`tract`) later.
+3. **Open-web research**: Wikipedia summaries, DuckDuckGo search, and
+   chrome-stripped page text for words the parser can't place —
+   provenance attached, misses honest. (`ResearchOracle::research_word`)
 
 The old third slot — an external model translating prose — is gone,
 replaced by the deterministic understander below. Refused: genetic

@@ -180,6 +180,17 @@ cargo test --all-features
   type normalization, kind coercion, op-slot completion, import targets.
 - 120 tests green (65 lib), clippy clean, fmt clean.
 
+## v0.10.2 — Curious research consortium (2026-09-28)
+
+- `ResearchOracle::research_word`: Wikipedia summary API first, then
+  DuckDuckGo search with page fetch — every summary carries its source.
+- `html_to_text` strips scripts, styles, nav, headers, footers, asides
+  (char-based, multibyte-safe, capped); DDG link extraction and wiki
+  JSON parse unit-tested on canned inputs.
+- Wired into `--understand --research` and the `--prose` refusal path:
+  unknown words come back defined instead of merely questioned.
+- 129 tests green (75 lib), clippy clean, fmt clean.
+
 ## v0.10.1 — No model anywhere (2026-09-28)
 
 - Deleted the translator, its prompt, and every key: prose resolves

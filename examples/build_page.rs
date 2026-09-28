@@ -24,7 +24,10 @@ async fn main() {
     let second = args.next().expect(USAGE);
     if second == "--understand" {
         let prompt = args.next().expect(USAGE);
-        show_understanding(&project, &prompt);
+        // Optional `--research`: look up what curiosity couldn't place.
+        // Still read-only (no project writes, no engine run).
+        let research = args.next().as_deref() == Some("--research");
+        show_understanding(&project, &prompt, research).await;
         return;
     }
     let (intent_json, budget, prose) = if second == "--prose" {
@@ -77,7 +80,9 @@ async fn main() {
 /// Deterministic comprehension without any model: parse the prose,
 /// print the intent, the confidence receipt, and any precedent.
 /// Read-only — never touches the project beyond reading history.
-fn show_understanding(project: &str, prompt: &str) {
+/// With `research`, unknown words are looked up on the open web
+/// (Wikipedia, then search) and their summaries printed with sources.
+async fn show_understanding(project: &str, prompt: &str, research: bool) {
     use grounding_coder::engine::understand;
     let understood = understand::understand(prompt, Some(std::path::Path::new(project)));
     println!("frame: {}", understood.frame);
@@ -112,6 +117,21 @@ fn show_understanding(project: &str, prompt: &str) {
     }
     if understand::clause_count(prompt) > 1 {
         println!("curious: that looks like multiple requests — try one at a time");
+    }
+    if research {
+        // Consortium lookup: each unknown word gets Wikipedia first,
+        // then web search, with provenance printed. At most 3 words,
+        // bounded by the oracle's own fetch budget.
+        let mut oracle = grounding_coder::engine::research::ResearchOracle::new(10);
+        for c in curios.iter().take(3) {
+            match oracle.research_word(&c.unknown).await {
+                Some(def) => println!(
+                    "researched {:?}: {} [{}]",
+                    def.term, def.summary, def.source_url
+                ),
+                None => println!("researched {:?}: no verified source found", c.unknown),
+            }
+        }
     }
 }
 
@@ -152,6 +172,15 @@ async fn resolve_prose(project: &str, prompt: &str) -> String {
                 format!(" Did you mean {}?", c.suggestions.join(", "))
             }
         ));
+        // Research what the top unknown means (Wikipedia, then search),
+        // so the refusal teaches instead of just stopping.
+        let mut oracle = grounding_coder::engine::research::ResearchOracle::new(4);
+        if let Some(def) = oracle.research_word(&c.unknown).await {
+            msg.push_str(&format!(
+                " Researched {:?}: {} [{}]",
+                def.term, def.summary, def.source_url
+            ));
+        }
     }
     eprintln!("{}", msg);
     std::process::exit(2);

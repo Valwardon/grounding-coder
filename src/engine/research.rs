@@ -591,6 +591,252 @@ impl ResearchOracle {
     }
 }
 
+/// A word or concept researched on the open web: what it is, where
+/// the words came from. Provenance travels with the summary — never
+/// a bare claim.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WordDef {
+    pub term: String,
+    pub summary: String,
+    pub source_url: String,
+}
+
+/// Minimal percent-encoding for query paths (ASCII alnum plus a few
+/// marks pass through; spaces become underscores for wiki titles).
+fn encode_query(term: &str) -> String {
+    let mut out = String::new();
+    for c in term.chars() {
+        if c.is_ascii_alphanumeric() || "-_.~".contains(c) {
+            out.push(c);
+        } else if c == ' ' {
+            out.push('_');
+        } else {
+            for b in c.to_string().as_bytes() {
+                out.push_str(&format!("%{:02X}", b));
+            }
+        }
+    }
+    out
+}
+
+/// Strip a page to readable text: drop scripts/styles/nav, turn tags
+/// into spaces, collapse whitespace, cap length. Pure and total over
+/// any byte string (lossy UTF-8, never panics).
+pub fn html_to_text(html: &str) -> String {
+    // Char-based throughout: byte slicing would split multibyte text.
+    let mut clean = String::new();
+    let mut in_ws = false;
+    let mut in_tag = false;
+    let mut skip2: Option<String> = None;
+    let chars: Vec<char> = html.to_string().chars().collect();
+    let mut k = 0;
+    // Chrome is not content: scripts, styles, navigation, headers,
+    // footers, and asides would drown any article text that follows.
+    const SKIP_TAGS: &[&str] = &["script", "style", "nav", "header", "footer", "aside"];
+    while k < chars.len() {
+        if skip2.is_none() && chars[k] == '<' {
+            let head: String = chars[k..]
+                .iter()
+                .take(32)
+                .collect::<String>()
+                .to_lowercase();
+            let mut matched: Option<String> = None;
+            for tag in SKIP_TAGS {
+                if head.starts_with(&format!("<{}", tag)) {
+                    matched = Some(tag.to_string());
+                    break;
+                }
+            }
+            if let Some(tag) = matched {
+                skip2 = Some(tag);
+                in_tag = true;
+            } else {
+                in_tag = true;
+            }
+            if !in_ws {
+                clean.push(' ');
+                in_ws = true;
+            }
+            k += 1;
+            continue;
+        }
+        if in_tag {
+            if chars[k] == '>' {
+                in_tag = false;
+            }
+            k += 1;
+            continue;
+        }
+        if let Some(tag) = skip2.as_deref() {
+            // End skip at the matching close tag, jumping PAST it —
+            // landing inside `</style>` would emit `/style>` as text.
+            let close = format!("</{}>", tag);
+            let tail: String = chars[k..]
+                .iter()
+                .take(close.len())
+                .collect::<String>()
+                .to_lowercase();
+            if tail == close {
+                skip2 = None;
+                k += close.len();
+            } else {
+                k += 1;
+            }
+            continue;
+        }
+        if chars[k].is_whitespace() {
+            if !in_ws {
+                clean.push(' ');
+                in_ws = true;
+            }
+        } else {
+            clean.push(chars[k]);
+            in_ws = false;
+        }
+        k += 1;
+    }
+    let clean = clean.trim().to_string();
+    const MAX: usize = 2000;
+    if clean.len() <= MAX {
+        return clean;
+    }
+    let mut m = MAX;
+    while !clean.is_char_boundary(m) {
+        m -= 1;
+    }
+    clean[..m].to_string()
+}
+
+/// Extract result links from a DuckDuckGo html-endpoint page: `uddg=`
+/// redirect targets first, plain result anchors second. Capped.
+pub fn ddg_links(html: &str, cap: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = html;
+    while let Some(pos) = rest.find("uddg=") {
+        let after = &rest[pos + 5..];
+        let end = after.find(['"', '\'', '&']).unwrap_or(after.len());
+        // Percent-decode into bytes first (never slice a str at
+        // unchecked offsets), then lossy-decode once at the end.
+        let raw = &after[..end];
+        let bytes = raw.as_bytes();
+        let mut dec: Vec<u8> = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            let hex = |b: u8| (b as char).is_ascii_hexdigit();
+            if bytes[i] == b'%' && i + 2 < bytes.len() && hex(bytes[i + 1]) && hex(bytes[i + 2]) {
+                let h = (bytes[i + 1] as char).to_digit(16).unwrap_or(0);
+                let l = (bytes[i + 2] as char).to_digit(16).unwrap_or(0);
+                dec.push((h * 16 + l) as u8);
+                i += 3;
+            } else {
+                dec.push(bytes[i]);
+                i += 1;
+            }
+        }
+        let url = String::from_utf8_lossy(&dec).into_owned();
+        if (url.starts_with("https://") || url.starts_with("http://")) && !out.contains(&url) {
+            out.push(url);
+            if out.len() >= cap {
+                break;
+            }
+        }
+        rest = after;
+    }
+    out
+}
+
+/// Parse a Wikipedia REST summary response into (description, page
+/// URL). Disambiguation pages and missing extracts refuse.
+fn wiki_summary(body: &str) -> Option<(String, String)> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    if v.get("type")?.as_str()? == "disambiguation" {
+        return None;
+    }
+    let extract = v.get("extract")?.as_str()?;
+    if extract.trim().is_empty() {
+        return None;
+    }
+    let url = v
+        .get("content_urls")
+        .and_then(|c| c.get("desktop"))
+        .and_then(|d| d.get("page"))
+        .and_then(|p| p.as_str())
+        .unwrap_or("https://en.wikipedia.org")
+        .to_string();
+    let mut text = extract.trim().to_string();
+    if text.len() > 600 {
+        let mut m = 600;
+        while !text.is_char_boundary(m) {
+            m -= 1;
+        }
+        text.truncate(m);
+        text.push('…');
+    }
+    Some((text, url))
+}
+
+impl ResearchOracle {
+    /// Look up what a word/concept means: Wikipedia summary first
+    /// (stable API, no key), then web search with page fetch. Bounded
+    /// by the oracle fetch budget; misses return None honestly.
+    pub async fn research_word(&mut self, term: &str) -> Option<WordDef> {
+        let term = term.trim();
+        if term.is_empty() || term.len() > 64 {
+            return None;
+        }
+        if self.fetches_used >= self.max_fetches {
+            return None;
+        }
+        // Wikipedia: deterministic URL, JSON summary.
+        let wiki_url = format!(
+            "https://en.wikipedia.org/api/rest_v1/page/summary/{}",
+            encode_query(term)
+        );
+        if let Ok((status, body)) = crate::http::get_text(&wiki_url).await {
+            self.fetches_used += 1;
+            if (200..300).contains(&status)
+                && let Some((summary, url)) = wiki_summary(&body)
+            {
+                return Some(WordDef {
+                    term: term.to_string(),
+                    summary,
+                    source_url: url,
+                });
+            }
+        }
+        // Web search fallback: top result fetched as text.
+        if self.fetches_used >= self.max_fetches {
+            return None;
+        }
+        let search_url = format!("https://html.duckduckgo.com/html/?q={}", encode_query(term));
+        let (status, body) = crate::http::get_text(&search_url).await.ok()?;
+        self.fetches_used += 1;
+        if !(200..300).contains(&status) {
+            return None;
+        }
+        for link in ddg_links(&body, 3) {
+            if self.fetches_used >= self.max_fetches {
+                return None;
+            }
+            if let Ok((st, page)) = crate::http::get_text(&link).await {
+                self.fetches_used += 1;
+                if !(200..300).contains(&st) {
+                    continue;
+                }
+                let text = html_to_text(&page);
+                if text.len() > 120 {
+                    return Some(WordDef {
+                        term: term.to_string(),
+                        summary: text,
+                        source_url: link,
+                    });
+                }
+            }
+        }
+        None
+    }
+}
+
 /// Verify an external crate against the registry: name → pinned version.
 /// The registry is the evidence; the compiler later re-verifies by
 /// resolving the dep. Names are charset-validated; anything else is None.
@@ -628,4 +874,71 @@ fn html_unescape(s: &str) -> String {
         .replace("&amp;", "&")
         .replace("&quot;", "\"")
         .replace("&#39;", "'")
+}
+
+#[cfg(test)]
+mod web_tests {
+    use super::*;
+
+    #[test]
+    fn html_to_text_drops_tags_scripts_and_styles() {
+        let html = "<html><head><style>.a{color:red}</style><script>alert(1)</script></head>\
+            <body><h1>Hi</h1><p>one <b>two</b></p></body></html>";
+        assert_eq!(html_to_text(html), "Hi one two");
+    }
+
+    #[test]
+    fn html_to_text_drops_chrome() {
+        let html = "<nav><a>Menu</a></nav><main><article><p>Real text</p></article></main>\
+            <footer>copy</footer>";
+        assert_eq!(html_to_text(html), "Real text");
+    }
+
+    #[test]
+    fn html_to_text_survives_multibyte() {
+        let html = "<p>héllo 🌍 world</p>";
+        assert_eq!(html_to_text(html), "héllo 🌍 world");
+    }
+
+    #[test]
+    fn html_to_text_caps_length() {
+        let html = format!("<p>{}</p>", "x".repeat(5000));
+        assert!(html_to_text(&html).len() <= 2000);
+    }
+
+    #[test]
+    fn ddg_links_extracts_targets() {
+        let html = r#"<a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fpage&rut=x">t</a>
+            <a href="//duckduckgo.com/l/?uddg=http%3A%2F%2Fplain.org%2F">u</a>"#;
+        let links = ddg_links(html, 5);
+        assert_eq!(
+            links,
+            vec![
+                "https://example.com/page".to_string(),
+                "http://plain.org/".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn ddg_links_skips_non_http() {
+        assert!(ddg_links(r#"<a href="//duckduckgo.com/l/?uddg=notaurl">x</a>"#, 5).is_empty());
+    }
+
+    #[test]
+    fn wiki_summary_parses_and_refuses_disambiguation() {
+        let good = r#"{"type":"standard","extract":"Rust is fast.","content_urls":{"desktop":{"page":"https://en.wikipedia.org/wiki/Rust"}}}"#;
+        let (text, url) = wiki_summary(good).expect("parses");
+        assert_eq!(text, "Rust is fast.");
+        assert!(url.contains("wikipedia.org"));
+        let dis = r#"{"type":"disambiguation","extract":"May refer to…"}"#;
+        assert!(wiki_summary(dis).is_none());
+        assert!(wiki_summary("not json").is_none());
+    }
+
+    #[test]
+    fn encode_query_shapes_titles() {
+        assert_eq!(encode_query("token bucket"), "token_bucket");
+        assert_eq!(encode_query("a/b"), "a%2Fb");
+    }
 }
