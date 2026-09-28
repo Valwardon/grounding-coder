@@ -178,7 +178,19 @@ cargo test --all-features
 - Hardening from an 8-prompt messy battery (typos, vagueness, shouting,
   run-ons, gibberish): translator prompt refuses unasked replication,
   type normalization, kind coercion, op-slot completion, import targets.
-- 119 tests green (64 lib), clippy clean, fmt clean.
+- 120 tests green (65 lib), clippy clean, fmt clean.
+
+## v0.9.3 — Understand-first routing (2026-09-28)
+
+- `--prose` runs the deterministic parser first; ≥0.75 confidence with
+  a known frame executes with no model involved, the rest falls back.
+  Content gate: parsable-but-unbuildable creates (no sections/fields)
+  route to the model instead of a guaranteed block.
+- Messy battery drove five robustness fixes: fuzzy verbs, adjacent +
+  titled names (single resolution point), definable-kind guard,
+  constraint words, type normalization, kind coercion, op-slot
+  completion, import targets.
+- 120 tests green (65 lib), clippy clean, fmt clean.
 
 ## v0.9.1 — State machines + async tasks (2026-09-27)
 

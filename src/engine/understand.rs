@@ -424,6 +424,12 @@ pub fn understand(prose: &str, project_dir: Option<&std::path::Path>) -> Underst
     let mut total = 1u32; // the verb slot always counts
     let mut intent = empty_intent(prose.trim().to_string());
     intent.constraints = constraints;
+    // Content gate: a create frame only completes locally when it
+    // carries buildable content (page sections from quotes). Bare
+    // "create a Counter struct" parses fine but has nothing to build
+    // with — confidence caps below the act threshold so the model (or
+    // a clarifying question) takes it instead of a guaranteed block.
+    let mut content_ok = true;
 
     // Name resolution, most explicit first: `titled`/`named`/`called`
     // X patterns, then Capitalized words, then quoted literals, then
@@ -497,16 +503,10 @@ pub fn understand(prose: &str, project_dir: Option<&std::path::Path>) -> Underst
             frame = "create".to_string();
             total = 3; // verb + kind + name
             filled += 1;
-            let name = names
-                .first()
-                .cloned()
-                .or_else(|| quotes.first().cloned())
-                .unwrap_or_default();
-            let name = if name.is_empty() {
-                resolved_name.clone().unwrap_or_default()
-            } else {
-                name
-            };
+            // One name resolution for the whole parse (titled, then
+            // Capitalized, then quoted, then adjacent) — two competing
+            // resolutions once named different names for the same slot.
+            let name = resolved_name.clone().unwrap_or_default();
             match (kind, name.is_empty()) {
                 (Some(k), false) if DEFINABLE.contains(&k) => {
                     filled += 2;
@@ -530,6 +530,14 @@ pub fn understand(prose: &str, project_dir: Option<&std::path::Path>) -> Underst
                                 }
                             })
                             .collect();
+                    }
+                    // Content gate: pages need quoted sections, other
+                    // definables need fields the prose never carries —
+                    // without buildable content the local path would
+                    // walk into a guaranteed block.
+                    if (k == "page" && def.sections.is_empty()) || (k != "page" && k != "function")
+                    {
+                        content_ok = false;
                     }
                     intent.define = vec![Some(def)];
                     intent.file = Some("src/lib.rs".to_string());
@@ -583,7 +591,12 @@ pub fn understand(prose: &str, project_dir: Option<&std::path::Path>) -> Underst
         }
     }
 
-    let confidence = (filled as f64 / total.max(1) as f64).min(1.0);
+    let mut confidence = (filled as f64 / total.max(1) as f64).min(1.0);
+    if !content_ok {
+        // Parsable but not locally buildable — route to the model
+        // (or a question), never into a guaranteed block.
+        confidence = confidence.min(0.49);
+    }
     intent.confidence = confidence;
     Understood {
         intent,
@@ -673,6 +686,17 @@ mod tests {
         let u = understand("make the thing work faster", None);
         assert_eq!(u.frame, "build".to_string());
         assert!(u.intent.constraints.contains(&"latency".to_string()));
+    }
+
+    #[test]
+    fn contentless_creates_cap_below_threshold() {
+        // Parsable but unbuildable locally: routes to model/questions.
+        let u = understand("create a Counter struct", None);
+        assert_eq!(u.frame, "create".to_string());
+        assert!(u.confidence < 0.75, "got {}", u.confidence);
+        // Quoted sections complete the page locally.
+        let u = understand("create a page called P with \"hello world\"", None);
+        assert!(u.confidence >= 0.75, "got {}", u.confidence);
     }
 
     #[test]

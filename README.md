@@ -132,10 +132,17 @@ Oracle verify (compiler / tests / parser per language)
 - **True-fix outcomes** — every applied recipe is judged against the
   next verify (error gone or not), so the model learns what *worked*,
   not what was *busy*.
-- **Translator mode** — `build_page --prose "<prompt>"` wires the
-  external model (prose in, metadata out, never code) into the
-  deterministic engine. Key from `OPENROUTER_API_KEY` or config; no key
-  means an honest refusal, never a guess.
+- **Translator mode** — `build_page --prose "<prompt>"` resolves prose
+  deterministically first and only calls the external model below
+  0.75 confidence (prose in, metadata out, never code). Key from
+  `OPENROUTER_API_KEY` or config; no key means an honest refusal, never
+  a guess. Verified translations record into per-project history.
+- **Understanding without a model** — `build_page --understand
+  "<prompt>"` parses prose with a hand-built lexicon (verbs, kinds,
+  typo tolerance on verbs only), grammar frames (build/create/fix/
+  publish/verify), and slot filling (quotes, titled names, adjacent
+  nouns — never invented). Prints intent + confidence receipt +
+  precedent; read-only, nothing touched. (`src/engine/understand.rs`)
 - **Understanding without a model** — `build_page --understand
   "<prompt>"` parses prose with a hand-built lexicon (verbs, kinds,
   typo tolerance on verbs only), grammar frames (build/create/fix/
@@ -182,12 +189,12 @@ Oracle verify (compiler / tests / parser per language)
 
 ## Proof, Not Promises
 
-119 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
+120 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
 `fmt --check` clean:
 
 | Suite | Tests | What it proves |
 |---|---|---|
-| lib (unit) | 64 | recipes, ranker, catalog, pathfind, parsers, manifests, guards, families, understander |
+| lib (unit) | 65 | recipes, ranker, catalog, pathfind, parsers, manifests, guards, families, understander |
 | `build` | 6 | C/Java/Rust real builds + artifacts run; unknown targets block; dx-output APK discovery |
 | `replicate` | 6 | byte-exact replication, hash-mismatch block, replace-exact rules, clean-room refusal + opt-out |
 | `editplan` | 4 | byte-range apply, stale rejection, invalid-range rejection, LLM-code rejection |

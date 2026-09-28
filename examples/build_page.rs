@@ -32,7 +32,7 @@ async fn main() {
     let (intent_json, budget, prose) = if second == "--prose" {
         let prompt = args.next().expect(USAGE);
         let budget: u32 = args.next().and_then(|b| b.parse().ok()).unwrap_or(5);
-        (translate_prose(&prompt).await, budget, Some(prompt))
+        (resolve_prose(&project, &prompt).await, budget, Some(prompt))
     } else {
         let budget: u32 = args.next().and_then(|b| b.parse().ok()).unwrap_or(5);
         let intent_json = std::fs::read_to_string(&second).expect("read intent");
@@ -96,6 +96,37 @@ fn show_understanding(project: &str, prompt: &str) {
         }
     }
 }
+
+/// Resolve prose into an intent, model-free when possible.
+/// The deterministic parser runs first: confidence at or above
+/// [`LOCAL_CONFIDENCE`] with a known frame executes with no model
+/// involved at all. Anything vaguer falls back to the external
+/// translator (prose in, metadata out — never code). Routing is
+/// printed to stderr so the outcome on stdout stays machine-readable.
+async fn resolve_prose(project: &str, prompt: &str) -> String {
+    use grounding_coder::engine::understand;
+    let understood = understand::understand(prompt, Some(std::path::Path::new(project)));
+    if understood.confidence >= LOCAL_CONFIDENCE && understood.frame != "unknown" {
+        eprintln!(
+            "UNDERSTOOD locally (frame={}, confidence={:.2}) — no model involved",
+            understood.frame, understood.confidence
+        );
+        return serde_json::to_string(&understood.intent).unwrap_or_else(|e| {
+            eprintln!("UNDERSTAND FAILED to serialize intent: {}", e);
+            std::process::exit(1);
+        });
+    }
+    eprintln!(
+        "UNDERSTOOD confidence {:.2} — falling back to model translator",
+        understood.confidence
+    );
+    translate_prose(prompt).await
+}
+
+/// Minimum deterministic confidence to skip the model. Below this the
+/// parse is too thin to act on blind (missing verb, kind, or name),
+/// so a model takes the attempt — or fails honestly without a key.
+const LOCAL_CONFIDENCE: f64 = 0.75;
 
 /// Translate prose into an intent through the external model, then
 /// serialize for the engine. The model output is validated and
