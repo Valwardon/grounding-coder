@@ -47,6 +47,18 @@ const VERBS: &[(&str, FrameAction)] = &[
     ("run", FrameAction::Verify),
 ];
 
+/// Kinds the bot can actually define (structs, pages, configs,
+/// components, machines, functions). Other kind words (`apk`, `repo`,
+/// `test`) name targets and artifacts — they never trigger creation.
+const DEFINABLE: &[&str] = &[
+    "page",
+    "struct",
+    "config",
+    "component",
+    "statemachine",
+    "function",
+];
+
 /// Kind lexicon: surface forms → definition kind.
 const KINDS: &[(&str, &str)] = &[
     ("page", "page"),
@@ -97,6 +109,59 @@ pub struct SimilarHit {
     pub goal: String,
 }
 
+/// Edit distance over chars. Used only to forgive typos in the small
+/// verb lexicon — never for names, kinds, or literals, which pass
+/// through verbatim (correcting those would invent meaning).
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.is_empty() {
+        return b.len();
+    }
+    if b.is_empty() {
+        return a.len();
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0; b.len() + 1];
+    for (i, &ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            cur[j + 1] = (prev[j] + usize::from(ca != cb))
+                .min(prev[j + 1] + 1)
+                .min(cur[j] + 1);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
+/// Nearest verb within typo tolerance (≤1 for short words, ≤2 above),
+/// or None. Exact matches always win — this runs only when none fired.
+fn fuzzy_verb(word: &str) -> Option<FrameAction> {
+    let max_dist = if word.len() <= 4 { 1 } else { 2 };
+    let mut best: Option<(usize, FrameAction)> = None;
+    for (v, a) in VERBS {
+        let d = edit_distance(word, v);
+        if d <= max_dist && best.map(|(bd, _)| d < bd).unwrap_or(true) {
+            best = Some((d, *a));
+        }
+    }
+    best.map(|(_, a)| a)
+}
+
+/// Constraint keywords: performance/shape words that become intent
+/// constraints instead of vanishing.
+const CONSTRAINTS: &[(&str, &str)] = &[
+    ("fast", "latency"),
+    ("faster", "latency"),
+    ("quick", "latency"),
+    ("slow", "throughput"),
+    ("small", "size"),
+    ("tiny", "size"),
+    ("secure", "security"),
+    ("safe", "security"),
+];
+
 /// Lowercased alphanumeric tokens in order.
 fn words(prose: &str) -> Vec<String> {
     prose
@@ -123,6 +188,41 @@ fn quoted(prose: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// Noun adjacent to a kind word: "a counter page" / "the RiskBoard
+/// component" name the referent right before the kind. Deterministic
+/// positional slot-filling (articles skipped, first letter capitalized
+/// for Rust convention) — visible in the output, never silent.
+fn adjacent_name(words: &[String], kind: &str) -> Option<String> {
+    let pos = words
+        .iter()
+        .position(|w| KINDS.iter().any(|(k, v)| *v == kind && k == w))?;
+    let articles = [
+        "a", "an", "the", "my", "this", "that", "some", "any", "each", "every",
+    ];
+    let mut i = pos;
+    while i > 0 {
+        i -= 1;
+        // Articles, verbs, and kind words are grammar, never names —
+        // "create a struct" must not name the struct "Create".
+        if articles.contains(&words[i].as_str())
+            || VERBS.iter().any(|(v, _)| v == &words[i])
+            || KINDS.iter().any(|(k, _)| k == &words[i])
+        {
+            continue;
+        }
+        let mut cs = words[i].chars();
+        let head: String = cs
+            .next()
+            .map(|c| c.to_uppercase().collect::<String>())
+            .unwrap_or_default();
+        let name = format!("{}{}", head, cs.as_str());
+        if !name.is_empty() {
+            return Some(name);
+        }
+    }
+    None
 }
 
 /// Capitalized words in original case (candidate proper names).
@@ -296,9 +396,26 @@ pub fn understand(prose: &str, project_dir: Option<&std::path::Path>) -> Underst
     let verb = ws
         .iter()
         .find_map(|w| VERBS.iter().find(|(v, _)| v == w).map(|(_, a)| *a));
+    // Typo tolerance on verbs only: "buld" still means build. Names,
+    // kinds, and literals are never corrected — that would invent.
+    let fuzzy = if verb.is_none() {
+        ws.iter().find_map(|w| fuzzy_verb(w))
+    } else {
+        None
+    };
+    let verb = verb.or(fuzzy);
+    // Specificity wins: bare "make" with a kind + name in the same
+    // breath ("make a counter page") is creation, not compilation.
+    // "make the thing work faster" (no kind, no name) stays a build.
     let kind = ws
         .iter()
         .find_map(|w| KINDS.iter().find(|(k, _)| k == w).map(|(_, k)| *k));
+    // Constraint words ride along as intent constraints.
+    let constraints: Vec<String> = CONSTRAINTS
+        .iter()
+        .filter(|(w, _)| ws.iter().any(|x| x == *w))
+        .map(|(_, c)| c.to_string())
+        .collect();
 
     let similar = project_dir.and_then(|p| find_similar(p, prose));
 
@@ -306,7 +423,45 @@ pub fn understand(prose: &str, project_dir: Option<&std::path::Path>) -> Underst
     let mut filled = 0u32;
     let mut total = 1u32; // the verb slot always counts
     let mut intent = empty_intent(prose.trim().to_string());
+    intent.constraints = constraints;
 
+    // Name resolution, most explicit first: `titled`/`named`/`called`
+    // X patterns, then Capitalized words, then quoted literals, then
+    // the noun adjacent to the kind word ("a counter page" → Counter).
+    let titled: Option<String> = {
+        let mut out = None;
+        let wslice: Vec<&str> = ws.iter().map(|s| s.as_str()).collect();
+        for (i, w) in wslice.iter().enumerate() {
+            if (*w == "titled" || *w == "named" || *w == "called") && i + 1 < wslice.len() {
+                let raw = wslice[i + 1];
+                if !KINDS.iter().any(|(k, _)| *k == raw) {
+                    let mut cs = raw.chars();
+                    let head: String = cs
+                        .next()
+                        .map(|c| c.to_uppercase().collect::<String>())
+                        .unwrap_or_default();
+                    out = Some(format!("{}{}", head, cs.as_str()));
+                    break;
+                }
+            }
+        }
+        out
+    };
+    let resolved_name: Option<String> = titled
+        .or_else(|| capitals(prose).first().cloned())
+        .or_else(|| quoted(prose).first().cloned())
+        .or_else(|| kind.and_then(|k| adjacent_name(&ws, k)));
+    // Any build verb + kind + name reads as creation ("build a counter
+    // page", "make a token struct"). Bare builds without kind+name
+    // ("build the apk" has a target, not a name) stay builds.
+    let verb = if verb == Some(FrameAction::Build)
+        && kind.is_some_and(|k| DEFINABLE.contains(&k))
+        && resolved_name.is_some()
+    {
+        Some(FrameAction::Create)
+    } else {
+        verb
+    };
     match verb {
         None => {
             intent.unknown_requirements = vec![
@@ -347,8 +502,13 @@ pub fn understand(prose: &str, project_dir: Option<&std::path::Path>) -> Underst
                 .cloned()
                 .or_else(|| quotes.first().cloned())
                 .unwrap_or_default();
+            let name = if name.is_empty() {
+                resolved_name.clone().unwrap_or_default()
+            } else {
+                name
+            };
             match (kind, name.is_empty()) {
-                (Some(k), false) => {
+                (Some(k), false) if DEFINABLE.contains(&k) => {
                     filled += 2;
                     let mut def = empty_define(name.clone(), k);
                     if k == "page" {
@@ -492,6 +652,27 @@ mod tests {
         assert!(hit.score >= 0.6, "score {}", hit.score);
         assert!(find_similar(&dir, "please make me a counter page now").is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn typo_verbs_still_parse() {
+        let u = understand("buld the android apk", None);
+        assert_eq!(u.frame, "build".to_string());
+        assert_eq!(u.intent.platform, "android".to_string());
+        // Names and literals are never typo-corrected.
+        let u = understand("create a page called Coutner", None);
+        let def = u.intent.define.into_iter().flatten().next().unwrap();
+        assert_eq!(def.name, "Coutner");
+    }
+
+    #[test]
+    fn make_with_kind_and_name_is_creation() {
+        let u = understand("make a counter page", None);
+        assert_eq!(u.frame, "create".to_string());
+        // Bare make without kind/name stays a build.
+        let u = understand("make the thing work faster", None);
+        assert_eq!(u.frame, "build".to_string());
+        assert!(u.intent.constraints.contains(&"latency".to_string()));
     }
 
     #[test]

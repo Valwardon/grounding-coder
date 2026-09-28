@@ -119,7 +119,7 @@ impl LlmClient {
             "- dependencies: [string]\n",
             "- unknown_requirements: [string] — list what you do NOT know\n",
             "- confidence: number 0.0-1.0\n",
-            "- files: [{path: string, url: string, sha256: string}] — replicate these byte-exact (https:// or file://); hashes gate every byte\n",
+            "- files: [{path: string, url: string, sha256: string}] — ONLY when the user explicitly asks to copy, port, or replicate from named sources; otherwise leave files EMPTY and author through define/actions. Unasked replication is refused downstream, so emitting it wastes the run\n",
             "- replacements: [{file: string, find: string, replace: string}] — exact renames, single-match rule\n",
         );
 
@@ -186,8 +186,12 @@ impl LlmClient {
         let cleaned = strip_json_fences(content);
         // Models often wrap JSON in prose — extract the first {...} block.
         let candidate = extract_json_object(&cleaned).unwrap_or_else(|| cleaned.clone());
-        // 1. Strict path: model followed the schema.
-        if let Ok(intent) = serde_json::from_str::<StructuredIntent>(&candidate) {
+        // 1. Strict path: model followed the schema. Kinds still get
+        // coerced by shape — models emit "text", "markdown", or empty
+        // kinds for page-shaped content, which would otherwise die as
+        // stubs against missing files.
+        if let Ok(mut intent) = serde_json::from_str::<StructuredIntent>(&candidate) {
+            coerce_define_kinds(&mut intent);
             return Ok(intent);
         }
         // 2. Repair path: accept any JSON (or prose) and normalize it into a
@@ -197,6 +201,39 @@ impl LlmClient {
         let value: serde_json::Value =
             serde_json::from_str(&candidate).unwrap_or(serde_json::Value::Null);
         Ok(normalize_intent(&value, prompt))
+    }
+}
+
+/// Coerce empty or unknown definition kinds by shape: title/sections
+/// means page, fields means struct, states means statemachine. This is
+/// routing, not invention — the content and the proof obligation are
+/// unchanged, and anything shapeless still blocks downstream.
+fn coerce_define_kinds(intent: &mut StructuredIntent) {
+    const KNOWN: &[&str] = &[
+        "function",
+        "struct",
+        "config",
+        "component",
+        "statemachine",
+        "asynctask",
+        "page",
+    ];
+    for def in intent.define.iter_mut().flatten() {
+        if KNOWN.contains(&def.kind.as_str()) {
+            continue;
+        }
+        if def.title.is_some() || !def.sections.is_empty() {
+            def.kind = "page".to_string();
+            // A named page without a title shows its name; the content
+            // slots are still the model's own words.
+            if def.title.is_none() && !def.name.trim().is_empty() {
+                def.title = Some(def.name.clone());
+            }
+        } else if !def.states.is_empty() {
+            def.kind = "statemachine".to_string();
+        } else if !def.fields.is_empty() {
+            def.kind = "struct".to_string();
+        }
     }
 }
 

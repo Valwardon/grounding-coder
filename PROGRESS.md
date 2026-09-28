@@ -167,6 +167,19 @@ cargo test --all-features
   major.minor, else fall back to the pinned provisioned set.
 - 96 tests green, clippy `-D warnings` clean, fmt clean.
 
+## v0.9.2 — Understander + messy-input hardening (2026-09-28)
+
+- `engine/understand.rs`: verb/kind lexicons, typo-tolerant verbs
+  (never names), frame dispatch, slot filling (quotes, titled names,
+  adjacent nouns), constraint words, definable-kind guard, per-project
+  translation history with overlap retrieval.
+- `--understand` prints frame + confidence + precedent without touching
+  anything; `--prose` records verified translations into history.
+- Hardening from an 8-prompt messy battery (typos, vagueness, shouting,
+  run-ons, gibberish): translator prompt refuses unasked replication,
+  type normalization, kind coercion, op-slot completion, import targets.
+- 119 tests green (64 lib), clippy clean, fmt clean.
+
 ## v0.9.1 — State machines + async tasks (2026-09-27)
 
 - **State-machine family** (`kind: "statemachine"`): states plus

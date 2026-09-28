@@ -136,6 +136,18 @@ Oracle verify (compiler / tests / parser per language)
   external model (prose in, metadata out, never code) into the
   deterministic engine. Key from `OPENROUTER_API_KEY` or config; no key
   means an honest refusal, never a guess.
+- **Understanding without a model** — `build_page --understand
+  "<prompt>"` parses prose with a hand-built lexicon (verbs, kinds,
+  typo tolerance on verbs only), grammar frames (build/create/fix/
+  publish/verify), and slot filling (quoted literals, titled names,
+  adjacent nouns — never invented). Prints intent + confidence receipt
+  + precedent; read-only, nothing touched. (`src/engine/understand.rs`)
+- **Messy-input hardening** — everyday spellings normalize to canonical
+  types (`string`→`String`, mirroring rustc defaults; foreign
+  spellings pass through); sloppy kinds coerce by shape; `new`/`get`/
+  `add_assign` complete missing-but-determined slots; imports carry
+  their target file. Each gap found by feeding the bot typos, and each
+  fix proven by a test that fails without it.
 - **Config + component families** — `kind: "config"` synthesizes structs
   with a `default()` constructor from typed literals (bool/int/float
   validated, `String` correctly gets `.to_string()`); `kind:
@@ -170,12 +182,12 @@ Oracle verify (compiler / tests / parser per language)
 
 ## Proof, Not Promises
 
-106 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
+119 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
 `fmt --check` clean:
 
 | Suite | Tests | What it proves |
 |---|---|---|
-| lib (unit) | 51 | recipes, ranker, catalog, parsers, manifests, guards, families |
+| lib (unit) | 64 | recipes, ranker, catalog, pathfind, parsers, manifests, guards, families, understander |
 | `build` | 6 | C/Java/Rust real builds + artifacts run; unknown targets block; dx-output APK discovery |
 | `replicate` | 6 | byte-exact replication, hash-mismatch block, replace-exact rules, clean-room refusal + opt-out |
 | `editplan` | 4 | byte-range apply, stale rejection, invalid-range rejection, LLM-code rejection |

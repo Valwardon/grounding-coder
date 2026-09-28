@@ -416,14 +416,22 @@ impl Synthesizer {
         let ret = m.ret.clone().unwrap_or_else(|| "()".to_string());
         match m.op.as_str() {
             // Associated constructor: every field from a same-named param.
+            // Missing params complete from the fields: `new` takes every
+            // field by definition, so an omission is malformed metadata,
+            // not a different constructor. Extras still block.
             "new" => {
                 if m.self_kind != "none" {
                     return Err("new must have self_kind=none — BLOCKED".to_string());
                 }
+                let mut params = m.params.clone();
+                for (f, t) in &def.fields {
+                    if !params.iter().any(|(n, _)| n == f) {
+                        params.push((f.clone(), t.clone()));
+                    }
+                }
                 let mut args = Vec::new();
                 for (f, t) in &def.fields {
-                    let p = m
-                        .params
+                    let p = params
                         .iter()
                         .find(|(n, _)| n == f)
                         .ok_or(format!("new missing param for field {} — BLOCKED", f))?;
@@ -435,15 +443,21 @@ impl Synthesizer {
                     }
                     args.push(format!("{}: {}", f, f));
                 }
-                if args.len() != m.params.len() {
-                    return Err("new has params beyond fields — BLOCKED".to_string());
+                for (n, _) in &params {
+                    if !def.fields.iter().any(|(f, _)| f == n) {
+                        return Err("new has params beyond fields — BLOCKED".to_string());
+                    }
                 }
                 let _ = struct_name;
+                let rendered: Vec<String> = params
+                    .iter()
+                    .map(|(n, t)| format!("{}: {}", n, t))
+                    .collect();
                 Ok((
                     format!(
                         "    pub fn {}({}) -> {} {{\n        {} {{ {} }}\n    }}\n",
                         m.name,
-                        params.join(", "),
+                        rendered.join(", "),
                         struct_name,
                         struct_name,
                         args.join(", ")
@@ -451,15 +465,18 @@ impl Synthesizer {
                     vec![ev("new", struct_name)],
                 ))
             }
-            // `field += amount` (or `+= 1` when no amount param).
+            // `field += amount` (or `+= 1` when no amount param). A
+            // missing field over a single-field struct resolves to it
+            // (total, deterministic); anything ambiguous blocks.
             "add_assign" => {
                 if m.self_kind != "mut" {
                     return Err("add_assign needs self_kind=mut — BLOCKED".to_string());
                 }
-                let field = m
-                    .field
-                    .clone()
-                    .ok_or("add_assign needs a field — BLOCKED")?;
+                let field = match &m.field {
+                    Some(f) => f.clone(),
+                    None if def.fields.len() == 1 => def.fields[0].0.clone(),
+                    None => return Err("add_assign needs a field — BLOCKED".to_string()),
+                };
                 if !def.fields.iter().any(|(f, _)| *f == field) {
                     return Err(format!("Unknown field {} — BLOCKED", field));
                 }
@@ -558,12 +575,18 @@ impl Synthesizer {
                     vec![ev(&m.name, &fty)],
                 ))
             }
-            // `self.field` reader.
+            // `self.field` reader. A missing field over a single-field
+            // struct resolves to that field (total, deterministic);
+            // anything ambiguous blocks.
             "get" => {
                 if m.self_kind != "ref" {
                     return Err("get needs self_kind=ref — BLOCKED".to_string());
                 }
-                let field = m.field.clone().ok_or("get needs a field — BLOCKED")?;
+                let field = match &m.field {
+                    Some(f) => f.clone(),
+                    None if def.fields.len() == 1 => def.fields[0].0.clone(),
+                    None => return Err("get needs a field — BLOCKED".to_string()),
+                };
                 let fty = def
                     .fields
                     .iter()
@@ -742,6 +765,24 @@ fn render_default_literal(ty: &str, lit: &str) -> Result<String, String> {
             Ok(out)
         }
         other => Err(format!("No literal rendering for type {} — BLOCKED", other)),
+    }
+}
+
+/// Normalize everyday type spellings to canonical Rust types, mirroring
+/// rustc's own default inference (`1` is i32, `1.0` is f64). Translators
+/// (human or model) write `string`; the engine means `String`. Anything
+/// outside this table passes through untouched for the families to judge.
+pub(crate) fn normalize_ty(ty: &str) -> String {
+    // Exact lowercase spellings only: capitalized forms belong to other
+    // languages (Kotlin `Int`/`Long` must pass through untouched), and
+    // canonical Rust types are already exact.
+    match ty.trim() {
+        "string" | "str" => "String".to_string(),
+        "bool" | "boolean" => "bool".to_string(),
+        "int" | "integer" => "i32".to_string(),
+        "long" => "i64".to_string(),
+        "float" | "double" | "number" => "f64".to_string(),
+        _ => ty.trim().to_string(),
     }
 }
 
@@ -1422,6 +1463,18 @@ mod family_tests {
     }
 
     #[test]
+    fn normalize_ty_fixes_everyday_spellings() {
+        assert_eq!(normalize_ty("string"), "String".to_string());
+        assert_eq!(normalize_ty("int"), "i32".to_string());
+        assert_eq!(normalize_ty("number"), "f64".to_string());
+        // Canonical and foreign spellings pass through untouched.
+        assert_eq!(normalize_ty("String"), "String".to_string());
+        assert_eq!(normalize_ty("Int"), "Int".to_string());
+        assert_eq!(normalize_ty("Long"), "Long".to_string());
+        assert_eq!(normalize_ty("Vec<u8>"), "Vec<u8>".to_string());
+    }
+
+    #[test]
     fn default_literals_render_per_type() {
         assert_eq!(render_default_literal("bool", "true").unwrap(), "true");
         assert_eq!(render_default_literal("u64", "3000").unwrap(), "3000");
@@ -1470,6 +1523,68 @@ mod family_tests {
                 .body
                 .contains("endpoint: \"https://x\".to_string()")
         );
+    }
+
+    #[test]
+    fn new_completes_missing_params_from_fields() {
+        let s = Synthesizer::new();
+        // `new` with NO params still builds the full constructor.
+        let def = StructDef {
+            fields: vec![("n".to_string(), "u64".to_string())],
+            methods: vec![MethodSpec {
+                name: "new".to_string(),
+                self_kind: "none".to_string(),
+                params: Vec::new(),
+                ret: None,
+                amount_param: None,
+                field: None,
+                op: "new".to_string(),
+            }],
+            defaults: Vec::new(),
+        };
+        let req = SynthRequest {
+            fn_name: "C".to_string(),
+            lang: "rust".to_string(),
+            params: Vec::new(),
+            ret: String::new(),
+            cases: Vec::new(),
+            struct_def: Some(def),
+            page_def: None,
+            component_def: None,
+            statemachine_def: None,
+        };
+        let cands = s.synthesize(&req).expect("new completes");
+        assert!(cands[0].body.contains("pub fn new(n: u64) -> C"));
+        // Extra params beyond fields still block.
+        let s2 = Synthesizer::new();
+        let def2 = StructDef {
+            fields: vec![("n".to_string(), "u64".to_string())],
+            methods: vec![MethodSpec {
+                name: "new".to_string(),
+                self_kind: "none".to_string(),
+                params: vec![
+                    ("n".to_string(), "u64".to_string()),
+                    ("extra".to_string(), "u64".to_string()),
+                ],
+                ret: None,
+                amount_param: None,
+                field: None,
+                op: "new".to_string(),
+            }],
+            defaults: Vec::new(),
+        };
+        let req2 = SynthRequest {
+            fn_name: "C".to_string(),
+            lang: "rust".to_string(),
+            params: Vec::new(),
+            ret: String::new(),
+            cases: Vec::new(),
+            struct_def: Some(def2),
+            page_def: None,
+            component_def: None,
+            statemachine_def: None,
+        };
+        assert!(s2.synthesize(&req2).is_err());
     }
 
     #[test]

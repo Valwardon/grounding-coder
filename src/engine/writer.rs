@@ -1777,7 +1777,7 @@ fn parse_struct_def(task: &SubTask) -> Result<super::synthesize::StructDef, Stri
                 .filter_map(|f| {
                     Some((
                         f.get("name")?.as_str()?.to_string(),
-                        f.get("type")?.as_str()?.to_string(),
+                        super::synthesize::normalize_ty(f.get("type")?.as_str()?),
                     ))
                 })
                 .collect()
@@ -1825,13 +1825,16 @@ fn parse_struct_def(task: &SubTask) -> Result<super::synthesize::StructDef, Stri
                                         let mut kv = s.splitn(2, ':');
                                         Some((
                                             kv.next()?.trim().to_string(),
-                                            kv.next()?.trim().to_string(),
+                                            super::synthesize::normalize_ty(kv.next()?.trim()),
                                         ))
                                     })
                                     .collect()
                             })
                             .unwrap_or_default(),
-                        ret: m.get("ret").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                        ret: m
+                            .get("ret")
+                            .and_then(|v| v.as_str())
+                            .map(super::synthesize::normalize_ty),
                         amount_param: m
                             .get("amount")
                             .and_then(|v| v.as_str())
@@ -1869,7 +1872,7 @@ fn parse_component_def(task: &SubTask) -> Result<super::synthesize::ComponentDef
                 .filter_map(|f| {
                     Some((
                         f.get("name")?.as_str()?.to_string(),
-                        f.get("type")?.as_str()?.to_string(),
+                        super::synthesize::normalize_ty(f.get("type")?.as_str()?),
                     ))
                 })
                 .collect()
@@ -1920,13 +1923,16 @@ fn parse_component_def(task: &SubTask) -> Result<super::synthesize::ComponentDef
                                         let mut kv = s.splitn(2, ':');
                                         Some((
                                             kv.next()?.trim().to_string(),
-                                            kv.next()?.trim().to_string(),
+                                            super::synthesize::normalize_ty(kv.next()?.trim()),
                                         ))
                                     })
                                     .collect()
                             })
                             .unwrap_or_default(),
-                        ret: m.get("ret").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                        ret: m
+                            .get("ret")
+                            .and_then(|v| v.as_str())
+                            .map(super::synthesize::normalize_ty),
                         amount_param: m
                             .get("amount")
                             .and_then(|v| v.as_str())

@@ -593,17 +593,23 @@ impl TaskDecomposer {
                 .iter()
                 .filter(|r| r.contains("::") || r.contains('.')),
         ) {
+            // The payload file doubles as the target symbol (defaulting
+            // like definitions do): without it, imports die with "No
+            // source file found" on empty projects instead of creating
+            // the file like every other authoring task.
+            let file = intent
+                .file
+                .clone()
+                .unwrap_or_else(|| "src/lib.rs".to_string());
             let mut t = SubTask::new(
                 TaskKind::AddImport,
                 format!("Add import {}", imp),
-                serde_json::json!({"import": imp, "file": intent.file.clone().unwrap_or_else(|| "src/lib.rs".to_string())}),
+                serde_json::json!({"import": imp, "file": file}),
                 "intent_import".to_string(),
             )
             .with_priority(0.6)
             .with_deadline(self.tick + 1000);
-            if let Some(f) = intent.file.clone() {
-                t.target_symbols.push(f);
-            }
+            t.target_symbols.push(file);
             tasks.push(t);
         }
 
