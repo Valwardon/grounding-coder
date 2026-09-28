@@ -137,23 +137,19 @@ Oracle verify (compiler / tests / parser per language)
 - **True-fix outcomes** — every applied recipe is judged against the
   next verify (error gone or not), so the model learns what *worked*,
   not what was *busy*.
-- **Translator mode** — `build_page --prose "<prompt>"` resolves prose
-  deterministically first and only calls the external model below
-  0.75 confidence (prose in, metadata out, never code). Key from
-  `OPENROUTER_API_KEY` or config; no key means an honest refusal, never
-  a guess. Verified translations record into per-project history.
-- **Understanding without a model** — `build_page --understand
-  "<prompt>"` parses prose with a hand-built lexicon (verbs, kinds,
-  typo tolerance on verbs only), grammar frames (build/create/fix/
-  publish/verify), and slot filling (quotes, titled names, adjacent
-  nouns — never invented). Prints intent + confidence receipt +
-  precedent; read-only, nothing touched. (`src/engine/understand.rs`)
+- **Prose without a model** — `build_page --prose "<prompt>"` resolves
+  prose through the deterministic understander and runs the engine on
+  it at ≥0.75 confidence; below that it refuses with the receipt.
+  Verified translations record into per-project history.
 - **Understanding without a model** — `build_page --understand
   "<prompt>"` parses prose with a hand-built lexicon (verbs, kinds,
   typo tolerance on verbs only), grammar frames (build/create/fix/
   publish/verify), and slot filling (quoted literals, titled names,
   adjacent nouns — never invented). Prints intent + confidence receipt
-  + precedent; read-only, nothing touched. (`src/engine/understand.rs`)
+  + precedent; read-only, nothing touched. Below threshold it gets
+  curious instead of silent: unknown words come back with
+  nearest-lexicon hypotheses, verified history matches, and
+  multi-request detection. (`src/engine/understand.rs`)
 - **Messy-input hardening** — everyday spellings normalize to canonical
   types (`string`→`String`, mirroring rustc defaults; foreign
   spellings pass through); sloppy kinds coerce by shape; `new`/`get`/

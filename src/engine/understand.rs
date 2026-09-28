@@ -79,10 +79,128 @@ const KINDS: &[(&str, &str)] = &[
     ("apk", "apk"),
 ];
 
+/// One thing the parser could not place, with its best guesses.
+/// Curiosity is bounded and transparent: nearest lexicon neighbors by
+/// edit distance, any verified history containing the word, and whether
+/// the prose holds multiple requests. Never a guess acted on — only
+/// questions the user can answer.
+#[derive(Debug, Clone)]
+pub struct Curiosity {
+    pub unknown: String,
+    pub suggestions: Vec<String>,
+    pub history_note: Option<String>,
+}
+
+/// Split markers for multi-request prose ("do X and also Y").
+const CLAUSE_SPLITS: &[&str] = &[" and also ", " and then ", " then "];
+
+/// Lexicon surface for neighbor search: verbs and kind words alike.
+fn lexicon_words() -> Vec<(&'static str, &'static str)> {
+    let mut out: Vec<(&str, &str)> = Vec::new();
+    for (v, _) in VERBS {
+        out.push((*v, "verb"));
+    }
+    for (k, _) in KINDS {
+        out.push((*k, "kind"));
+    }
+    out
+}
+
+/// Nearest lexicon words within distance 4, ordered by (distance,
+/// word). Deterministic; empty when nothing is close.
+fn neighbors(word: &str) -> Vec<String> {
+    let mut scored: Vec<(usize, String, String)> = Vec::new();
+    for (lex, role) in lexicon_words() {
+        let d = edit_distance(word, lex);
+        if d > 0 && d <= 4 {
+            scored.push((d, lex.to_string(), role.to_string()));
+        }
+    }
+    scored.sort();
+    scored
+        .into_iter()
+        .take(3)
+        .map(|(_, w, r)| format!("{} ({})", w, r))
+        .collect()
+}
+
+/// Ask about what the parse could not place. At most 3 curiosities,
+/// longest-unknown-first is wrong — order follows prose order so the
+/// questions read naturally. Pure function of prose + project history.
+pub fn curiosities(prose: &str, project_dir: Option<&std::path::Path>) -> Vec<Curiosity> {
+    let ws = words(prose);
+    let mut out = Vec::new();
+    for w in &ws {
+        if out.len() >= 3 {
+            break;
+        }
+        // Words the parser already accepted — exactly or through
+        // typo tolerance — are understood, never questioned.
+        if w.len() <= 2
+            || STOPWORDS.contains(&w.as_str())
+            || VERBS.iter().any(|(v, _)| v == w)
+            || KINDS.iter().any(|(k, _)| k == w)
+            || fuzzy_verb(w).is_some()
+            || w.chars().all(|c| c.is_ascii_digit())
+        {
+            continue;
+        }
+        // Words already consumed as slots (quotes, names, numbers) are
+        // understood — curiosity is only for the leftovers.
+        let quoted_txt = quoted(prose).join(" ").to_lowercase();
+        let caps: Vec<String> = capitals(prose)
+            .into_iter()
+            .map(|s| s.to_lowercase())
+            .collect();
+        if quoted_txt.contains(w) || caps.iter().any(|c| c == w) {
+            continue;
+        }
+        let history_note = project_dir.and_then(|p| {
+            load_history(p)
+                .into_iter()
+                .find(|r| words(&r.prose).iter().any(|hw| hw == w))
+                .map(|r| format!("last time {:?} meant: {}", r.prose, r.goal))
+        });
+        let suggestions = neighbors(w);
+        out.push(Curiosity {
+            unknown: w.clone(),
+            suggestions,
+            history_note,
+        });
+    }
+    out
+}
+
+/// Detect multiple requests hiding in one breath ("do X and also Y").
+/// Returns the clause count (1 = single). Deterministic substring scan.
+pub fn clause_count(prose: &str) -> usize {
+    let lower = prose.to_lowercase();
+    let mut count = 1;
+    let mut rest = lower.as_str();
+    loop {
+        let mut found = None;
+        for split in CLAUSE_SPLITS {
+            if let Some(pos) = rest.find(split)
+                && found.map(|(_, p)| pos < p).unwrap_or(true)
+            {
+                found = Some((*split, pos));
+            }
+        }
+        match found {
+            Some((split, pos)) => {
+                count += 1;
+                rest = &rest[pos + split.len()..];
+            }
+            None => break,
+        }
+    }
+    count
+}
+
 /// Stopwords ignored by history similarity (small, documented).
 const STOPWORDS: &[&str] = &[
     "a", "an", "the", "to", "for", "with", "and", "of", "in", "on", "please", "my", "me", "it",
-    "this", "that", "is", "are", "be",
+    "this", "that", "is", "are", "be", "also", "then",
 ];
 
 /// One verified translation remembered per project.
@@ -697,6 +815,49 @@ mod tests {
         // Quoted sections complete the page locally.
         let u = understand("create a page called P with \"hello world\"", None);
         assert!(u.confidence >= 0.75, "got {}", u.confidence);
+    }
+
+    #[test]
+    fn curiosity_suggests_nearest_lexicon() {
+        let cs = curiosities("please flibber the widget", None);
+        assert!(!cs.is_empty());
+        assert_eq!(cs[0].unknown, "flibber");
+        // Nothing within distance 4 of "flibber" in the lexicon.
+        assert!(cs[0].suggestions.is_empty());
+        let cs = curiosities("buld it now", None);
+        let all: Vec<&str> = cs.iter().map(|c| c.unknown.as_str()).collect();
+        // "buld" is consumed by fuzzy verbs, so curiosity skips it;
+        // "now" is unknown but has no close neighbor either.
+        assert!(!all.contains(&"buld"));
+    }
+
+    #[test]
+    fn curiosity_recalls_history() {
+        let dir = std::env::temp_dir().join(format!(
+            "gc-und-cur-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut intent = empty_intent("make a counter page".to_string());
+        intent.define = vec![Some(empty_define("Counter".to_string(), "page"))];
+        save_history(&dir, "please make me a counter page now", &intent);
+        let cs = curiosities("counter thing", Some(dir.as_path()));
+        assert!(
+            cs.iter().any(|c| c.history_note.is_some()),
+            "expected a history note, got {:?}",
+            cs
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clause_count_splits_requests() {
+        assert_eq!(clause_count("do this"), 1);
+        assert_eq!(clause_count("build the apk and also fix the bug"), 2);
+        assert_eq!(clause_count("make a page then make it blue"), 2);
     }
 
     #[test]

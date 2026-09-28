@@ -180,6 +180,16 @@ cargo test --all-features
   type normalization, kind coercion, op-slot completion, import targets.
 - 120 tests green (65 lib), clippy clean, fmt clean.
 
+## v0.10.1 — No model anywhere (2026-09-28)
+
+- Deleted the translator, its prompt, and every key: prose resolves
+  through the understander or refuses with its receipt. Chat, UI, and
+  examples all run model-free; `ui` feature still compiles clean.
+- Below threshold the bot gets curious: unknown words return
+  nearest-lexicon hypotheses plus verified history matches, and
+  multi-request prose is detected and split by advice.
+- 122 tests green (67 lib), clippy clean on default AND `ui`, fmt clean.
+
 ## v0.9.3 — Understand-first routing (2026-09-28)
 
 - `--prose` runs the deterministic parser first; ≥0.75 confidence with

@@ -236,13 +236,26 @@ async fn run_task_inner(
     let understood =
         crate::engine::understand::understand(prompt, Some(std::path::Path::new(&project_dir)));
     if understood.confidence < 0.75 || understood.frame == "unknown" {
-        return (
-            format!(
-                "UNDERSTOOD confidence {:.2} frame={} — too thin to act on: {:?}",
-                understood.confidence, understood.frame, understood.intent.unknown_requirements,
-            ),
-            Vec::new(),
+        let mut text = format!(
+            "UNDERSTOOD confidence {:.2} frame={} — too thin to act on: {:?}",
+            understood.confidence, understood.frame, understood.intent.unknown_requirements,
         );
+        let curios = crate::engine::understand::curiosities(
+            prompt,
+            Some(std::path::Path::new(&project_dir)),
+        );
+        if let Some(c) = curios.first() {
+            text.push_str(&format!(
+                " Curious: what is {:?}?{}",
+                c.unknown,
+                if c.suggestions.is_empty() {
+                    String::new()
+                } else {
+                    format!(" Did you mean {}?", c.suggestions.join(", "))
+                }
+            ));
+        }
+        return (text, Vec::new());
     }
     match serde_json::to_string(&understood.intent) {
         Ok(intent_json) => {

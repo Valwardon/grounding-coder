@@ -93,6 +93,26 @@ fn show_understanding(project: &str, prompt: &str) {
             std::process::exit(1);
         }
     }
+    // Curiosity: what the parse could not place, with hypotheses.
+    // Read-only like everything else here.
+    let curios = understand::curiosities(prompt, Some(std::path::Path::new(project)));
+    for c in curios.iter().take(3) {
+        if c.suggestions.is_empty() {
+            println!("curious: what is {:?}?", c.unknown);
+        } else {
+            println!(
+                "curious: {:?} — did you mean {}?",
+                c.unknown,
+                c.suggestions.join(", ")
+            );
+        }
+        if let Some(note) = &c.history_note {
+            println!("curious: {}", note);
+        }
+    }
+    if understand::clause_count(prompt) > 1 {
+        println!("curious: that looks like multiple requests — try one at a time");
+    }
 }
 
 /// Resolve prose into an intent with no model anywhere in the path.
@@ -114,10 +134,26 @@ async fn resolve_prose(project: &str, prompt: &str) -> String {
             std::process::exit(1);
         });
     }
-    eprintln!(
+    let mut msg = format!(
         "UNDERSTOOD confidence {:.2} frame={} — too thin to act on; missing: {:?}. No model fallback exists by design.",
         understood.confidence, understood.frame, understood.intent.unknown_requirements,
     );
+    let curios = grounding_coder::engine::understand::curiosities(
+        prompt,
+        Some(std::path::Path::new(project)),
+    );
+    if let Some(c) = curios.first() {
+        msg.push_str(&format!(
+            " Curious: what is {:?}?{}",
+            c.unknown,
+            if c.suggestions.is_empty() {
+                String::new()
+            } else {
+                format!(" Did you mean {}?", c.suggestions.join(", "))
+            }
+        ));
+    }
+    eprintln!("{}", msg);
     std::process::exit(2);
 }
 
