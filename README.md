@@ -122,8 +122,17 @@ Oracle verify (compiler / tests / parser per language)
   the behavior runs against the real toolchain oracle in a
   disposable scratch project under a real timeout. Green probes
   promote concepts to Verified with the oracle transcript as
-  evidence; red, uncompilable, or timed-out probes record negative
+  evidence;   red, uncompilable, or timed-out probes record negative
   evidence and never promote. (`src/engine/probe.rs`)
+- **Deterministic eyeballs** — photos are scene renders, not pixel
+  guesses: a scene graph (camera, light, ground, decomposed person,
+  tower) renders through a tiny raytracer with a per-material pixel
+  receipt, so "put a tower behind me" is a graph edit whose effect
+  is proven (tower pixels appear, person pixels byte-identical).
+  Classical perception without any model: hand-rolled BMP codec,
+  crop/resize/overlay, histograms, Sobel edges, template matching —
+  every op exact and repeatable. (`src/engine/vision.rs`,
+  `src/engine/scene.rs`, `gc render`)
 - **Generalized Build op** — `TaskKind::Build` ("build …" actions) runs
   the language backend's build oracle: C/`gcc`, Rust/`cargo` (native,
   release, explicit triples), Kotlin/`kotlinc` jars, Java/`javac`,
@@ -205,12 +214,12 @@ Oracle verify (compiler / tests / parser per language)
 
 ## Proof, Not Promises
 
-162 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
+172 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
 `fmt --check` clean:
 
 | Suite | Tests | What it proves |
 |---|---|---|
-| lib (unit) | 89 | recipes, ranker, catalog, pathfind, parsers, manifests, guards, families, understander, disposition, web research, knowledge lifecycle, compiler probes |
+| lib (unit) | 99 | recipes, ranker, catalog, pathfind, parsers, manifests, guards, families, understander, disposition, web research, knowledge lifecycle, compiler probes, deterministic vision (pixels + scenes) |
 | `intent_benchmark` | 13 | happy path, typo tolerance, head-noun kind rule, typo-verbs-never-names, vague/ambiguous refusal, destructive block (even fully specified), contradiction ask, multi-intent split, unknown-concept curiosity |
 | `knowledge_loop` | 3 | budget-bounded offline dreaming with persistence, sleep when nothing open, failures deprioritize without deleting |
 | `learning_experiment` | 2 | dreaming arm rediscovers family patterns (rate 0.55) vs amnesiac baseline (0.00); both arms solve every task |

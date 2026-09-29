@@ -1,5 +1,28 @@
 # Grounding Coder — Progress
 
+## v0.14.0 — Eyeballs: scenes, photos, manipulation (2026-09-29)
+
+- `engine/vision.rs`: `Image` plus a hand-rolled 24-bit BMP codec
+  (zero new dependencies), exact transforms (rect, disc, overlay,
+  crop, nearest-neighbor resize), stats (brightness, histogram,
+  dominant color, near-counts), Sobel edges, and SAD template
+  matching. One real bug caught by its own tests: void-as-black
+  borders printed phantom edges; borders now clamp.
+- `engine/scene.rs`: scene graph (camera, light, ground plane,
+  `person()` decomposed into head/torso/arms/legs, `tower()`
+  shaft-plus-cap) rendered by a tiny deterministic raytracer
+  (Lambert + hard shadows + gradient sky) with a per-material pixel
+  receipt. Same scene twice renders byte-identical; adding the
+  tower is proven to leave every person pixel untouched.
+- `gc render --out photo.bmp`: renders the demo scene with receipt
+  and BMP read-back verification. Proved live: 320×240 photo, sky
+  up top, ground below, 3,826 tower pixels.
+- What it honestly cannot do, stated in the code: name objects in
+  arbitrary photographs. That takes a model; everything here is
+  structure from arithmetic.
+- 172 tests green (99 lib + 73 integration), clippy `-D warnings`
+  clean on default AND `ui`, fmt clean.
+
 ## v0.13.0 — Compiler-probe evidence (2026-09-29)
 
 - `engine/probe.rs`: `ProbeSpec` (claim + self-contained `main.rs`

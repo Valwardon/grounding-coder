@@ -12,11 +12,13 @@ pub mod probe;
 pub mod rank;
 pub mod recipes;
 pub mod research;
+pub mod scene;
 pub mod symbols;
 pub mod synthesize;
 pub mod tasks;
 pub mod understand;
 pub mod verifier;
+pub mod vision;
 pub mod writer;
 
 pub use crate::oracle::{

@@ -33,6 +33,18 @@ enum Commands {
     },
     /// Show recipes in the error-correction log
     Recipes,
+    /// Render the demo scene (person, tower, ground, sky) to a BMP photo
+    Render {
+        /// Output file path
+        #[arg(short, long, default_value = "photo.bmp")]
+        out: String,
+        /// Frame width in pixels
+        #[arg(long, default_value_t = 320)]
+        width: u32,
+        /// Frame height in pixels
+        #[arg(long, default_value_t = 240)]
+        height: u32,
+    },
     /// Dream: run the idle learning loop — investigate open questions
     /// and promote only what verifies. Bounded by budget, then sleeps.
     Dream {
@@ -108,6 +120,38 @@ fn main() {
                 let bot = CodeBot::new(".", 5);
                 for recipe in bot.recipes() {
                     println!("  {}", recipe);
+                }
+            }
+            Commands::Render { out, width, height } => {
+                use grounding_coder::engine::{scene, vision::Image};
+                let width = width.clamp(16, 1920);
+                let height = height.clamp(16, 1920);
+                let (img, receipt) = scene::render(&scene::demo_scene(width, height));
+                let path = std::path::Path::new(&out);
+                match img.save_bmp(path) {
+                    Ok(()) => {
+                        println!("rendered {} ({}x{})", out, width, height);
+                        for (name, count) in &receipt {
+                            println!("  {:16} {} px", name, count);
+                        }
+                        // Read-back proves the file is a photo, not a promise.
+                        match Image::load_bmp(path) {
+                            Ok(back) => println!(
+                                "verified: read back {}x{}, brightness {:.2}",
+                                back.width,
+                                back.height,
+                                back.mean_brightness()
+                            ),
+                            Err(e) => {
+                                eprintln!("READBACK FAILED: {}", e);
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("RENDER FAILED: {}", e);
+                        std::process::exit(1);
+                    }
                 }
             }
             Commands::Dream {
