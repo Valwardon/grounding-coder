@@ -195,7 +195,7 @@ Oracle verify (compiler / tests / parser per language)
 
 | Suite | Tests | What it proves |
 |---|---|---|
-| lib (unit) | 64 | recipes, ranker, catalog, pathfind, parsers, manifests, guards, families, understander |
+| lib (unit) | 75 | recipes, ranker, catalog, pathfind, parsers, manifests, guards, families, understander, web research |
 | `build` | 6 | C/Java/Rust real builds + artifacts run; unknown targets block; dx-output APK discovery |
 | `replicate` | 6 | byte-exact replication, hash-mismatch block, replace-exact rules, clean-room refusal + opt-out |
 | `editplan` | 4 | byte-range apply, stale rejection, invalid-range rejection, LLM-code rejection |
