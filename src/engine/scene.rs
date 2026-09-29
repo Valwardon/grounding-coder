@@ -319,8 +319,13 @@ pub struct BodyPlan {
     pub shoulder_half: f64,
     /// Hip half-width / stature.
     pub hip_half: f64,
-    /// Shoulder→wrist length / stature (plus shoulder_half ≈ 1/2 span).
+    /// Shoulder→wrist length / stature. Fingertips (not wrists) set
+    /// the span: shoulder_half + arm_len + finger_len ≈ 1/2.
     pub arm_len: f64,
+    /// Wrist→fingertip length / stature, from the anatomy graph.
+    pub finger_len: f64,
+    /// Wrist→thumb-tip length / stature.
+    pub thumb_len: f64,
     /// Torso half-width / stature.
     pub torso_half: f64,
     /// Limb radii / stature.
@@ -336,7 +341,9 @@ impl BodyPlan {
             shoulder_y: 0.815,
             shoulder_half: 0.125,
             hip_half: 0.095,
-            arm_len: 0.375,
+            arm_len: 0.29,
+            finger_len: 0.085,
+            thumb_len: 0.055,
             torso_half: 0.13,
             leg_r: 0.055,
             arm_r: 0.045,
@@ -465,6 +472,31 @@ pub fn person_plan(base: Vec3, scale: f64, spec: &PersonSpec, plan: &BodyPlan) -
         out.push(Shape::Sphere {
             center: hand,
             radius: plan.arm_r * h * 1.25,
+            mat: skin_hand.clone(),
+        });
+        // Fingers from the anatomy graph: four continuing the arm
+        // line, fanned across the knuckles; thumb angled out-forward.
+        // Fingertips (not wrists) set the measured span.
+        let fdir = hand.sub(shoulder).norm();
+        for k in 0..4 {
+            let kx = hand.x + (k as f64 - 1.5) * 0.018 * h;
+            let start = Vec3::new(kx, hand.y, hand.z + 0.005 * h).add(fdir.scale(0.012 * h));
+            out.push(Shape::Capsule {
+                a: start,
+                b: start.add(fdir.scale(plan.finger_len * h)),
+                radius: plan.arm_r * h * 0.5,
+                mat: skin_hand.clone(),
+            });
+        }
+        let outer = if shoulder.x < base.x { -1.0 } else { 1.0 };
+        let tdir = fdir
+            .scale(0.7)
+            .add(Vec3::new(outer * 0.5, 0.0, 0.35))
+            .norm();
+        out.push(Shape::Capsule {
+            a: hand,
+            b: hand.add(tdir.scale(plan.thumb_len * h)),
+            radius: plan.arm_r * h * 0.55,
             mat: skin_hand.clone(),
         });
     }

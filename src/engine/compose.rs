@@ -49,6 +49,97 @@ pub fn studio_backdrop(w: u32, h: u32, top: Rgb, bottom: Rgb) -> Image {
 /// region, occupying 0.1%–50% of the frame with its centroid in the
 /// upper three-quarters. A mahogany table dead-center would pass;
 /// the log records the bbox so the assumption stays checkable.
+/// A found subject: bbox in the searched image, area, part count.
+struct Subject {
+    x0: u32,
+    y0: u32,
+    x1: u32,
+    y1: u32,
+    area: u64,
+    parts: usize,
+    cx: f64,
+    cy: f64,
+}
+
+/// Subject search on one image region: mask, clean, assemble, gate.
+/// Shared by whole plates and collage cells alike.
+fn find_subject(img: &Image) -> Result<Subject, String> {
+    let (w, h) = (img.width, img.height);
+    let frame_area = (w * h) as f64;
+    let cleaned = Image::morph_close(&Image::morph_open(&img.skin_mask(), w, h, 2), w, h, 2);
+    // Subject assembly: the largest blob seeds, nearby fragments
+    // (head split from torso by hair, hands split by sleeves) merge
+    // back in. Largest-blob-only framing decapitated a sitter in
+    // testing — torso composited, head left on the plate.
+    let blobs = Image::all_blobs(&cleaned, w, h, (frame_area * 0.0005) as usize);
+    let (x0, y0, x1, y1, area, parts) = Image::assemble_subject(&blobs, w, h, 0.06)
+        .ok_or_else(|| "no skin region found".to_string())?;
+    let area_u = area as u64;
+    let fraction = area as f64 / frame_area;
+    if !(0.001..=0.5).contains(&fraction) {
+        return Err(format!(
+            "subject implausible: {:.3} of frame is skin",
+            fraction
+        ));
+    }
+    let (cx, cy) = ((x0 + x1) as f64 / 2.0, (y0 + y1) as f64 / 2.0);
+    if cy > h as f64 * 0.75 {
+        return Err("skin centroid in lower quarter — likely not a portrait subject".to_string());
+    }
+    // Coherence: one compact blob, or a merged union that still fits
+    // comfortably inside the frame. Speckle fields spanning the whole
+    // plate fail the union bound — unless anchored: the seed alone is
+    // a large compact mass (a torso cropped by the frame, the classic
+    // portrait crop), so fragments joining it are trusted further.
+    // The fraction gate above still caps full-frame skin washes.
+    let union_area = (x1 - x0 + 1) as f64 * (y1 - y0 + 1) as f64;
+    let fill = area as f64 / union_area;
+    let seed_fill = {
+        let (sa, sx0, sy0, sx1, sy1) = (
+            blobs[0].0 as f64,
+            blobs[0].1,
+            blobs[0].2,
+            blobs[0].3,
+            blobs[0].4,
+        );
+        sa / ((sx1 - sx0 + 1) as f64 * (sy1 - sy0 + 1) as f64)
+    };
+    let anchored = blobs[0].0 as f64 >= frame_area * 0.05 && seed_fill >= 0.40;
+    if parts == 1 {
+        if fill < 0.30 {
+            return Err(format!("subject scattered (compactness {:.2})", fill));
+        }
+    } else if anchored {
+        // The anchor carries the decision, so the union bound is a
+        // backstop (literally full-bleed only) and fill does the work:
+        // a close-up figure cropped by the frame fills its union
+        // sparsely but genuinely; a speckle halo around a seed does
+        // not reach 0.15.
+        if union_area > frame_area * 0.99 || fill < 0.15 {
+            return Err(format!(
+                "anchored subject incoherent (union {:.2} of frame, fill {:.2})",
+                union_area / frame_area,
+                fill
+            ));
+        }
+    } else if union_area > frame_area * 0.80 || fill < 0.15 {
+        return Err(format!(
+            "assembled subject incoherent ({} parts, fill {:.2})",
+            parts, fill
+        ));
+    }
+    Ok(Subject {
+        x0,
+        y0,
+        x1,
+        y1,
+        area: area_u,
+        parts,
+        cx,
+        cy,
+    })
+}
+
 pub fn compose_portrait(
     plate: &Image,
     source: &str,
@@ -56,53 +147,65 @@ pub fn compose_portrait(
     out_h: u32,
 ) -> Result<(Image, ComposeLog), String> {
     let (pw, ph) = (plate.width, plate.height);
-    let frame_area = (pw * ph) as f64;
-    let cleaned = Image::morph_close(&Image::morph_open(&plate.skin_mask(), pw, ph, 2), pw, ph, 2);
-    // Subject assembly: the largest blob seeds, nearby fragments
-    // (head split from torso by hair, hands split by sleeves) merge
-    // back in. Largest-blob-only framing decapitated a sitter in
-    // testing — torso composited, head left on the plate.
-    let blobs = Image::all_blobs(&cleaned, pw, ph, (frame_area * 0.0005) as usize);
-    let (x0, y0, x1, y1, area, parts) = Image::assemble_subject(&blobs, pw, ph, 0.06)
-        .ok_or_else(|| "no skin region found — refusing".to_string())?;
-    let fraction = area as f64 / frame_area;
-    if !(0.001..=0.5).contains(&fraction) {
-        return Err(format!(
-            "subject implausible: {:.3} of frame is skin — refusing",
-            fraction
-        ));
-    }
-    let (cx, cy) = ((x0 + x1) as f64 / 2.0, (y0 + y1) as f64 / 2.0);
-    if cy > ph as f64 * 0.75 {
-        return Err("skin centroid in lower quarter — likely not a portrait subject".to_string());
-    }
-    // Coherence: one compact blob, or a merged union that still fits
-    // comfortably inside the frame. Speckle fields spanning the whole
-    // plate fail the union bound.
-    let union_area = (x1 - x0 + 1) as f64 * (y1 - y0 + 1) as f64;
-    let fill = area as f64 / union_area;
-    if parts == 1 {
-        if fill < 0.30 {
-            return Err(format!(
-                "subject scattered (compactness {:.2}) — no coherent region, refusing",
-                fill
-            ));
+    // Collage handling: gutter seams split the plate into photo cells
+    // and each cell is searched independently. Merging across a seam
+    // once composited half of one photo with half of another — the
+    // largest passing cell wins and the log names it.
+    let seams = plate.find_seams(60.0);
+    let mut bands: Vec<(u32, u32)> = Vec::new();
+    let mut top = 0u32;
+    for (s0, s1) in &seams {
+        if *s0 > top + ph / 10 {
+            bands.push((top, s0 - 1));
         }
-    } else if union_area > frame_area * 0.80 || fill < 0.15 {
-        return Err(format!(
-            "assembled subject incoherent ({} parts, fill {:.2}) — refusing",
-            parts, fill
-        ));
+        top = s1 + 1;
     }
+    if top < ph.saturating_sub(ph / 10) {
+        bands.push((top, ph - 1));
+    }
+    if bands.is_empty() {
+        bands.push((0, ph - 1));
+    }
+    let mut best: Option<(usize, Subject)> = None;
+    let mut cell_notes = Vec::new();
+    for (i, (cy0, cy1)) in bands.iter().enumerate() {
+        let cell = plate.crop(0, *cy0, pw, cy1 - cy0 + 1);
+        match find_subject(&cell) {
+            Ok(s) => {
+                cell_notes.push(format!(
+                    "cell {} rows {}-{}: subject {} parts",
+                    i, cy0, cy1, s.parts
+                ));
+                match &best {
+                    Some((_, b)) if b.area >= s.area => {}
+                    _ => best = Some((i, s)),
+                }
+            }
+            Err(e) => cell_notes.push(format!("cell {} rows {}-{}: {}", i, cy0, cy1, e)),
+        }
+    }
+    let (cell_idx, subj) = best.ok_or_else(|| {
+        format!(
+            "no cell holds a subject — refusing ({})",
+            cell_notes.join("; ")
+        )
+    })?;
+    let (cell_y0, cell_y1) = bands[cell_idx];
+    // Map the winning bbox back to plate coordinates.
+    let (x0, y0, x1, y1) = (subj.x0, subj.y0 + cell_y0, subj.x1, subj.y1 + cell_y0);
+    let (area, parts, cx, cy) = (subj.area, subj.parts, subj.cx, subj.cy + cell_y0 as f64);
+    let frame_area = (pw * ph) as f64;
+    let fraction = area as f64 / frame_area;
 
-    // Frame: expand the bbox, clamp to the plate, crop, fit to 88% of
-    // output height preserving aspect.
+    // Frame: expand the bbox, clamp to the winning cell (never bleed
+    // into the neighboring photo), crop, fit to 88% of output height
+    // preserving aspect.
     let mx = ((x1 - x0) as f64 * 0.6) as u32;
     let my = ((y1 - y0) as f64 * 0.6) as u32;
     let fx0 = x0.saturating_sub(mx);
-    let fy0 = y0.saturating_sub(my);
+    let fy0 = y0.saturating_sub(my).max(cell_y0);
     let fx1 = (x1 + mx).min(pw - 1);
-    let fy1 = (y1 + my).min(ph - 1);
+    let fy1 = (y1 + my).min(cell_y1);
     let crop = plate.crop(fx0, fy0, fx1 - fx0 + 1, fy1 - fy0 + 1);
     // Fit inside (out_w, 88% out_h) preserving aspect: clamping width
     // without rescaling height stretches faces — the test caught a
@@ -112,7 +215,7 @@ pub fn compose_portrait(
         (target_h as f64 / crop.height.max(1) as f64).min(out_w as f64 / crop.width.max(1) as f64);
     let sw = ((crop.width as f64 * fit).round() as u32).max(1);
     let sh = ((crop.height as f64 * fit).round() as u32).max(1);
-    let subject = crop.resize(sw, sh);
+    let subject = crop.resize_smooth(sw, sh);
 
     let mut fg = Image::blank(out_w, out_h, Rgb::new(0, 0, 0));
     let ox = (out_w.saturating_sub(subject.width)) / 2;
@@ -136,6 +239,12 @@ pub fn compose_portrait(
         pasted: (ox, oy, subject.width, subject.height),
         subject_fraction: fraction,
         ops: vec![
+            format!(
+                "collage check: {} seam(s), composing from cell {} ({})",
+                seams.len(),
+                cell_idx,
+                cell_notes.join("; ")
+            ),
             format!("skin_mask Cb[77,127] Cr[133,173] Y>40 on {}x{}", pw, ph),
             "morph_open x2 then morph_close x2".to_string(),
             format!(
@@ -199,10 +308,52 @@ mod tests {
             "{}",
             log.subject_fraction
         );
-        assert_eq!(log.ops.len(), 6);
+        assert_eq!(log.ops.len(), 7);
+        // Single photo: no seams, one cell.
+        assert!(log.ops[0].contains("0 seam(s)"), "{:?}", log.ops);
         // Subject pixels survived at the output center-top.
         let center = out.get(32, 20).expect("pixel");
         assert!(center.r > 100 && center.b < 160, "{:?}", center);
+    }
+
+    #[test]
+    fn collage_composes_one_photo_not_both() {
+        // Two stacked "photos": big skin rect on top, small below,
+        // split by a white gutter. The seam must not merge them.
+        let mut plate = Image::blank(60, 120, Rgb::new(40, 60, 120));
+        plate.draw_rect(15, 10, 30, 30, Rgb::new(200, 150, 115));
+        for x in 0..60 {
+            plate.set(x, 60, Rgb::new(255, 255, 255));
+            plate.set(x, 61, Rgb::new(255, 255, 255));
+        }
+        plate.draw_rect(20, 80, 12, 12, Rgb::new(200, 150, 115));
+        let (out, log) = compose_portrait(&plate, "synthetic", 64, 80).expect("collage");
+        assert!(log.ops[0].contains("1 seam(s)"), "{:?}", log.ops);
+        assert!(log.ops[0].contains("cell 0"), "{:?}", log.ops);
+        // Subject bbox stays in the top cell (rows < 60).
+        assert!(log.subject_bbox.3 < 60, "{:?}", log.subject_bbox);
+        assert_eq!((out.width, out.height), (64, 80));
+    }
+
+    #[test]
+    fn anchored_closeup_accepts_wide_union() {
+        // Portrait crop arithmetic, exact: seed 2212px + three frags
+        // = 4900/10000 (fraction ok), union 95x85 = 80.75% (past the
+        // free-floating 80% bar, inside the anchored 95% bar).
+        // Under the old rule this exact layout refused.
+        let mut plate = Image::blank(100, 100, Rgb::new(40, 60, 120));
+        let skin = Rgb::new(200, 150, 115);
+        plate.draw_rect(1, 39, 79, 28, skin);
+        plate.draw_rect(86, 46, 10, 20, skin);
+        plate.draw_rect(22, 9, 48, 24, skin);
+        plate.draw_rect(22, 67, 48, 27, skin);
+        let (out, log) = compose_portrait(&plate, "synthetic", 64, 80).expect("anchored");
+        assert_eq!((out.width, out.height), (64, 80));
+        assert!(
+            log.subject_fraction > 0.45 && log.subject_fraction <= 0.5,
+            "{}",
+            log.subject_fraction
+        );
     }
 
     #[test]

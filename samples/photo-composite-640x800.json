@@ -9,27 +9,29 @@
     "page_url": "https://www.pinterest.com/pin/188517934395037700/",
     "source_url": "https://i.pinimg.com/736x/04/16/61/0416618300d1c9723b405c844d18bbda.jpg"
   },
+  "subject_cell": "cell 0 rows 0-637 (1 seam found)",
   "subject_bbox_plate_px": [
     0,
     0,
     514,
-    1013
+    637
   ],
-  "subject_fraction": 0.122,
-  "assembled_parts": 12,
+  "subject_fraction": 0.124,
+  "assembled_parts": 18,
   "pasted": [
-    141,
+    36,
     24,
-    358,
+    568,
     704
   ],
   "ops": [
+    "collage seam split",
     "skin locus + Y>40",
     "morph open/close x2",
-    "subject assembly (12 fragments, 6% gap rule)",
-    "coherence gate (union fit)",
-    "60% margin frame",
-    "keep-aspect fit",
+    "subject assembly (18 fragments)",
+    "anchored coherence gate",
+    "cell-clamped frame",
+    "keep-aspect fit + bilinear",
     "feather r4",
     "studio backdrop",
     "grain/vignette"

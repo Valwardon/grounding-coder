@@ -134,6 +134,101 @@ impl Image {
         out
     }
 
+    /// Bilinear resize: smooth upscale/downscale without stairsteps.
+    /// Solid colors stay exact; edges interpolate linearly.
+    pub fn resize_smooth(&self, w: u32, h: u32) -> Image {
+        let (w, h) = (w.max(1), h.max(1));
+        let mut out = Image::blank(w, h, Rgb::new(0, 0, 0));
+        if self.width == 0 || self.height == 0 {
+            return out;
+        }
+        for y in 0..h {
+            let sy = if h == 1 {
+                0.0
+            } else {
+                y as f64 * (self.height - 1) as f64 / (h - 1) as f64
+            };
+            let y0 = (sy.floor() as u32).min(self.height - 1);
+            let y1 = (y0 + 1).min(self.height - 1);
+            let fy = sy - sy.floor();
+            for x in 0..w {
+                let sx = if w == 1 {
+                    0.0
+                } else {
+                    x as f64 * (self.width - 1) as f64 / (w - 1) as f64
+                };
+                let x0 = (sx.floor() as u32).min(self.width - 1);
+                let x1 = (x0 + 1).min(self.width - 1);
+                let fx = sx - sx.floor();
+                let mix = |a: u8, b: u8, t: f64| a as f64 * (1.0 - t) + b as f64 * t;
+                let chan = |c: fn(Rgb) -> u8| {
+                    let t = mix(
+                        c(self.pixels[(y0 * self.width + x0) as usize]),
+                        c(self.pixels[(y0 * self.width + x1) as usize]),
+                        fx,
+                    );
+                    let b = mix(
+                        c(self.pixels[(y1 * self.width + x0) as usize]),
+                        c(self.pixels[(y1 * self.width + x1) as usize]),
+                        fx,
+                    );
+                    (mix(t as u8, b as u8, fy)).round() as u8
+                };
+                out.set(x, y, Rgb::new(chan(|p| p.r), chan(|p| p.g), chan(|p| p.b)));
+            }
+        }
+        out
+    }
+
+    /// Collage seams: interior runs (≥2px) of full-width near-uniform
+    /// rows. Frame edges don't count (letterboxing is normal).
+    /// Returns the seam bands; cells lie between them.
+    pub fn find_seams(&self, var_threshold: f64) -> Vec<(u32, u32)> {
+        let mut flat = vec![false; self.height as usize];
+        for y in 0..self.height {
+            let mut sr = 0u64;
+            let mut sg = 0u64;
+            let mut sb = 0u64;
+            let mut s2 = 0u64;
+            for x in (0..self.width).step_by(4) {
+                let p = self.pixels[(y * self.width + x) as usize];
+                sr += p.r as u64;
+                sg += p.g as u64;
+                sb += p.b as u64;
+                s2 += (p.r as u64) * (p.r as u64)
+                    + (p.g as u64) * (p.g as u64)
+                    + (p.b as u64) * (p.b as u64);
+            }
+            let n = self.width.div_ceil(4).max(1) as f64;
+            let var = s2 as f64 / n
+                - (sr as f64 / n).powi(2)
+                - (sg as f64 / n).powi(2)
+                - (sb as f64 / n).powi(2);
+            // Gutters are near-white or near-black strips; a flat
+            // mid-tone band (sky, sweep) is content, not a seam.
+            let mean = (sr + sg + sb) as f64 / n;
+            flat[y as usize] = var < var_threshold && (mean > 720.0 || mean < 36.0);
+        }
+        // Group into runs; drop edge-touching runs.
+        let mut seams = Vec::new();
+        let mut y = 0u32;
+        while y < self.height {
+            if flat[y as usize] {
+                let mut y1 = y;
+                while y1 + 1 < self.height && flat[(y1 + 1) as usize] {
+                    y1 += 1;
+                }
+                if y1 > y && y > 0 && y1 + 1 < self.height {
+                    seams.push((y, y1));
+                }
+                y = y1 + 1;
+            } else {
+                y += 1;
+            }
+        }
+        seams
+    }
+
     /// Nearest-neighbor resize. Deterministic down to the pixel.
     pub fn resize(&self, w: u32, h: u32) -> Image {
         let mut out = Image::blank(w.max(1), h.max(1), Rgb::new(0, 0, 0));
@@ -911,6 +1006,37 @@ mod tests {
         assert_eq!(union.5, 2, "two parts: {:?}", union);
         // Empty mask: no subject invented.
         assert!(Image::assemble_subject(&[], 200, 200, 0.06).is_none());
+    }
+
+    #[test]
+    fn seams_split_collages_not_skies() {
+        let mut img = Image::blank(40, 100, Rgb::new(80, 100, 140));
+        // White gutter mid-frame: a seam.
+        for x in 0..40 {
+            img.set(x, 50, Rgb::new(255, 255, 255));
+            img.set(x, 51, Rgb::new(255, 255, 255));
+        }
+        // Flat mid-tone band: content, not a seam.
+        img.draw_rect(0, 70, 40, 4, Rgb::new(120, 120, 120));
+        let seams = img.find_seams(60.0);
+        assert_eq!(seams.len(), 1, "{:?}", seams);
+        assert_eq!(seams[0], (50, 51));
+    }
+
+    #[test]
+    fn smooth_resize_interpolates() {
+        // 2x1 red-black upscale to 3x1: middle pixel mixes.
+        let mut img = Image::blank(2, 1, Rgb::new(0, 0, 0));
+        img.set(0, 0, Rgb::new(255, 0, 0));
+        let big = img.resize_smooth(3, 1);
+        assert_eq!(big.get(0, 0), Some(Rgb::new(255, 0, 0)));
+        assert_eq!(big.get(2, 0), Some(Rgb::new(0, 0, 0)));
+        let mid = big.get(1, 0).unwrap().r;
+        assert!(mid > 100 && mid < 160, "bilinear middle: {}", mid);
+        // Solid colors stay exact through any resize.
+        let flat = Image::blank(7, 5, Rgb::new(12, 34, 56));
+        let grown = flat.resize_smooth(13, 11);
+        assert!(grown.get(6, 5) == Some(Rgb::new(12, 34, 56)));
     }
 
     #[test]

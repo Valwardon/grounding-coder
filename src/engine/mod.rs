@@ -1,3 +1,4 @@
+pub mod anatomy;
 pub mod arena;
 pub mod budget;
 pub mod catalog;

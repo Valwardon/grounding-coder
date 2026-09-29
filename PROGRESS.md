@@ -22,6 +22,14 @@
   figures). `assemble_subject` merges fragments across small gaps
   with a coherence gate on the union; the 12-part subject now
   frames head-through-torso. Pinned by test.
+- Then the second one: the plate was a two-photo collage (color
+  half-body over B&W full body, white gutter at row 640) and the
+  merger fused both photos into one "subject". `find_seams` splits
+  collage cells, each cell is searched independently, the largest
+  passing cell wins with cell-clamped framing. Plus bilinear
+  `resize_smooth` (nearest-neighbor stairsteps are a fidelity tax)
+  and an anchored-close-up rule so portrait crops aren't refused
+  for filling their cell.
 - 186 tests green (113 lib + 73 integration), clippy `-D warnings`
   clean on default AND `ui`, fmt clean.
 
