@@ -44,6 +44,9 @@ enum Commands {
         /// Frame height in pixels
         #[arg(long, default_value_t = 240)]
         height: u32,
+        /// Portrait framing: camera in close on the person
+        #[arg(long)]
+        closeup: bool,
     },
     /// Dream: run the idle learning loop — investigate open questions
     /// and promote only what verifies. Bounded by budget, then sleeps.
@@ -122,11 +125,20 @@ fn main() {
                     println!("  {}", recipe);
                 }
             }
-            Commands::Render { out, width, height } => {
+            Commands::Render {
+                out,
+                width,
+                height,
+                closeup,
+            } => {
                 use grounding_coder::engine::{scene, vision::Image};
                 let width = width.clamp(16, 1920);
                 let height = height.clamp(16, 1920);
-                let (img, receipt) = scene::render(&scene::demo_scene(width, height));
+                let (img, receipt) = scene::render(&if closeup {
+                    scene::portrait_scene(width, height)
+                } else {
+                    scene::demo_scene(width, height)
+                });
                 let path = std::path::Path::new(&out);
                 match img.save_bmp(path) {
                     Ok(()) => {

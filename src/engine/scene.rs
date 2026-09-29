@@ -264,6 +264,20 @@ impl Scene {
     }
 }
 
+/// Portrait variant: same world, camera moved in close on the
+/// person — head and torso fill the frame. Sample photos of people.
+pub fn portrait_scene(width: u32, height: u32) -> Scene {
+    let mut scene = demo_scene(width, height);
+    scene.camera = Camera {
+        pos: Vec3::new(-1.2, 1.55, 2.4),
+        look_at: Vec3::new(-1.2, 1.15, 0.0),
+        fov_deg: 42.0,
+        width,
+        height,
+    };
+    scene
+}
+
 /// The demo: a person, a tower behind them, ground, sky, one light.
 pub fn demo_scene(width: u32, height: u32) -> Scene {
     let mut shapes = vec![Shape::Plane {

@@ -132,7 +132,7 @@ Oracle verify (compiler / tests / parser per language)
   Classical perception without any model: hand-rolled BMP codec,
   crop/resize/overlay, histograms, Sobel edges, template matching —
   every op exact and repeatable. (`src/engine/vision.rs`,
-  `src/engine/scene.rs`, `gc render`)
+  `src/engine/scene.rs`, `gc render`; sample photos in `samples/`)
 - **Generalized Build op** — `TaskKind::Build` ("build …" actions) runs
   the language backend's build oracle: C/`gcc`, Rust/`cargo` (native,
   release, explicit triples), Kotlin/`kotlinc` jars, Java/`javac`,
