@@ -15,9 +15,13 @@
 - License normalization (separators are noise), thumbnail-first
   fetching (broke an upload.wikimedia throttle wall), 2s politeness
   delays, unknown-author substring matching.
-- Proved live: CC0 studio plate → 640×800 portrait, subject framed
-  from bbox (0,319)-(514,756), aspect exact. Committed with source
-  plate, provenance, and op log.
+- Proved live: CC0 studio plate → 640×800 portrait, aspect exact.
+  Committed with source plate, provenance, and op log.
+- Then the fix that mattered: largest-blob-only framing decapitated
+  a sitter (torso composited, head left on the plate — hair splits
+  figures). `assemble_subject` merges fragments across small gaps
+  with a coherence gate on the union; the 12-part subject now
+  frames head-through-torso. Pinned by test.
 - 186 tests green (113 lib + 73 integration), clippy `-D warnings`
   clean on default AND `ui`, fmt clean.
 

@@ -58,8 +58,12 @@ pub fn compose_portrait(
     let (pw, ph) = (plate.width, plate.height);
     let frame_area = (pw * ph) as f64;
     let cleaned = Image::morph_close(&Image::morph_open(&plate.skin_mask(), pw, ph, 2), pw, ph, 2);
-    let blob = Image::largest_blob(&cleaned, pw, ph);
-    let (area, cx, cy, x0, y0, x1, y1) = Image::blob_stats(&blob, pw)
+    // Subject assembly: the largest blob seeds, nearby fragments
+    // (head split from torso by hair, hands split by sleeves) merge
+    // back in. Largest-blob-only framing decapitated a sitter in
+    // testing — torso composited, head left on the plate.
+    let blobs = Image::all_blobs(&cleaned, pw, ph, (frame_area * 0.0005) as usize);
+    let (x0, y0, x1, y1, area, parts) = Image::assemble_subject(&blobs, pw, ph, 0.06)
         .ok_or_else(|| "no skin region found — refusing".to_string())?;
     let fraction = area as f64 / frame_area;
     if !(0.001..=0.5).contains(&fraction) {
@@ -68,18 +72,26 @@ pub fn compose_portrait(
             fraction
         ));
     }
+    let (cx, cy) = ((x0 + x1) as f64 / 2.0, (y0 + y1) as f64 / 2.0);
     if cy > ph as f64 * 0.75 {
         return Err("skin centroid in lower quarter — likely not a portrait subject".to_string());
     }
-    // Compactness: a face-and-hands cluster fills much of its bbox;
-    // a speckle field scattered across an umber ground does not.
-    // Painted portraits routinely fail here — that refusal is the
-    // detector telling the truth about its own limits.
-    let bbox_area = (x1 - x0 + 1) as f64 * (y1 - y0 + 1) as f64;
-    if area as f64 / bbox_area < 0.30 {
+    // Coherence: one compact blob, or a merged union that still fits
+    // comfortably inside the frame. Speckle fields spanning the whole
+    // plate fail the union bound.
+    let union_area = (x1 - x0 + 1) as f64 * (y1 - y0 + 1) as f64;
+    let fill = area as f64 / union_area;
+    if parts == 1 {
+        if fill < 0.30 {
+            return Err(format!(
+                "subject scattered (compactness {:.2}) — no coherent region, refusing",
+                fill
+            ));
+        }
+    } else if union_area > frame_area * 0.80 || fill < 0.15 {
         return Err(format!(
-            "subject scattered (compactness {:.2}) — no coherent region, refusing",
-            area as f64 / bbox_area
+            "assembled subject incoherent ({} parts, fill {:.2}) — refusing",
+            parts, fill
         ));
     }
 
@@ -126,7 +138,10 @@ pub fn compose_portrait(
         ops: vec![
             format!("skin_mask Cb[77,127] Cr[133,173] Y>40 on {}x{}", pw, ph),
             "morph_open x2 then morph_close x2".to_string(),
-            format!("largest blob: area={} centroid=({:.0},{:.0})", area, cx, cy),
+            format!(
+                "assembled subject: area={} centroid=({:.0},{:.0}) parts={}",
+                area, cx, cy, parts
+            ),
             format!(
                 "frame bbox ({},{})-({},{}) with 60% margin",
                 fx0, fy0, fx1, fy1

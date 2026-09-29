@@ -453,6 +453,110 @@ impl Image {
         best
     }
 
+    /// All blobs above `min_area`, largest first. Each entry is
+    /// (area, x0, y0, x1, y1).
+    pub fn all_blobs(
+        mask: &[bool],
+        width: u32,
+        height: u32,
+        min_area: usize,
+    ) -> Vec<(usize, u32, u32, u32, u32)> {
+        let mut seen = vec![false; mask.len()];
+        let mut out = Vec::new();
+        for i in 0..mask.len() {
+            if !mask[i] || seen[i] {
+                continue;
+            }
+            let mut area = 0usize;
+            let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
+            let mut stack = vec![i];
+            seen[i] = true;
+            while let Some(j) = stack.pop() {
+                let x = (j as u32) % width;
+                let y = (j as u32) / width;
+                area += 1;
+                x0 = x0.min(x);
+                y0 = y0.min(y);
+                x1 = x1.max(x);
+                y1 = y1.max(y);
+                for (nx, ny) in [
+                    (x.wrapping_sub(1), y),
+                    (x + 1, y),
+                    (x, y.wrapping_sub(1)),
+                    (x, y + 1),
+                ] {
+                    if nx < width && ny < height {
+                        let k = (ny * width + nx) as usize;
+                        if mask[k] && !seen[k] {
+                            seen[k] = true;
+                            stack.push(k);
+                        }
+                    }
+                }
+            }
+            if area >= min_area {
+                out.push((area, x0, y0, x1, y1));
+            }
+        }
+        out.sort_by_key(|a| std::cmp::Reverse(a.0));
+        out
+    }
+
+    /// Assemble one subject from fragments: starting at the largest
+    /// blob, absorb any blob whose bbox nearly touches the growing
+    /// union (vertical gap ≤ `gap_frac` of frame height with
+    /// horizontal overlap, or vice versa). Hair, collars, and shadows
+    /// split figures; the gap rule puts them back together while
+    /// distant speckles stay out. Returns the union bbox or None when
+    /// the seed itself is missing.
+    pub fn assemble_subject(
+        blobs: &[(usize, u32, u32, u32, u32)],
+        width: u32,
+        height: u32,
+        gap_frac: f64,
+    ) -> Option<(u32, u32, u32, u32, usize, usize)> {
+        if blobs.is_empty() {
+            return None;
+        }
+        let gap_y = (height as f64 * gap_frac) as u32;
+        let gap_x = (width as f64 * gap_frac) as u32;
+        let (mut area, mut x0, mut y0, mut x1, mut y1) =
+            (blobs[0].0, blobs[0].1, blobs[0].2, blobs[0].3, blobs[0].4);
+        let mut used = vec![false; blobs.len()];
+        used[0] = true;
+        let mut count = 1usize;
+        loop {
+            let mut grew = false;
+            for (i, b) in blobs.iter().enumerate() {
+                if used[i] {
+                    continue;
+                }
+                // At most one direction is nonzero when disjoint;
+                // overlapping in an axis contributes zero gap.
+                let y_gap = y0.saturating_sub(b.3).max(b.2.saturating_sub(y1));
+                let x_gap = x0.saturating_sub(b.4).max(b.1.saturating_sub(x1));
+                // Near in one axis and overlapping in the other:
+                // stacked body parts, not neighbors.
+                let stacked = y_gap <= gap_y && x_gap == 0;
+                let sided = x_gap <= gap_x && y_gap == 0;
+                if stacked || sided {
+                    used[i] = true;
+                    area += b.0;
+                    x0 = x0.min(b.1);
+                    y0 = y0.min(b.2);
+                    x1 = x1.max(b.3);
+                    y1 = y1.max(b.4);
+                    count += 1;
+                    grew = true;
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+        Some((x0, y0, x1, y1, area, count))
+    }
+
     /// Blob statistics: (area, centroid x/y, bbox x0/y0/x1/y1).
     pub fn blob_stats(blob: &[usize], width: u32) -> Option<(u64, f64, f64, u32, u32, u32, u32)> {
         if blob.is_empty() {
@@ -778,6 +882,35 @@ mod tests {
         assert!(Image::blob_stats(&[], 20).is_none());
         let stats = Image::blob_stats(&Image::largest_blob(&two, 20, 20), 20).unwrap();
         assert_eq!((stats.3, stats.4, stats.5, stats.6), (10, 10, 14, 14));
+    }
+
+    #[test]
+    fn assembly_merges_fragments_not_strangers() {
+        // Head blob, torso blob with a small neck gap, far speckle.
+        let mut mask = vec![false; 200 * 200];
+        let fill = |mask: &mut Vec<bool>, x0: u32, y0: u32, x1: u32, y1: u32| {
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    mask[(y * 200 + x) as usize] = true;
+                }
+            }
+        };
+        fill(&mut mask, 80, 10, 120, 60); // head
+        fill(&mut mask, 70, 70, 130, 150); // torso, 10px gap
+        fill(&mut mask, 5, 5, 15, 15); // distant speckle
+        let blobs = Image::all_blobs(&mask, 200, 200, 50);
+        assert_eq!(blobs.len(), 3, "{:?}", blobs);
+        let union = Image::assemble_subject(&blobs, 200, 200, 0.06).expect("subject");
+        // Head + torso merged (gap 10px < 12px budget), speckle out.
+        assert_eq!(
+            (union.0, union.1, union.2, union.3),
+            (70, 10, 130, 150),
+            "{:?}",
+            union
+        );
+        assert_eq!(union.5, 2, "two parts: {:?}", union);
+        // Empty mask: no subject invented.
+        assert!(Image::assemble_subject(&[], 200, 200, 0.06).is_none());
     }
 
     #[test]

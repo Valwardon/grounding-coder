@@ -11,21 +11,23 @@
   },
   "subject_bbox_plate_px": [
     0,
-    319,
-    514,
-    756
-  ],
-  "subject_fraction": 0.081,
-  "pasted": [
     0,
-    64,
-    640,
-    544
+    514,
+    1013
+  ],
+  "subject_fraction": 0.122,
+  "assembled_parts": 12,
+  "pasted": [
+    141,
+    24,
+    358,
+    704
   ],
   "ops": [
     "skin locus + Y>40",
     "morph open/close x2",
-    "largest blob + compactness gate",
+    "subject assembly (12 fragments, 6% gap rule)",
+    "coherence gate (union fit)",
     "60% margin frame",
     "keep-aspect fit",
     "feather r4",
