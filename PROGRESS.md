@@ -1,5 +1,26 @@
 # Grounding Coder — Progress
 
+## v0.18.0 — Photorealistic portraits from plates (2026-09-29)
+
+- `engine/compose.rs` + mask ops in `vision.rs`: skin locus
+  (Cb/Cr + Y>40 floor), open/close, largest blob, compactness gate
+  (≥0.30), 60%-margin frame, keep-aspect fit, feather-4 composite
+  on a studio backdrop, grain + vignette. Op log records every
+  step; the composite never claims to be a new person.
+- Three real measurement bugs, all kept: dark umber reads as skin
+  (luminance floor), the JFK umber ground defeats chroma entirely
+  (implausible-fraction refusal, pinned by test), painted speckle
+  fields fail compactness, and a width clamp stretched a face
+  (keep-aspect fit + regression test).
+- License normalization (separators are noise), thumbnail-first
+  fetching (broke an upload.wikimedia throttle wall), 2s politeness
+  delays, unknown-author substring matching.
+- Proved live: CC0 studio plate → 640×800 portrait, subject framed
+  from bbox (0,319)-(514,756), aspect exact. Committed with source
+  plate, provenance, and op log.
+- 186 tests green (113 lib + 73 integration), clippy `-D warnings`
+  clean on default AND `ui`, fmt clean.
+
 ## v0.17.0 — Web image search joins plate sourcing (2026-09-29)
 
 - `gc plate --source web`: DuckDuckGo image search (vqd token

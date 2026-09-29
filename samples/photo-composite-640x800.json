@@ -1,0 +1,35 @@
+{
+  "output": "photo-composite-640x800.bmp",
+  "source_plate": "plates/plate-01.bmp",
+  "source_provenance": {
+    "author": "Karina Maier",
+    "basis": "page states \"cc0\"",
+    "file": "plate-01.bmp",
+    "license": "cc0",
+    "page_url": "https://www.pinterest.com/pin/188517934395037700/",
+    "source_url": "https://i.pinimg.com/736x/04/16/61/0416618300d1c9723b405c844d18bbda.jpg"
+  },
+  "subject_bbox_plate_px": [
+    0,
+    319,
+    514,
+    756
+  ],
+  "subject_fraction": 0.081,
+  "pasted": [
+    0,
+    64,
+    640,
+    544
+  ],
+  "ops": [
+    "skin locus + Y>40",
+    "morph open/close x2",
+    "largest blob + compactness gate",
+    "60% margin frame",
+    "keep-aspect fit",
+    "feather r4",
+    "studio backdrop",
+    "grain/vignette"
+  ]
+}

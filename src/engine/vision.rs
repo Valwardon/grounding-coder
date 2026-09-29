@@ -321,6 +321,239 @@ impl Image {
         }
     }
 
+    // ── Masks: segmentation without a model ──
+    //
+    // Skin-locus segmentation (Chai & Ngan YCbCr bounds), 3x3
+    // morphology, largest-blob selection, box-feathered alpha.
+    // It finds skin-colored regions; it does not know a face from a
+    // hand or a mahogany table. Callers combine it with composition
+    // priors (largest blob, upper frame) and record what they assumed.
+
+    /// YCbCr chroma of one pixel (BT.601).
+    pub fn chroma(&self, x: u32, y: u32) -> Option<(f64, f64)> {
+        self.get(x, y).map(|p| {
+            let (r, g, b) = (p.r as f64, p.g as f64, p.b as f64);
+            (
+                128.0 - 0.169 * r - 0.331 * g + 0.5 * b,
+                128.0 + 0.5 * r - 0.419 * g - 0.081 * b,
+            )
+        })
+    }
+
+    /// Skin mask: classical Cb∈[77,127], Cr∈[133,173] bounds plus a
+    /// luminance floor (Y>40). Dark warm browns sit inside the chroma
+    /// box — the JFK plate's near-black background proved it at 97%
+    /// coverage — so chroma alone is not a detector.
+    pub fn skin_mask(&self) -> Vec<bool> {
+        let mut mask = vec![false; (self.width * self.height) as usize];
+        for y in 0..self.height {
+            for x in 0..self.width {
+                if let Some(px) = self.get(x, y) {
+                    let (r, g, b) = (px.r as f64, px.g as f64, px.b as f64);
+                    let cb = 128.0 - 0.169 * r - 0.331 * g + 0.5 * b;
+                    let cr = 128.0 + 0.5 * r - 0.419 * g - 0.081 * b;
+                    mask[(y * self.width + x) as usize] = (77.0..=127.0).contains(&cb)
+                        && (133.0..=173.0).contains(&cr)
+                        && px.brightness() * 255.0 > 40.0;
+                }
+            }
+        }
+        mask
+    }
+
+    /// 3x3 morphological open (erode then dilate): kills speckle,
+    /// keeps regions. `passes` repeats the pair.
+    pub fn morph_open(mask: &[bool], width: u32, height: u32, passes: u32) -> Vec<bool> {
+        let mut m = mask.to_vec();
+        for _ in 0..passes {
+            m = Self::erode(&m, width, height);
+            m = Self::dilate(&m, width, height);
+        }
+        m
+    }
+
+    /// 3x3 morphological close (dilate then erode): fills pinholes.
+    pub fn morph_close(mask: &[bool], width: u32, height: u32, passes: u32) -> Vec<bool> {
+        let mut m = mask.to_vec();
+        for _ in 0..passes {
+            m = Self::dilate(&m, width, height);
+            m = Self::erode(&m, width, height);
+        }
+        m
+    }
+
+    fn erode(mask: &[bool], width: u32, height: u32) -> Vec<bool> {
+        Self::morph(mask, width, height, true)
+    }
+
+    fn dilate(mask: &[bool], width: u32, height: u32) -> Vec<bool> {
+        Self::morph(mask, width, height, false)
+    }
+
+    fn morph(mask: &[bool], width: u32, height: u32, erode: bool) -> Vec<bool> {
+        let at = |x: i32, y: i32| -> bool {
+            if x < 0 || y < 0 || x >= width as i32 || y >= height as i32 {
+                return false;
+            }
+            mask[(y as u32 * width + x as u32) as usize]
+        };
+        let mut out = vec![false; mask.len()];
+        for y in 0..height as i32 {
+            for x in 0..width as i32 {
+                let mut all = true;
+                let mut any = false;
+                for dy in -1..=1 {
+                    for dx in -1..=1 {
+                        let v = at(x + dx, y + dy);
+                        all = all && v;
+                        any = any || v;
+                    }
+                }
+                out[(y as u32 * width + x as u32) as usize] = if erode { all } else { any };
+            }
+        }
+        out
+    }
+
+    /// Largest 4-connected blob: indices into the frame. Empty mask
+    /// yields empty — no blob invented.
+    pub fn largest_blob(mask: &[bool], width: u32, height: u32) -> Vec<usize> {
+        let mut seen = vec![false; mask.len()];
+        let mut best: Vec<usize> = Vec::new();
+        for i in 0..mask.len() {
+            if !mask[i] || seen[i] {
+                continue;
+            }
+            let mut blob = Vec::new();
+            let mut stack = vec![i];
+            seen[i] = true;
+            while let Some(j) = stack.pop() {
+                blob.push(j);
+                let x = (j as u32) % width;
+                let y = (j as u32) / width;
+                for (nx, ny) in [
+                    (x.wrapping_sub(1), y),
+                    (x + 1, y),
+                    (x, y.wrapping_sub(1)),
+                    (x, y + 1),
+                ] {
+                    if nx < width && ny < height {
+                        let k = (ny * width + nx) as usize;
+                        if mask[k] && !seen[k] {
+                            seen[k] = true;
+                            stack.push(k);
+                        }
+                    }
+                }
+            }
+            if blob.len() > best.len() {
+                best = blob;
+            }
+        }
+        best
+    }
+
+    /// Blob statistics: (area, centroid x/y, bbox x0/y0/x1/y1).
+    pub fn blob_stats(blob: &[usize], width: u32) -> Option<(u64, f64, f64, u32, u32, u32, u32)> {
+        if blob.is_empty() {
+            return None;
+        }
+        let (mut sx, mut sy) = (0u64, 0u64);
+        let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
+        for b in blob {
+            let x = (*b as u32) % width;
+            let y = (*b as u32) / width;
+            sx += x as u64;
+            sy += y as u64;
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x);
+            y1 = y1.max(y);
+        }
+        let n = blob.len() as f64;
+        Some((
+            blob.len() as u64,
+            sx as f64 / n,
+            sy as f64 / n,
+            x0,
+            y0,
+            x1,
+            y1,
+        ))
+    }
+
+    /// Box-feather a mask into alpha: 0.0 outside, 1.0 deep inside,
+    /// linear ramp over `radius`. Separable passes, clamped borders.
+    pub fn feather(mask: &[bool], width: u32, height: u32, radius: u32) -> Vec<f64> {
+        let base: Vec<f64> = mask.iter().map(|m| if *m { 1.0 } else { 0.0 }).collect();
+        let blur = |src: &[f64]| -> Vec<f64> {
+            let mut tmp = vec![0.0; src.len()];
+            let r = radius as i32;
+            for y in 0..height as i32 {
+                for x in 0..width as i32 {
+                    let mut sum = 0.0;
+                    let mut n = 0;
+                    for dx in -r..=r {
+                        let sx = (x + dx).clamp(0, width as i32 - 1) as u32;
+                        sum += src[(y as u32 * width + sx) as usize];
+                        n += 1;
+                    }
+                    tmp[(y as u32 * width + x as u32) as usize] = sum / n as f64;
+                }
+            }
+            let mut out = vec![0.0; src.len()];
+            for y in 0..height as i32 {
+                for x in 0..width as i32 {
+                    let mut sum = 0.0;
+                    let mut n = 0;
+                    for dy in -r..=r {
+                        let sy = (y + dy).clamp(0, height as i32 - 1) as u32;
+                        sum += tmp[(sy * width + x as u32) as usize];
+                        n += 1;
+                    }
+                    out[(y as u32 * width + x as u32) as usize] = sum / n as f64;
+                }
+            }
+            out
+        };
+        // Two passes approximate a smooth falloff; renormalize so deep
+        // interiors return to exactly 1.0.
+        let twice = blur(&blur(&base));
+        let peak = twice.iter().cloned().fold(0.0f64, f64::max).max(1e-9);
+        twice
+            .into_iter()
+            .map(|v| (v / peak).clamp(0.0, 1.0))
+            .collect()
+    }
+
+    /// Composite: foreground over background through alpha. Lengths
+    /// must match the frame; mismatch refuses with an error.
+    pub fn composite(fg: &Image, bg: &Image, alpha: &[f64]) -> Result<Image, String> {
+        if fg.width != bg.width || fg.height != bg.height {
+            return Err(format!(
+                "composite size mismatch: {}x{} over {}x{}",
+                fg.width, fg.height, bg.width, bg.height
+            ));
+        }
+        if alpha.len() != (fg.width * fg.height) as usize {
+            return Err("composite alpha length mismatch".to_string());
+        }
+        let mut out = Image::blank(fg.width, fg.height, Rgb::new(0, 0, 0));
+        for (i, (a, (f, b))) in alpha
+            .iter()
+            .zip(fg.pixels.iter().zip(bg.pixels.iter()))
+            .enumerate()
+        {
+            let a = a.clamp(0.0, 1.0);
+            out.pixels[i] = Rgb::new(
+                (f.r as f64 * a + b.r as f64 * (1.0 - a)).round() as u8,
+                (f.g as f64 * a + b.g as f64 * (1.0 - a)).round() as u8,
+                (f.b as f64 * a + b.b as f64 * (1.0 - a)).round() as u8,
+            );
+        }
+        Ok(out)
+    }
+
     // ── BMP codec (24-bit, uncompressed, hand-rolled) ──
     //
     // No dependency for this: the format is a 54-byte header plus
@@ -512,6 +745,68 @@ mod tests {
         assert_eq!(gr.get(3, 3), Some(Rgb::new(200, 200, 200)));
         gr.grade(1.0, 10.0);
         assert_eq!(gr.get(3, 3), Some(Rgb::new(210, 210, 210)));
+    }
+
+    #[test]
+    fn masks_are_exact() {
+        // Skin patch on blue: locus finds exactly the rect.
+        let mut img = Image::blank(20, 20, Rgb::new(60, 110, 200));
+        img.draw_rect(5, 5, 6, 6, Rgb::new(200, 150, 115));
+        let mask = img.skin_mask();
+        assert_eq!(mask.iter().filter(|m| **m).count(), 36);
+        // Open kills a lone speckle, keeps the block.
+        let mut noisy = mask.clone();
+        noisy[0] = true;
+        let opened = Image::morph_open(&noisy, 20, 20, 1);
+        assert!(!opened[0], "speckle must die");
+        // Erode shrinks 6x6 to 4x4, dilate restores it: block survives whole.
+        assert_eq!(opened.iter().filter(|m| **m).count(), 36);
+        // Largest blob picks the bigger rect; empty stays empty.
+        let mut two = vec![false; 400];
+        for y in 0..3 {
+            for x in 0..3 {
+                two[(y * 20 + x) as usize] = true;
+            }
+        }
+        for y in 10..15 {
+            for x in 10..15 {
+                two[(y * 20 + x) as usize] = true;
+            }
+        }
+        assert_eq!(Image::largest_blob(&two, 20, 20).len(), 25);
+        assert!(Image::largest_blob(&vec![false; 400], 20, 20).is_empty());
+        assert!(Image::blob_stats(&[], 20).is_none());
+        let stats = Image::blob_stats(&Image::largest_blob(&two, 20, 20), 20).unwrap();
+        assert_eq!((stats.3, stats.4, stats.5, stats.6), (10, 10, 14, 14));
+    }
+
+    #[test]
+    fn feather_ramps_and_composite_blends() {
+        // Solid 10x10 block in 30x30: center alpha 1, far corner 0.
+        let mut mask = vec![false; 900];
+        for y in 10..20 {
+            for x in 10..20 {
+                mask[(y * 30 + x) as usize] = true;
+            }
+        }
+        let alpha = Image::feather(&mask, 30, 30, 3);
+        assert!((alpha[(15 * 30 + 15) as usize] - 1.0).abs() < 1e-9);
+        assert_eq!(alpha[0], 0.0);
+        let edge = alpha[(10 * 30 + 15) as usize];
+        assert!(edge > 0.0 && edge < 1.0, "ramp, got {}", edge);
+        // Blend math: half alpha mixes channels evenly.
+        let fg = Image::blank(4, 4, Rgb::new(200, 0, 0));
+        let bg = Image::blank(4, 4, Rgb::new(0, 0, 200));
+        let half = vec![0.5; 16];
+        let out = Image::composite(&fg, &bg, &half).unwrap();
+        assert_eq!(out.get(0, 0), Some(Rgb::new(100, 0, 100)));
+        let full = vec![1.0; 16];
+        assert_eq!(
+            Image::composite(&fg, &bg, &full).unwrap().get(0, 0),
+            Some(Rgb::new(200, 0, 0))
+        );
+        assert!(Image::composite(&fg, &Image::blank(3, 3, Rgb::new(0, 0, 0)), &half).is_err());
+        assert!(Image::composite(&fg, &bg, &[0.5; 8]).is_err());
     }
 
     #[test]

@@ -1,6 +1,7 @@
 pub mod arena;
 pub mod budget;
 pub mod catalog;
+pub mod compose;
 pub mod corrector;
 pub mod error;
 pub mod experiment;

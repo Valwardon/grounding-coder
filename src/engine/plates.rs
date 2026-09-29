@@ -66,18 +66,29 @@ pub fn require_provenance(
     if file_url.trim().is_empty() {
         return Err(format!("{:?}: no file URL, cannot fetch bytes", title));
     }
-    if author.is_empty() || author == "Unknown author" {
+    // Substring match: metadata concatenates ("Unknown authorUnknown
+    // author, scan by X") and exact equality misses the junk.
+    if author.is_empty() || author.to_lowercase().contains("unknown author") {
         return Err(format!(
             "{:?}: no author recorded, provenance incomplete",
             title
         ));
     }
+    // Commons writes "CC BY-SA 3.0", pages write "cc-by-sa-3.0" —
+    // separators are noise, the token is the signal.
+    let norm = |s: &str| {
+        s.to_lowercase()
+            .chars()
+            .filter(|c| ![' ', '-', '_'].contains(c))
+            .collect::<String>()
+    };
+    let license_norm = norm(&license);
     let listed = LICENSE_ALLOWLIST
         .iter()
-        .any(|allow| license.to_lowercase() == *allow)
+        .any(|allow| norm(allow) == license_norm)
         || SITE_LICENSES
             .iter()
-            .any(|(_, name)| license.to_lowercase() == name.to_lowercase());
+            .any(|(_, name)| norm(name) == license_norm);
     if !listed {
         return Err(format!(
             "{:?}: license {:?} not in the provenance allowlist",
@@ -176,8 +187,15 @@ pub async fn search_commons(
                 .unwrap_or("")
                 .to_string()
         };
-        // Prefer the full-resolution URL; fall back to the thumbnail.
-        let file_url = str_field("url");
+        // Prefer the 1280px thumbnail: separate throttle bucket from
+        // full-res originals, and already at sample scale. Fall back
+        // to the original when no thumbnail exists.
+        let thumb = str_field("thumburl");
+        let file_url = if thumb.is_empty() {
+            str_field("url")
+        } else {
+            thumb
+        };
         let page_url = format!(
             "https://commons.wikimedia.org/wiki/{}",
             title.replace(' ', "_")
@@ -232,6 +250,12 @@ pub async fn source_plates(query: &str, limit: u32) -> (Vec<SourcedPlate>, Vec<S
                 continue;
             }
         };
+        // Politeness delay between file fetches: burst traffic earns
+        // 429s (measured), and shared infrastructure deserves better.
+        // Skipped before the first fetch of the run.
+        if !plates.is_empty() || !refused.is_empty() {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
         let bytes = match crate::http::get_bytes(&provenance.source_url).await {
             Ok(b) => b,
             Err(e) => {
@@ -547,6 +571,9 @@ pub async fn source_plates_web(query: &str, limit: u32) -> (Vec<SourcedPlate>, V
         }
         let mut decoded = None;
         let mut fetch_err = String::new();
+        if !plates.is_empty() || !refused.is_empty() {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
         for url in &file_urls {
             match crate::http::get_bytes(url).await {
                 Ok(bytes) => match decode_plate(&bytes) {
