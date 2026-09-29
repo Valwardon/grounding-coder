@@ -51,6 +51,21 @@ enum Commands {
         #[arg(long)]
         group: bool,
     },
+    /// Source photographic plates: search Commons, require complete
+    /// provenance, fetch and decode. Refusals print with reasons.
+    Plate {
+        /// What to look for
+        query: String,
+        /// Max plates to ingest
+        #[arg(short, long, default_value_t = 3)]
+        limit: u32,
+        /// Directory for BMP files plus a provenance manifest
+        #[arg(short, long, default_value = "plates")]
+        out: String,
+        /// Downscale longer edge past this many pixels (repo stays lean)
+        #[arg(long, default_value_t = 1280)]
+        max_dim: u32,
+    },
     /// Dream: run the idle learning loop — investigate open questions
     /// and promote only what verifies. Bounded by budget, then sleeps.
     Dream {
@@ -179,6 +194,81 @@ fn main() {
                         std::process::exit(1);
                     }
                 }
+            }
+            Commands::Plate {
+                query,
+                limit,
+                out,
+                max_dim,
+            } => {
+                use grounding_coder::engine::plates;
+                let dir = std::path::Path::new(&out);
+                if std::fs::create_dir_all(dir).is_err() {
+                    eprintln!("PLATE FAILED: cannot create {}", out);
+                    std::process::exit(1);
+                }
+                let (sourced, refused) = plates::source_plates(&query, limit).await;
+                for r in &refused {
+                    println!("refused: {}", r);
+                }
+                let mut manifest = Vec::new();
+                for (i, plate) in sourced.iter().enumerate() {
+                    let file = format!("plate-{:02}.bmp", i);
+                    let path = dir.join(&file);
+                    let img = {
+                        let longest = plate.image.width.max(plate.image.height);
+                        if longest > max_dim.max(16) {
+                            let cap = max_dim.max(16);
+                            if plate.image.width >= plate.image.height {
+                                plate
+                                    .image
+                                    .resize(cap, plate.image.height * cap / plate.image.width)
+                            } else {
+                                plate
+                                    .image
+                                    .resize(plate.image.width * cap / plate.image.height, cap)
+                            }
+                        } else {
+                            plate.image.clone()
+                        }
+                    };
+                    match img.save_bmp(&path) {
+                        Ok(()) => {
+                            println!(
+                                "plate: {} ({}x{}, {}, {})",
+                                file,
+                                img.width,
+                                img.height,
+                                plate.provenance.author,
+                                plate.provenance.license
+                            );
+                            manifest.push(serde_json::json!({
+                                "file": file,
+                                "source_url": plate.provenance.source_url,
+                                "page_url": plate.provenance.page_url,
+                                "author": plate.provenance.author,
+                                "license": plate.provenance.license,
+                            }));
+                        }
+                        Err(e) => println!("refused: {}: {}", file, e),
+                    }
+                }
+                let manifest_path = dir.join("provenance.json");
+                if std::fs::write(
+                    &manifest_path,
+                    serde_json::to_string_pretty(&manifest).unwrap_or_default(),
+                )
+                .is_err()
+                {
+                    eprintln!("PLATE FAILED: cannot write manifest");
+                    std::process::exit(1);
+                }
+                println!(
+                    "plates: {} ingested, {} refused — manifest at {}",
+                    manifest.len(),
+                    refused.len(),
+                    manifest_path.display()
+                );
             }
             Commands::Dream {
                 project,

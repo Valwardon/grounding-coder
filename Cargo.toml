@@ -59,6 +59,10 @@ linfa-trees = { version = "0.7", features = ["serde"] }
 # Must match linfa's own ndarray (0.15) — a second array crate would
 # split the type graph and nothing compiles.
 ndarray = "0.15"
+# Decode photographic plates (JPEG/PNG) into the engine buffer.
+# Pure-Rust decoders, no platform codecs. Narrow features keep the
+# closure small; the crate is already in the lock file via dioxus.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
 # dioxus UI — only compiled with "ui" feature (Android/iOS mobile targets)
 dioxus = { version = "0.7", features = ["mobile"], optional = true }

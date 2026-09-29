@@ -2032,6 +2032,7 @@ dependencies = [
  "hyper",
  "hyper-rustls",
  "hyper-util",
+ "image",
  "jni 0.21.1",
  "linfa",
  "linfa-trees",

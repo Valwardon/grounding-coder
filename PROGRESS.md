@@ -1,5 +1,21 @@
 # Grounding Coder — Progress
 
+## v0.16.0 — The loop sources its own base photos (2026-09-29)
+
+- `engine/plates.rs`: Commons search → per-file metadata →
+  provenance required complete (source URL, author, allowlisted
+  license) → fetch → decode via the `image` crate (JPEG/PNG,
+  resolved offline from the vendored cache) into the engine buffer.
+  Incomplete records refuse naming the missing field; rate-limit
+  refusals report and don't kill the plates that verified.
+- `gc plate <query>`: ingests into a directory of BMPs plus a
+  `provenance.json` manifest (file, source/page URLs, author,
+  license), with downscale past 1280px so the repo stays lean.
+- Proved live: "portrait" → JFK official portrait (Shikler,
+  public domain, full chain) as `samples/plates/plate-00.bmp`.
+- 181 tests green (108 lib + 73 integration), clippy `-D warnings`
+  clean on default AND `ui`, fmt clean.
+
 ## v0.15.0 — The curiosity loop studies anatomy (2026-09-29)
 
 - `BodyPlan`: the 7.5-heads canon as fractions of stature, each
