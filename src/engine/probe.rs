@@ -21,7 +21,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use super::knowledge::{KnowledgeState, KnowledgeStore, Provenance};
+use super::knowledge::{KnowledgeState, KnowledgeStore, Provenance, VerificationTier};
 use super::verifier::CodeVerifier;
 
 /// One experimental demonstration of one claim.
@@ -182,6 +182,7 @@ pub async fn verify_concept_by_probe(
                     experiment: None,
                     verification: None,
                     rejection: None,
+                    tier: VerificationTier::Sourced,
                 },
             )?;
         }
@@ -213,6 +214,7 @@ pub async fn verify_concept_by_probe(
             experiment: Some(format!("probe {:?}", spec.name)),
             verification: None,
             rejection: None,
+            tier: VerificationTier::Sourced,
         },
     )?;
     let outcome = run_probe(spec, work_dir, timeout).await;
@@ -225,6 +227,7 @@ pub async fn verify_concept_by_probe(
             experiment: Some(format!("probe {:?}", spec.name)),
             verification: None,
             rejection: None,
+            tier: VerificationTier::Sourced,
         },
     )?;
     if outcome.passed {
@@ -236,6 +239,7 @@ pub async fn verify_concept_by_probe(
                 experiment: Some(format!("probe {:?}", spec.name)),
                 verification: Some(outcome.evidence.clone()),
                 rejection: None,
+                tier: VerificationTier::Demonstrated,
             },
         )?;
     } else {
@@ -348,6 +352,11 @@ mod tests {
         assert!(out.passed, "{}", out.evidence);
         let item = store.get("entry-api").expect("stored");
         assert_eq!(item.state, KnowledgeState::Verified);
+        assert_eq!(
+            item.provenance.tier,
+            super::super::knowledge::VerificationTier::Demonstrated,
+            "probe evidence is demonstrated, not merely sourced"
+        );
         assert!(
             item.provenance
                 .verification

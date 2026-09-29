@@ -145,7 +145,7 @@ pub async fn search_commons(
     let url = format!(
         "https://commons.wikimedia.org/w/api.php?action=query&format=json&generator=search\
          &gsrsearch=filetype:bitmap%20{}&gsrnamespace=6&gsrlimit={}&prop=imageinfo\
-         &iiprop=url%7Cuser%7Cextmetadata&iiurlwidth=1280",
+         &iiprop=url%7Cuser%7Cextmetadata&iiurlwidth=2560",
         percent_encode(query),
         limit.min(20)
     );

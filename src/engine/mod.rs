@@ -6,6 +6,7 @@ pub mod compose;
 pub mod corrector;
 pub mod error;
 pub mod experiment;
+pub mod imagine;
 pub mod knowledge;
 pub mod lang;
 pub mod pathfind;

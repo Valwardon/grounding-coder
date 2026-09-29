@@ -66,7 +66,7 @@ enum Commands {
         #[arg(long, default_value = "commons")]
         source: String,
         /// Downscale longer edge past this many pixels (repo stays lean)
-        #[arg(long, default_value_t = 1280)]
+        #[arg(long, default_value_t = 1920)]
         max_dim: u32,
     },
     /// Compose a photographic portrait from a sourced plate: segment
@@ -77,6 +77,22 @@ enum Commands {
         plate: String,
         /// Output BMP path
         #[arg(short, long, default_value = "portrait.bmp")]
+        out: String,
+        /// Output width
+        #[arg(long, default_value_t = 960)]
+        width: u32,
+        /// Output height
+        #[arg(long, default_value_t = 1200)]
+        height: u32,
+    },
+    /// Imagine a photo from prose: parse the brief, research
+    /// references, study them, build fresh pixels. One command, full
+    /// receipts at every step.
+    Imagine {
+        /// What to picture ("man holding peace sign")
+        prompt: String,
+        /// Output BMP path
+        #[arg(short, long, default_value = "imagined.bmp")]
         out: String,
         /// Output width
         #[arg(long, default_value_t = 640)]
@@ -334,6 +350,26 @@ fn main() {
                     Err(e) => {
                         eprintln!("COMPOSE REFUSED: {}", e);
                         std::process::exit(2);
+                    }
+                }
+            }
+            Commands::Imagine {
+                prompt,
+                out,
+                width,
+                height,
+            } => {
+                use grounding_coder::engine::imagine;
+                let (img, log) =
+                    imagine::imagine(&prompt, width.clamp(16, 1920), height.clamp(16, 1920)).await;
+                for line in &log {
+                    println!("imagine: {}", line);
+                }
+                match img.save_bmp(std::path::Path::new(&out)) {
+                    Ok(()) => println!("imagined {} ({}x{})", out, img.width, img.height),
+                    Err(e) => {
+                        eprintln!("IMAGINE FAILED: {}", e);
+                        std::process::exit(1);
                     }
                 }
             }

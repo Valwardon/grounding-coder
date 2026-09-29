@@ -403,6 +403,61 @@ impl Image {
         }
     }
 
+    /// Unsharp mask: detail = pixel − box-blurred neighborhood, added
+    /// back scaled by `amount`. Recovers edge bite that bilinear
+    /// scaling and JPEG mush remove. Runs BEFORE grain (sharpening
+    /// grain is just louder grain). Deterministic like everything.
+    pub fn unsharp(&mut self, amount: f64, radius: u32) {
+        if amount <= 0.0 {
+            return;
+        }
+        let blur_channel = |get: &dyn Fn(u32, u32) -> u8| -> Vec<f64> {
+            let mut tmp = vec![0.0; (self.width * self.height) as usize];
+            let r = radius.max(1) as i32;
+            for y in 0..self.height as i32 {
+                for x in 0..self.width as i32 {
+                    let mut sum = 0.0;
+                    let mut n = 0;
+                    for dx in -r..=r {
+                        let sx = (x + dx).clamp(0, self.width as i32 - 1) as u32;
+                        sum += get(sx, y as u32) as f64;
+                        n += 1;
+                    }
+                    tmp[(y as u32 * self.width + x as u32) as usize] = sum / n as f64;
+                }
+            }
+            let mut out = vec![0.0; (self.width * self.height) as usize];
+            for y in 0..self.height as i32 {
+                for x in 0..self.width as i32 {
+                    let mut sum = 0.0;
+                    let mut n = 0;
+                    for dy in -r..=r {
+                        let sy = (y + dy).clamp(0, self.height as i32 - 1) as u32;
+                        sum += tmp[(sy * self.width + x as u32) as usize];
+                        n += 1;
+                    }
+                    out[(y as u32 * self.width + x as u32) as usize] = sum / n as f64;
+                }
+            }
+            out
+        };
+        let w = self.width;
+        let h = self.height;
+        let pixels = &self.pixels;
+        let br = blur_channel(&|x, y| pixels[(y * w + x) as usize].r);
+        let bg = blur_channel(&|x, y| pixels[(y * w + x) as usize].g);
+        let bb = blur_channel(&|x, y| pixels[(y * w + x) as usize].b);
+        for (i, p) in self.pixels.iter_mut().enumerate() {
+            let sharp = |v: u8, b: f64| {
+                (v as f64 + amount * (v as f64 - b))
+                    .clamp(0.0, 255.0)
+                    .round() as u8
+            };
+            *p = Rgb::new(sharp(p.r, br[i]), sharp(p.g, bg[i]), sharp(p.b, bb[i]));
+        }
+        let _ = (w, h);
+    }
+
     /// Grade: contrast pivot at mid-gray plus brightness lift, both in
     /// 0..255 units. `contrast 1.0, lift 0` is the identity.
     pub fn grade(&mut self, contrast: f64, lift: f64) {

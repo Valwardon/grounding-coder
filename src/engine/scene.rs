@@ -375,6 +375,68 @@ pub enum ArmPose {
     Out,
     WaveLeft,
     WaveRight,
+    PeaceLeft,
+    PeaceRight,
+}
+
+impl ArmPose {
+    fn raised_side(self, side: f64) -> bool {
+        (matches!(self, ArmPose::WaveLeft | ArmPose::PeaceLeft) && side < 0.0)
+            || (matches!(self, ArmPose::WaveRight | ArmPose::PeaceRight) && side > 0.0)
+    }
+
+    /// Peace sign: index + middle extended, ring + pinky curled —
+    /// on the raised hand only. The other hand stays relaxed and
+    /// open; a two-handed peace sign is a different request.
+    /// Finger slot k runs inner→outer on right hands, mirrored left.
+    fn finger_extended(self, side: f64, k: i32) -> bool {
+        let peace =
+            matches!(self, ArmPose::PeaceLeft | ArmPose::PeaceRight) && self.raised_side(side);
+        if !peace {
+            return true;
+        }
+        if side > 0.0 { k >= 2 } else { k < 2 }
+    }
+}
+
+/// Shoulder pivot and hand target for one arm: single source of
+/// truth shared by the builder and prop placement (bouquets meet
+/// hands exactly, not approximately).
+pub fn arm_endpoints(
+    base: Vec3,
+    scale: f64,
+    spec: &PersonSpec,
+    plan: &BodyPlan,
+    side: f64,
+) -> (Vec3, Vec3) {
+    let h = 1.8 * scale;
+    let y = |f: f64| base.y + f * h;
+    let shoulder = Vec3::new(
+        base.x + side * plan.shoulder_half * h,
+        y(plan.shoulder_y),
+        base.z,
+    );
+    let hand = if spec.pose.raised_side(side) {
+        Vec3::new(
+            base.x + side * (plan.shoulder_half + 0.10) * h,
+            y(plan.shoulder_y) + 0.28 * h,
+            base.z + 0.05 * h,
+        )
+    } else {
+        match spec.pose {
+            ArmPose::Out => Vec3::new(
+                base.x + side * (plan.shoulder_half + plan.arm_len) * h,
+                y(plan.shoulder_y),
+                base.z,
+            ),
+            _ => Vec3::new(
+                base.x + side * (plan.shoulder_half + 0.02) * h,
+                y(plan.hip_y) + 0.05 * h,
+                base.z,
+            ),
+        }
+    };
+    (shoulder, hand)
 }
 
 /// A person built from the studied plan, not from magic numbers.
@@ -434,35 +496,11 @@ pub fn person_plan(base: Vec3, scale: f64, spec: &PersonSpec, plan: &BodyPlan) -
             mat: pants_m.clone(),
         });
     }
-    // Arms: shoulder pivots, hand targets from the pose.
+    // Arms: endpoints from the shared helper so props meet hands
+    // exactly. Fingers fan across the knuckles; peace poses extend
+    // index+middle and curl ring+pinky into short stubs.
     for side in [-1.0, 1.0] {
-        let raised = (spec.pose == ArmPose::WaveLeft && side < 0.0)
-            || (spec.pose == ArmPose::WaveRight && side > 0.0);
-        let shoulder = Vec3::new(
-            base.x + side * plan.shoulder_half * h,
-            y(plan.shoulder_y),
-            base.z,
-        );
-        let hand = if raised {
-            Vec3::new(
-                base.x + side * (plan.shoulder_half + 0.10) * h,
-                y(plan.shoulder_y) + 0.28 * h,
-                base.z + 0.05 * h,
-            )
-        } else {
-            match spec.pose {
-                ArmPose::Out => Vec3::new(
-                    base.x + side * (plan.shoulder_half + plan.arm_len) * h,
-                    y(plan.shoulder_y),
-                    base.z,
-                ),
-                _ => Vec3::new(
-                    base.x + side * (plan.shoulder_half + 0.02) * h,
-                    y(plan.hip_y) + 0.05 * h,
-                    base.z,
-                ),
-            }
-        };
+        let (shoulder, hand) = arm_endpoints(base, scale, spec, plan, side);
         out.push(Shape::Capsule {
             a: shoulder,
             b: hand,
@@ -481,18 +519,31 @@ pub fn person_plan(base: Vec3, scale: f64, spec: &PersonSpec, plan: &BodyPlan) -
         for k in 0..4 {
             let kx = hand.x + (k as f64 - 1.5) * 0.018 * h;
             let start = Vec3::new(kx, hand.y, hand.z + 0.005 * h).add(fdir.scale(0.012 * h));
+            let len = if spec.pose.finger_extended(side, k) {
+                plan.finger_len * h
+            } else {
+                // Curled: foreshortened stub folding into the palm.
+                plan.finger_len * h * 0.35
+            };
             out.push(Shape::Capsule {
                 a: start,
-                b: start.add(fdir.scale(plan.finger_len * h)),
+                b: start.add(fdir.scale(len)),
                 radius: plan.arm_r * h * 0.5,
                 mat: skin_hand.clone(),
             });
         }
         let outer = if shoulder.x < base.x { -1.0 } else { 1.0 };
-        let tdir = fdir
-            .scale(0.7)
-            .add(Vec3::new(outer * 0.5, 0.0, 0.35))
-            .norm();
+        let peace = matches!(spec.pose, ArmPose::PeaceLeft | ArmPose::PeaceRight);
+        let tdir = if peace {
+            // Thumb folds across the curled fingers to hold the sign.
+            fdir.scale(0.4)
+                .add(Vec3::new(-outer * 0.45, 0.0, 0.15))
+                .norm()
+        } else {
+            fdir.scale(0.7)
+                .add(Vec3::new(outer * 0.5, 0.0, 0.35))
+                .norm()
+        };
         out.push(Shape::Capsule {
             a: hand,
             b: hand.add(tdir.scale(plan.thumb_len * h)),
@@ -548,6 +599,117 @@ pub fn person_plan(base: Vec3, scale: f64, spec: &PersonSpec, plan: &BodyPlan) -
         radius: head_h * 0.55,
         mat: hair_m,
     });
+    out
+}
+
+/// One rose: stem capsule, two leaves, bloom of center + petal
+/// ring. Materials rose-stem/leaf/bloom, all receipt-addressable.
+pub fn rose(base: Vec3, height: f64, bloom_color: Rgb) -> Vec<Shape> {
+    let stem_m = Material::named("rose-stem", Rgb::new(45, 110, 50));
+    let leaf_m = Material::named("rose-leaf", Rgb::new(55, 130, 60));
+    let bloom_m = Material::named("rose-bloom", bloom_color);
+    let top = Vec3::new(base.x, base.y + height, base.z);
+    let mut out = vec![
+        Shape::Capsule {
+            a: base,
+            b: top,
+            radius: height * 0.03,
+            mat: stem_m,
+        },
+        Shape::Box {
+            min: Vec3::new(
+                base.x - height * 0.16,
+                base.y + height * 0.35,
+                base.z - 0.01,
+            ),
+            max: Vec3::new(
+                base.x - height * 0.02,
+                base.y + height * 0.45,
+                base.z + 0.01,
+            ),
+            mat: leaf_m.clone(),
+        },
+        Shape::Box {
+            min: Vec3::new(
+                base.x + height * 0.02,
+                base.y + height * 0.55,
+                base.z - 0.01,
+            ),
+            max: Vec3::new(
+                base.x + height * 0.16,
+                base.y + height * 0.65,
+                base.z + 0.01,
+            ),
+            mat: leaf_m,
+        },
+    ];
+    let br = height * 0.11;
+    out.push(Shape::Sphere {
+        center: top,
+        radius: br * 0.8,
+        mat: bloom_m.clone(),
+    });
+    for k in 0..5 {
+        let a = k as f64 * std::f64::consts::TAU / 5.0;
+        out.push(Shape::Sphere {
+            center: Vec3::new(
+                top.x + a.cos() * br,
+                top.y - br * 0.25,
+                top.z + a.sin() * br,
+            ),
+            radius: br * 0.62,
+            mat: bloom_m.clone(),
+        });
+    }
+    out
+}
+
+/// A held bouquet: stems converge at the hand, blooms fan up-out.
+/// `hand` comes from [`arm_endpoints`] — the same math that placed
+/// the arm, so flowers meet fingers exactly.
+pub fn bouquet(hand: Vec3, scale: f64, colors: &[Rgb]) -> Vec<Shape> {
+    let mut out = Vec::new();
+    let n = colors.len().max(1) as f64;
+    for (i, color) in colors.iter().enumerate() {
+        let spread = (i as f64 - (n - 1.0) / 2.0) * 0.09 * scale;
+        let base = Vec3::new(hand.x + spread * 0.2, hand.y - 0.42 * scale, hand.z);
+        let top = Vec3::new(
+            hand.x + spread,
+            hand.y + 0.10 * scale,
+            hand.z + 0.03 * scale,
+        );
+        out.push(Shape::Capsule {
+            a: base,
+            b: top,
+            radius: 0.012 * scale,
+            mat: Material::named("rose-stem", Rgb::new(45, 110, 50)),
+        });
+        // Bloom head: center + petal ring sized to read at range.
+        let br = 0.055 * scale;
+        let bloom_m = Material::named("rose-bloom", *color);
+        out.push(Shape::Sphere {
+            center: top,
+            radius: br * 0.8,
+            mat: bloom_m.clone(),
+        });
+        for k in 0..5 {
+            let a = k as f64 * std::f64::consts::TAU / 5.0;
+            out.push(Shape::Sphere {
+                center: Vec3::new(
+                    top.x + a.cos() * br,
+                    top.y - br * 0.25,
+                    top.z + a.sin() * br,
+                ),
+                radius: br * 0.62,
+                mat: bloom_m.clone(),
+            });
+        }
+        out.push(Shape::Box {
+            min: Vec3::new(base.x - 0.05 * scale, base.y + 0.15 * scale, base.z - 0.008),
+            max: Vec3::new(base.x + 0.05 * scale, base.y + 0.22 * scale, base.z + 0.008),
+            mat: Material::named("rose-leaf", Rgb::new(55, 130, 60)),
+        });
+    }
     out
 }
 
@@ -1050,7 +1212,7 @@ fn person_width(masked: &[usize], width: u32) -> f64 {
 /// Verified knowledge with the measurements as evidence; anything
 /// else stays unpromoted with the numbers recorded.
 pub fn record_anatomy(store: &mut super::knowledge::KnowledgeStore, report: &AnatomyReport) {
-    use super::knowledge::{KnowledgeItem, KnowledgeState, Provenance};
+    use super::knowledge::{KnowledgeItem, KnowledgeState, Provenance, VerificationTier};
     // insert() keeps the first item it sees: the first study files,
     // later studies are re-verifications (out of scope in v1).
     let mut item = KnowledgeItem::new(
@@ -1071,6 +1233,11 @@ pub fn record_anatomy(store: &mut super::knowledge::KnowledgeStore, report: &Ana
             None
         },
         rejection: None,
+        tier: if report.passed {
+            VerificationTier::Measured
+        } else {
+            VerificationTier::Sourced
+        },
     };
     store.insert(item);
 }
@@ -1305,6 +1472,11 @@ mod tests {
         record_anatomy(&mut store, &report);
         let item = store.get("human-proportions").expect("filed");
         assert_eq!(item.state, KnowledgeState::Verified);
+        assert_eq!(
+            item.provenance.tier,
+            super::super::knowledge::VerificationTier::Measured,
+            "render measurement is measured, not merely sourced"
+        );
         assert!(
             item.provenance
                 .verification
@@ -1339,6 +1511,122 @@ mod tests {
             0,
             "people are the subject"
         );
+    }
+
+    fn finger_lengths(spec: &PersonSpec) -> (usize, usize) {
+        let plan = BodyPlan::canon();
+        let shapes = person_plan(Vec3::new(0.0, 0.0, 0.0), 1.0, spec, &plan);
+        let expected_full = plan.finger_len * 1.8;
+        let mut full = 0;
+        let mut stub = 0;
+        for s in &shapes {
+            if let Shape::Capsule { a, b, mat, .. } = s {
+                if mat.name == "person-hand" {
+                    let len = (b.sub(*a)).len();
+                    if (len - expected_full).abs() < 0.01 {
+                        full += 1;
+                    } else if (len - expected_full * 0.35).abs() < 0.01 {
+                        stub += 1;
+                    }
+                }
+            }
+        }
+        (full, stub)
+    }
+
+    #[test]
+    fn peace_sign_extends_two_curls_two() {
+        let down = PersonSpec {
+            skin: Rgb::new(200, 150, 115),
+            hair: Rgb::new(60, 38, 24),
+            shirt: Rgb::new(70, 120, 190),
+            pants: Rgb::new(45, 45, 55),
+            pose: ArmPose::Down,
+        };
+        assert_eq!(finger_lengths(&down), (8, 0));
+        let peace = PersonSpec {
+            pose: ArmPose::PeaceRight,
+            ..down.clone()
+        };
+        // Left hand open (4) + right hand peace (2 ext + 2 stub).
+        // Thumb capsules are thicker and excluded by the length check.
+        assert_eq!(finger_lengths(&peace), (6, 2));
+        // The peace hand rides raised, like a wave.
+        let plan = BodyPlan::canon();
+        let (_, r_hand) = arm_endpoints(Vec3::new(0.0, 0.0, 0.0), 1.0, &peace, &plan, 1.0);
+        let (_, d_hand) = arm_endpoints(Vec3::new(0.0, 0.0, 0.0), 1.0, &down, &plan, 1.0);
+        assert!(r_hand.y > d_hand.y + 0.3, "peace hand raised");
+    }
+
+    #[test]
+    fn bouquet_meets_the_hand() {
+        let plan = BodyPlan::canon();
+        let spec = PersonSpec {
+            skin: Rgb::new(200, 150, 115),
+            hair: Rgb::new(60, 38, 24),
+            shirt: Rgb::new(70, 120, 190),
+            pants: Rgb::new(45, 45, 55),
+            pose: ArmPose::Down,
+        };
+        let base = Vec3::new(0.0, 0.0, 0.0);
+        let (_, hand) = arm_endpoints(base, 1.0, &spec, &plan, 1.0);
+        let flowers = bouquet(hand, 1.0, &[Rgb::new(200, 40, 60)]);
+        // Blooms above the hand, stems through it, leaves present.
+        let blooms = flowers
+            .iter()
+            .filter(|s| matches!(s, Shape::Sphere { mat, .. } if mat.name == "rose-bloom"))
+            .count();
+        assert_eq!(blooms, 6, "center + 5 petals");
+        assert!(
+            flowers
+                .iter()
+                .any(|s| matches!(s, Shape::Box { mat, .. } if mat.name == "rose-leaf"))
+        );
+        let highest_stem_y = flowers
+            .iter()
+            .filter_map(|s| match s {
+                Shape::Capsule { a, b, mat, .. } if mat.name == "rose-stem" => Some(a.y.min(b.y)),
+                _ => None,
+            })
+            .fold(f64::INFINITY, f64::min);
+        let lowest_bloom_y = flowers
+            .iter()
+            .filter_map(|s| match s {
+                Shape::Sphere { center, mat, .. } if mat.name == "rose-bloom" => Some(center.y),
+                _ => None,
+            })
+            .fold(f64::INFINITY, f64::min);
+        assert!(highest_stem_y < hand.y, "stems start below the hand");
+        assert!(lowest_bloom_y > hand.y, "blooms open above the hand");
+        // Single rose renders red pixels with leaves and stem.
+        let mut shapes = vec![Shape::Plane {
+            y: 0.0,
+            mat: Material::named("ground", Rgb::new(86, 148, 86)),
+        }];
+        shapes.extend(rose(Vec3::new(0.0, 0.0, 2.0), 1.0, Rgb::new(200, 40, 60)));
+        let scene = Scene {
+            camera: Camera {
+                pos: Vec3::new(0.0, 1.0, 4.0),
+                look_at: Vec3::new(0.0, 0.7, 2.0),
+                fov_deg: 40.0,
+                width: 120,
+                height: 90,
+            },
+            lights: vec![Light::key(Vec3::new(-0.4, 0.8, 0.4))],
+            ambient: 0.4,
+            sky_top: Rgb::new(100, 100, 200),
+            sky_bottom: Rgb::new(200, 200, 220),
+            shapes,
+        };
+        let (_, receipt) = render(&scene);
+        for name in ["rose-bloom", "rose-stem", "rose-leaf"] {
+            let count: u64 = receipt
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, c)| *c)
+                .unwrap_or(0);
+            assert!(count > 5, "{} missing: {:?}", name, receipt);
+        }
     }
 
     fn unique_test_id() -> u128 {

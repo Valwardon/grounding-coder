@@ -156,6 +156,10 @@ Oracle verify (compiler / tests / parser per language)
   answers "vessels near the distal phalanges" by graph walk, with
   Gray's Anatomy citations. Finger counts and chains come from the
   graph; every part routes to the torso. (`src/engine/anatomy.rs`)
+- **Imagine** — one command from prose to photo: brief, reference
+  research, palette/composition study, fresh procedural build with
+  articulated hands (peace sign included) and grown props (roses).
+  (`src/engine/imagine.rs`, `gc imagine`; samples in `samples/`)
 - **Generalized Build op** — `TaskKind::Build` ("build …" actions) runs
   the language backend's build oracle: C/`gcc`, Rust/`cargo` (native,
   release, explicit triples), Kotlin/`kotlinc` jars, Java/`javac`,
@@ -237,12 +241,12 @@ Oracle verify (compiler / tests / parser per language)
 
 ## Proof, Not Promises
 
-206 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
+214 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
 `fmt --check` clean:
 
 | Suite | Tests | What it proves |
 |---|---|---|
-| lib (unit) | 135 | recipes, ranker (importance-weighted), catalog, pathfind, parsers, manifests, guards, families, understander (slot satisfaction, vector synonyms), disposition, web research, knowledge lifecycle (consolidation clusters), compiler probes, deterministic vision (pixels, studied bodies, film finish, masks, compositing, collages), plate sourcing + provenance (Commons and web search), backend affordances |
+| lib (unit) | 143 | recipes, ranker (importance-weighted), catalog, pathfind, parsers, manifests, guards, families, understander (slot satisfaction, vector synonyms), disposition, web research, knowledge lifecycle (consolidation, evidence tiers), compiler probes, deterministic vision (pixels, studied bodies, film finish, masks, compositing, collages, peace articulation, roses), plate sourcing + provenance (Commons and web search), backend affordances, imagine trajectory |
 | `intent_benchmark` | 13 | happy path, typo tolerance, head-noun kind rule, typo-verbs-never-names, vague/ambiguous refusal, destructive block (even fully specified), contradiction ask, multi-intent split, unknown-concept curiosity |
 | `knowledge_loop` | 3 | budget-bounded offline dreaming with persistence, sleep when nothing open, failures deprioritize without deleting |
 | `learning_experiment` | 2 | dreaming arm rediscovers family patterns (rate 0.55) vs amnesiac baseline (0.00); both arms solve every task |

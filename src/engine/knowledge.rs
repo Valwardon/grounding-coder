@@ -42,8 +42,50 @@ pub enum KnowledgeState {
     Rejected,
 }
 
+/// Strength of the evidence behind a Verified item. A sourced
+/// summary and a green compiler probe both verify — but they are not
+/// the same claim, and generalizing across tiers without noting it
+/// is how overconfidence accumulates. The tier rides with the item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum VerificationTier {
+    /// A reputable source states it (web lookup, citation).
+    Sourced,
+    /// It ran green against a toolchain (compiler probe).
+    Demonstrated,
+    /// It measured out on our own renders (anatomy study).
+    Measured,
+}
+
+impl Default for VerificationTier {
+    /// Old journal lines carry no tier; they read as sourced — the
+    /// weaker claim, never the stronger.
+    fn default() -> Self {
+        VerificationTier::Sourced
+    }
+}
+
+impl VerificationTier {
+    /// Strength order: a cited summary < a measured render < a green
+    /// toolchain run. Generalizations take the weakest supporter.
+    fn rank(self) -> u8 {
+        match self {
+            VerificationTier::Sourced => 0,
+            VerificationTier::Measured => 1,
+            VerificationTier::Demonstrated => 2,
+        }
+    }
+
+    fn from_rank(rank: u8) -> Self {
+        match rank {
+            0 => VerificationTier::Sourced,
+            1 => VerificationTier::Measured,
+            _ => VerificationTier::Demonstrated,
+        }
+    }
+}
+
 /// Where a claim came from. Every edge in the graph carries this.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Provenance {
     /// Human-readable origin ("gap from task: ...", "web lookup", ...).
     pub source: String,
@@ -52,6 +94,9 @@ pub struct Provenance {
     /// What passed ("source_url=...", "cargo test green"). Required
     /// for promotion to [`KnowledgeState::Verified`].
     pub verification: Option<String>,
+    /// How strongly it passed. Defaults to Sourced for old lines.
+    #[serde(default)]
+    pub tier: VerificationTier,
     /// Why a concept was rejected, if it was.
     pub rejection: Option<String>,
 }
@@ -82,6 +127,7 @@ impl KnowledgeItem {
                 experiment: None,
                 verification: None,
                 rejection: None,
+                tier: VerificationTier::Sourced,
             },
             visits: 0,
             failures: 0,
@@ -236,6 +282,16 @@ impl KnowledgeStore {
             );
             item.dependencies = verified;
             item.provenance.verification = Some("2+ verified supporters".to_string());
+            // A pattern is only as strong as its weakest supporter:
+            // sourced claims don't launder into demonstrated ones.
+            let weakest = item
+                .dependencies
+                .iter()
+                .filter_map(|c| self.items.get(c.as_str()))
+                .map(|i| i.provenance.tier.rank())
+                .min()
+                .unwrap_or(0);
+            item.provenance.tier = VerificationTier::from_rank(weakest);
             self.insert(item);
             Ok(())
         } else {
@@ -450,6 +506,7 @@ fn prov(source: String) -> Provenance {
         experiment: None,
         verification: None,
         rejection: None,
+        tier: VerificationTier::Sourced,
     }
 }
 
@@ -526,6 +583,7 @@ async fn dream_one(
             experiment: Some("lookup on verified sources".to_string()),
             verification: None,
             rejection: None,
+            tier: VerificationTier::Sourced,
         },
     );
     match oracle.research_word(concept).await {
@@ -538,6 +596,7 @@ async fn dream_one(
                     experiment: Some("lookup on verified sources".to_string()),
                     verification: None,
                     rejection: None,
+                    tier: VerificationTier::Sourced,
                 },
             );
             // The oracle only queries verified sources, so a sourced
@@ -555,6 +614,7 @@ async fn dream_one(
                     experiment: Some("lookup on verified sources".to_string()),
                     verification: Some(format!("source_url={} summary={}", url, summary)),
                     rejection: None,
+                    tier: VerificationTier::Sourced,
                 },
             ) {
                 Ok(()) => {
@@ -688,6 +748,7 @@ mod tests {
                     experiment: Some("probe".to_string()),
                     verification: None,
                     rejection: None,
+                    tier: VerificationTier::Sourced,
                 },
             ),
         ] {
@@ -713,6 +774,7 @@ mod tests {
                     experiment: Some("probe".to_string()),
                     verification: Some("cargo test green".to_string()),
                     rejection: None,
+                    tier: VerificationTier::Sourced,
                 },
             )
             .expect("evidence promotes");
@@ -832,6 +894,42 @@ mod tests {
         assert_eq!(g.dependencies.len(), 2);
         // Second pass finds nothing new — consolidation converges.
         assert!(store.consolidate().is_empty());
+    }
+
+    #[test]
+    fn tiers_distinguish_evidence_strength() {
+        // Old journal lines without a tier read as Sourced — the
+        // weaker claim, never the stronger.
+        let old: KnowledgeItem = serde_json::from_str(
+            r#"{"concept":"x","state":"Verified","dependencies":[],
+                "provenance":{"source":"s","experiment":null,"verification":"v","rejection":null},
+                "visits":0,"failures":0}"#,
+        )
+        .expect("legacy line loads");
+        assert_eq!(old.provenance.tier, VerificationTier::Sourced);
+    }
+
+    #[test]
+    fn generalization_takes_weakest_supporter() {
+        let mut store = mem_store();
+        let mut a = KnowledgeItem::new("ga", KnowledgeState::Verified, "test");
+        a.provenance.verification = Some("probe green".to_string());
+        a.provenance.tier = VerificationTier::Demonstrated;
+        a.dependencies = vec!["d".to_string()];
+        store.insert(a);
+        let mut b = KnowledgeItem::new("gb", KnowledgeState::Verified, "test");
+        b.provenance.verification = Some("source says".to_string());
+        b.provenance.tier = VerificationTier::Sourced;
+        b.dependencies = vec!["d".to_string()];
+        store.insert(b);
+        store
+            .generalize("gp", &["ga".to_string(), "gb".to_string()])
+            .expect("two supporters");
+        // Sourced claims don't launder into demonstrated patterns.
+        assert_eq!(
+            store.get("gp").unwrap().provenance.tier,
+            VerificationTier::Sourced
+        );
     }
 
     #[test]

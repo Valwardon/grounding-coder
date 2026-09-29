@@ -1,5 +1,29 @@
 # Grounding Coder — Progress
 
+## v0.21.0 — Imagine: prose to photo in one command (2026-09-29)
+
+- `engine/imagine.rs`: brief (subject/pose/props keyword scan) →
+  research (pose query, portrait fallback) → study (median skin
+  tone, backdrop palette, framing across plates) → fresh
+  procedural build (measured skin, measured backdrop, camera
+  distance from measured fill) → finish. All pixels rendered,
+  none copied; every step logged. `gc imagine "man holding peace
+  sign"` runs the whole trajectory.
+- Peace-sign articulation: index+middle extend, ring+pinky curl to
+  stubs, thumb folds over — raised hand only. Finger counts
+  asserted structurally (6 ext + 2 stub).
+- Procedural roses: stem/leaves/center+petal bloom, bouquets
+  converging at the hand via shared arm math. Woman-with-roses and
+  peace-sign samples committed.
+- Verification tiers: Verified now carries Sourced / Demonstrated /
+  Measured strength; generalizations take the weakest supporter;
+  old journal lines read as Sourced. Sourced and demonstrated
+  evidence no longer launder into each other.
+- Stated limits: hair unmeasured in v1; live study needs the
+  network to cooperate (stock queries wall off; fallback logged).
+- 214 tests green (143 lib + 71 integration), clippy `-D warnings`
+  clean, fmt clean.
+
 ## v0.20.0 — Grounded ideas, ported small (2026-09-29)
 
 Five mechanisms from the grounded engine, each as an isolated
