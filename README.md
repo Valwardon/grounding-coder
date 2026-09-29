@@ -137,11 +137,12 @@ Oracle verify (compiler / tests / parser per language)
   eye-spacing ratios all check out. (`src/engine/vision.rs`,
   `src/engine/scene.rs`, `gc render`; sample photos in `samples/`)
 - **Self-sourced plates** — the loop finds its own base photos:
-  Commons search, complete provenance required (source, author,
-  allowlisted license — incomplete records refuse with the reason),
-  fetch, decode via the `image` crate, BMP plus manifest.
-  (`src/engine/plates.rs`, `gc plate`; first plate in
-  `samples/plates/` with full provenance)
+  Commons search or general web image search (`--source web` via
+  DDG), complete provenance required (source, author, allowlisted
+  license — incomplete records refuse with the reason), fetch,
+  decode via the `image` crate, BMP plus manifest carrying the
+  license basis for audit. (`src/engine/plates.rs`, `gc plate`;
+  first plate in `samples/plates/` with full provenance)
 - **Generalized Build op** — `TaskKind::Build` ("build …" actions) runs
   the language backend's build oracle: C/`gcc`, Rust/`cargo` (native,
   release, explicit triples), Kotlin/`kotlinc` jars, Java/`javac`,
@@ -223,12 +224,12 @@ Oracle verify (compiler / tests / parser per language)
 
 ## Proof, Not Promises
 
-181 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
+183 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
 `fmt --check` clean:
 
 | Suite | Tests | What it proves |
 |---|---|---|
-| lib (unit) | 108 | recipes, ranker, catalog, pathfind, parsers, manifests, guards, families, understander, disposition, web research, knowledge lifecycle, compiler probes, deterministic vision (pixels, studied bodies, film finish), plate sourcing + provenance |
+| lib (unit) | 110 | recipes, ranker, catalog, pathfind, parsers, manifests, guards, families, understander, disposition, web research, knowledge lifecycle, compiler probes, deterministic vision (pixels, studied bodies, film finish), plate sourcing + provenance (Commons and web search) |
 | `intent_benchmark` | 13 | happy path, typo tolerance, head-noun kind rule, typo-verbs-never-names, vague/ambiguous refusal, destructive block (even fully specified), contradiction ask, multi-intent split, unknown-concept curiosity |
 | `knowledge_loop` | 3 | budget-bounded offline dreaming with persistence, sleep when nothing open, failures deprioritize without deleting |
 | `learning_experiment` | 2 | dreaming arm rediscovers family patterns (rate 0.55) vs amnesiac baseline (0.00); both arms solve every task |

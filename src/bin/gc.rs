@@ -62,6 +62,9 @@ enum Commands {
         /// Directory for BMP files plus a provenance manifest
         #[arg(short, long, default_value = "plates")]
         out: String,
+        /// Where to search: commons (curated metadata) or web (image search)
+        #[arg(long, default_value = "commons")]
+        source: String,
         /// Downscale longer edge past this many pixels (repo stays lean)
         #[arg(long, default_value_t = 1280)]
         max_dim: u32,
@@ -200,6 +203,7 @@ fn main() {
                 limit,
                 out,
                 max_dim,
+                source,
             } => {
                 use grounding_coder::engine::plates;
                 let dir = std::path::Path::new(&out);
@@ -207,7 +211,11 @@ fn main() {
                     eprintln!("PLATE FAILED: cannot create {}", out);
                     std::process::exit(1);
                 }
-                let (sourced, refused) = plates::source_plates(&query, limit).await;
+                let (sourced, refused) = if source == "web" {
+                    plates::source_plates_web(&query, limit).await
+                } else {
+                    plates::source_plates(&query, limit).await
+                };
                 for r in &refused {
                     println!("refused: {}", r);
                 }
@@ -248,6 +256,7 @@ fn main() {
                                 "page_url": plate.provenance.page_url,
                                 "author": plate.provenance.author,
                                 "license": plate.provenance.license,
+                                "basis": plate.basis,
                             }));
                         }
                         Err(e) => println!("refused: {}: {}", file, e),

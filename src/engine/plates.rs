@@ -46,6 +46,9 @@ pub struct PlateProvenance {
 pub struct SourcedPlate {
     pub image: Image,
     pub provenance: PlateProvenance,
+    /// How the license was determined ("Commons file metadata",
+    /// "page states cc0"). Auditable evidence, not a bare claim.
+    pub basis: String,
 }
 
 /// Check one Commons `imageinfo` record. Returns provenance on
@@ -71,7 +74,10 @@ pub fn require_provenance(
     }
     let listed = LICENSE_ALLOWLIST
         .iter()
-        .any(|allow| license.to_lowercase() == *allow);
+        .any(|allow| license.to_lowercase() == *allow)
+        || SITE_LICENSES
+            .iter()
+            .any(|(_, name)| license.to_lowercase() == name.to_lowercase());
     if !listed {
         return Err(format!(
             "{:?}: license {:?} not in the provenance allowlist",
@@ -234,8 +240,332 @@ pub async fn source_plates(query: &str, limit: u32) -> (Vec<SourcedPlate>, Vec<S
             }
         };
         match decode_plate(&bytes) {
-            Ok(image) => plates.push(SourcedPlate { image, provenance }),
+            Ok(image) => plates.push(SourcedPlate {
+                image,
+                provenance,
+                basis: "Commons file metadata (LicenseShortName)".to_string(),
+            }),
             Err(e) => refused.push(format!("{:?}: {}", title, e)),
+        }
+    }
+    (plates, refused)
+}
+
+/// Site licenses recorded verbatim when the hosting page states
+/// them. Same standing as Commons short names: the evidence is the
+/// page's own words, quoted in the refusal-or-accept log.
+const SITE_LICENSES: &[(&str, &str)] = &[
+    ("unsplash.com/license", "Unsplash License"),
+    ("pexels.com/license", "Pexels License"),
+    ("pixabay.com/service/license", "Pixabay License"),
+];
+
+/// One image-search hit: direct file URL plus the page that hosts it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebHit {
+    pub title: String,
+    pub file_url: String,
+    pub page_url: String,
+}
+
+/// DuckDuckGo image search: fetch the results page, extract the `vqd`
+/// token, call the `i.js` JSON endpoint. No key, same stack as the
+/// word oracle. Token flow or JSON shape changes refuse as
+/// search-failed — never parse garbage into candidates.
+pub async fn ddg_images(query: &str, limit: u32) -> Result<Vec<WebHit>, String> {
+    let search_url = format!(
+        "https://duckduckgo.com/?q={}&iar=images&iax=images&ia=images",
+        percent_encode(query)
+    );
+    let (status, body) = crate::http::get_text(&search_url)
+        .await
+        .map_err(|e| format!("image search fetch failed: {}", e))?;
+    if !(200..300).contains(&status) {
+        return Err(format!("image search HTTP {}", status));
+    }
+    let vqd = extract_vqd(&body)
+        .ok_or_else(|| "image search refused: no vqd token in results page".to_string())?;
+    let api_url = format!(
+        "https://duckduckgo.com/i.js?l=us-en&o=json&q={}&vqd={}&f=,,,,,&p=1",
+        percent_encode(query),
+        vqd
+    );
+    let value: serde_json::Value = crate::http::get_json(&api_url, None, Some("application/json"))
+        .await
+        .map_err(|e| format!("image search api failed: {}", e))?;
+    Ok(parse_image_hits(&value, limit))
+}
+
+fn extract_vqd(html: &str) -> Option<String> {
+    for marker in ["vqd='", "vqd=\"", "vqd="] {
+        if let Some(pos) = html.find(marker) {
+            let after = &html[pos + marker.len()..];
+            let end = after
+                .find(['\'', '"', '&', ' ', ';'])
+                .unwrap_or(after.len());
+            let token = &after[..end];
+            if token.len() >= 8 {
+                return Some(token.trim_matches('\'').trim_matches('"').to_string());
+            }
+        }
+    }
+    None
+}
+
+fn parse_image_hits(value: &serde_json::Value, limit: u32) -> Vec<WebHit> {
+    let mut out = Vec::new();
+    let results = value.get("results").and_then(|r| r.as_array());
+    let results = match results {
+        Some(r) => r,
+        None => return out,
+    };
+    for r in results {
+        if out.len() >= limit as usize {
+            break;
+        }
+        let file_url = r.get("image").and_then(|v| v.as_str()).unwrap_or("");
+        let page_url = r.get("url").and_then(|v| v.as_str()).unwrap_or("");
+        let title = r
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if (file_url.starts_with("https://") || file_url.starts_with("http://"))
+            && (page_url.starts_with("https://") || page_url.starts_with("http://"))
+        {
+            out.push(WebHit {
+                title,
+                file_url: file_url.to_string(),
+                page_url: page_url.to_string(),
+            });
+        }
+    }
+    out
+}
+
+/// Page evidence for one hit: author plus license, both read off the
+/// hosting page. Author sources, strongest first: JSON-LD `author.name`,
+/// `<meta name="author">`, OpenGraph `article:author`. License
+/// sources: Creative Commons strings, public-domain statements, then
+/// known site-license pages. Anything unfound refuses downstream —
+/// this function reports what it saw, never invents.
+#[derive(Debug, Clone)]
+pub struct PageEvidence {
+    pub author: String,
+    pub license: String,
+    pub basis: String,
+}
+
+pub fn page_evidence(page_url: &str, html: &str) -> PageEvidence {
+    let lower = html.to_lowercase();
+    let author = jsonld_author(html)
+        .or_else(|| meta_content(html, "author"))
+        .or_else(|| meta_property(html, "article:author"))
+        .unwrap_or_default();
+    let mut license = String::new();
+    let mut basis = String::new();
+    for token in [
+        "cc0",
+        "public domain",
+        "cc-by-sa",
+        "cc-by",
+        "creative commons",
+    ] {
+        if lower.contains(token) {
+            license = token.to_string();
+            basis = format!("page states {:?}", token);
+            break;
+        }
+    }
+    if license.is_empty() {
+        for (marker, name) in SITE_LICENSES {
+            if lower.contains(marker) {
+                license = name.to_string();
+                basis = format!("page references {}", marker);
+                break;
+            }
+        }
+    }
+    // Creative-Commons umbrella alone is not a grant: require the
+    // specific variant. A bare mention without deed terms refuses.
+    if license == "creative commons" {
+        license.clear();
+        basis = "bare Creative Commons mention without variant terms".to_string();
+    }
+    let _ = page_url;
+    PageEvidence {
+        author,
+        license,
+        basis,
+    }
+}
+
+fn meta_content(html: &str, name: &str) -> Option<String> {
+    // <meta name="author" content="...">, attributes in either order.
+    let lower = html.to_lowercase();
+    let mut rest = lower.as_str();
+    let want = format!("name=\"{}\"", name);
+    let want2 = format!("name='{}'", name);
+    loop {
+        let pos = rest.find("<meta")?;
+        let tag_end = rest[pos..].find('>')?;
+        let tag = &rest[pos..pos + tag_end];
+        if tag.contains(&want) || tag.contains(&want2) {
+            let orig = &html[html.len() - rest.len() + pos..];
+            let orig_end = orig.find('>').unwrap_or(orig.len());
+            let orig_tag = &orig[..orig_end];
+            return attr_value(orig_tag, "content");
+        }
+        rest = &rest[pos + 5..];
+    }
+}
+
+fn meta_property(html: &str, prop: &str) -> Option<String> {
+    let lower = html.to_lowercase();
+    let mut rest = lower.as_str();
+    let want = format!("property=\"{}\"", prop);
+    loop {
+        let pos = rest.find("<meta")?;
+        let tag_end = rest[pos..].find('>')?;
+        let tag = &rest[pos..pos + tag_end];
+        if tag.contains(&want) {
+            let orig = &html[html.len() - rest.len() + pos..];
+            let orig_end = orig.find('>').unwrap_or(orig.len());
+            return attr_value(&orig[..orig_end], "content");
+        }
+        rest = &rest[pos + 5..];
+    }
+}
+
+fn attr_value(tag: &str, attr: &str) -> Option<String> {
+    for quote in ['"', '\''] {
+        for key in [format!("{}={}", attr, quote)] {
+            if let Some(pos) = tag.find(&key) {
+                let after = &tag[pos + key.len()..];
+                let end = after.find(quote).unwrap_or(after.len());
+                let v = after[..end].trim().to_string();
+                if !v.is_empty() {
+                    return Some(v);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn jsonld_author(html: &str) -> Option<String> {
+    // "author": {"name": "..."} or "author": "…" inside ld+json blocks.
+    let mut rest = html;
+    loop {
+        let pos = rest.find("\"author\"")?;
+        let after = &rest[pos + 8..];
+        let after = after.trim_start_matches([' ', ':', '\n', '\r', '\t']);
+        if after.starts_with('{') {
+            if let Some(npos) = after.find("\"name\"") {
+                let vstart = &after[npos + 6..];
+                let vstart = vstart.trim_start_matches([' ', ':', '"', '\'', '\n', '\r', '\t']);
+                let end = vstart.find(['"', '\'', '}']).unwrap_or(0);
+                let name = strip_tags(&vstart[..end]).trim().to_string();
+                if !name.is_empty() {
+                    return Some(name);
+                }
+            }
+            rest = after.strip_prefix('{').unwrap_or(after);
+        } else if after.starts_with('"') || after.starts_with('\'') {
+            let q = after.chars().next().unwrap();
+            let end = after[1..].find(q).unwrap_or(0);
+            let name = strip_tags(&after[1..1 + end]).trim().to_string();
+            if !name.is_empty() {
+                return Some(name);
+            }
+            rest = &after[1..];
+        } else {
+            rest = after;
+        }
+        if rest.len() < 12 {
+            break;
+        }
+    }
+    None
+}
+
+/// Source plates from general web image search: DDG hits → hosting
+/// page evidence → provenance requirements → fetch → decode. The same
+/// completeness rule as Commons applies — most of the web refuses,
+/// and the refusals say exactly what was missing.
+pub async fn source_plates_web(query: &str, limit: u32) -> (Vec<SourcedPlate>, Vec<String>) {
+    let mut plates = Vec::new();
+    let mut refused = Vec::new();
+    let hits = match ddg_images(query, limit * 3).await {
+        Ok(h) => h,
+        Err(e) => {
+            refused.push(format!("web image search failed: {}", e));
+            return (plates, refused);
+        }
+    };
+    for hit in hits {
+        if plates.len() >= limit as usize {
+            break;
+        }
+        let label = if hit.title.is_empty() {
+            hit.page_url.clone()
+        } else {
+            hit.title.clone()
+        };
+        let html = match crate::http::get_text(&hit.page_url).await {
+            Ok((st, body)) if (200..300).contains(&st) => body,
+            _ => {
+                refused.push(format!("{:?}: hosting page unreadable", label));
+                continue;
+            }
+        };
+        let ev = page_evidence(&hit.page_url, &html);
+        if !ev.basis.is_empty() && ev.license.is_empty() {
+            refused.push(format!("{:?}: {}", label, ev.basis));
+            continue;
+        }
+        let provenance = match require_provenance(
+            &label,
+            &hit.page_url,
+            &hit.file_url,
+            &ev.author,
+            &ev.license,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                refused.push(format!("{} ({})", e, ev.basis));
+                continue;
+            }
+        };
+        // Prefer the page's own og:image when the hit URL is a
+        // thumbnail proxy; fall back to the hit URL itself.
+        let mut file_urls = vec![provenance.source_url.clone()];
+        if let Some(og) = meta_property(&html, "og:image")
+            && (og.starts_with("https://") || og.starts_with("http://"))
+        {
+            file_urls.insert(0, og);
+        }
+        let mut decoded = None;
+        let mut fetch_err = String::new();
+        for url in &file_urls {
+            match crate::http::get_bytes(url).await {
+                Ok(bytes) => match decode_plate(&bytes) {
+                    Ok(img) => {
+                        decoded = Some(img);
+                        break;
+                    }
+                    Err(e) => fetch_err = e,
+                },
+                Err(e) => fetch_err = e,
+            }
+        }
+        match decoded {
+            Some(image) => plates.push(SourcedPlate {
+                image,
+                provenance,
+                basis: ev.basis.clone(),
+            }),
+            None => refused.push(format!("{:?}: undecodable: {}", label, fetch_err)),
         }
     }
     (plates, refused)
@@ -318,5 +648,65 @@ mod tests {
             }
         }
         assert!(decode_plate(b"not an image").is_err());
+    }
+
+    #[test]
+    fn vqd_and_hits_parse_canned_responses() {
+        let html =
+            r#"<html><head></head><body><script>vqd='4-1234567890abcdef';</script></body></html>"#;
+        assert_eq!(extract_vqd(html).as_deref(), Some("4-1234567890abcdef"));
+        assert!(extract_vqd("<html>nothing here</html>").is_none());
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{"results": [
+                {"title": "A portrait", "image": "https://cdn.example.org/a.jpg", "url": "https://example.org/page-a"},
+                {"title": "Bad scheme", "image": "data:image/gif;base64,xx", "url": "https://example.org/page-b"},
+                {"title": "No file", "url": "https://example.org/page-c"}
+            ]}"#,
+        )
+        .unwrap();
+        let hits = parse_image_hits(&json, 10);
+        assert_eq!(hits.len(), 1, "{:?}", hits);
+        assert_eq!(hits[0].file_url, "https://cdn.example.org/a.jpg");
+        assert!(parse_image_hits(&serde_json::json!({}), 10).is_empty());
+    }
+
+    #[test]
+    fn page_evidence_reads_author_and_license() {
+        // Meta author plus a CC deed badge.
+        let html = r#"<html><head><meta name="author" content="Jane Doe"></head>
+            <body><p>Released under <a href="https://creativecommons.org/publicdomain/zero/1.0/">CC0</a> terms.</p></body></html>"#;
+        let ev = page_evidence("https://example.org/p", html);
+        assert_eq!(ev.author, "Jane Doe");
+        assert_eq!(ev.license, "cc0");
+        // JSON-LD author plus a site license reference.
+        let html2 = r#"<html><head><script type="application/ld+json">{"@type":"ImageObject","author":{"name":"John Smith"}}</script></head>
+            <body>See https://unsplash.com/license for terms.</body></html>"#;
+        let ev2 = page_evidence("https://unsplash.com/photos/x", html2);
+        assert_eq!(ev2.author, "John Smith");
+        assert_eq!(ev2.license, "Unsplash License");
+        // Bare "creative commons" without a variant is not a grant.
+        let ev3 = page_evidence(
+            "https://example.org/q",
+            "<html><body>creative commons stuff</body></html>",
+        );
+        assert!(ev3.license.is_empty(), "{:?}", ev3);
+        assert!(!ev3.basis.is_empty());
+        // Nothing present: empty evidence, downstream refuses.
+        let ev4 = page_evidence(
+            "https://example.org/r",
+            "<html><body>buy this photo $99</body></html>",
+        );
+        assert!(ev4.author.is_empty() && ev4.license.is_empty());
+        // And the provenance gate accepts the site-license token.
+        assert!(
+            require_provenance(
+                "T",
+                "https://unsplash.com/photos/x",
+                "https://images.unsplash.com/y.jpg",
+                "John Smith",
+                "Unsplash License"
+            )
+            .is_ok()
+        );
     }
 }

@@ -1,5 +1,20 @@
 # Grounding Coder — Progress
 
+## v0.17.0 — Web image search joins plate sourcing (2026-09-29)
+
+- `gc plate --source web`: DuckDuckGo image search (vqd token
+  flow, same stack as the word oracle) → hosting-page evidence
+  (JSON-LD/meta author, CC strings, site-license references) →
+  same completeness rule. Bare "creative commons" without variant
+  terms refuses; og:image preferred over thumbnail proxies.
+- Every manifest entry now carries the license basis, so accepted
+  plates show how their license was determined, not just the token.
+  Weak evidence (aggregator pin pages) stays visible as weak.
+- Proved live: 2 CC0 plates ingested, 4 refusals with exact
+  reasons (unreadable pages, missing licenses).
+- 183 tests green (110 lib + 73 integration), clippy `-D warnings`
+  clean on default AND `ui`, fmt clean.
+
 ## v0.16.0 — The loop sources its own base photos (2026-09-29)
 
 - `engine/plates.rs`: Commons search → per-file metadata →
