@@ -1,5 +1,21 @@
 # Grounding Coder — Progress
 
+## v0.19.0 — Queryable anatomy without vectors (2026-09-29)
+
+- `engine/anatomy.rs`: partonomy graph — finger phalanges,
+  metacarpals, carpals, forearm, arm, and the arterial tree to the
+  digital branches, all routes resolving to the torso.
+  "Vessels near the distal phalanges" returns the proper palmar
+  digital arteries by graph walk, with Gray's citations.
+- Geometry payoff: fingers (four + thumb per hand) built from the
+  graph, arms re-balanced so fingertips (not wrists) set the
+  measured span — the study still reads canon.
+- The deterministic counterpart to vector search: same questions,
+  answered by structure instead of embeddings. No server, no model,
+  no driver.
+- 197 tests green (124 lib + 73 integration), clippy `-D warnings`
+  clean on default AND `ui`, fmt clean.
+
 ## v0.18.0 — Photorealistic portraits from plates (2026-09-29)
 
 - `engine/compose.rs` + mask ops in `vision.rs`: skin locus

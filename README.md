@@ -151,6 +151,11 @@ Oracle verify (compiler / tests / parser per language)
   traces to its source plate via the op log.
   (`src/engine/compose.rs`, `gc compose`;
   `samples/photo-composite-640x800.bmp` from a CC0 plate)
+- **Queryable anatomy, no vectors** — a researched partonomy graph
+  (bones, vessels, relations: part-of, articulates, supplied-by)
+  answers "vessels near the distal phalanges" by graph walk, with
+  Gray's Anatomy citations. Finger counts and chains come from the
+  graph; every part routes to the torso. (`src/engine/anatomy.rs`)
 - **Generalized Build op** — `TaskKind::Build` ("build …" actions) runs
   the language backend's build oracle: C/`gcc`, Rust/`cargo` (native,
   release, explicit triples), Kotlin/`kotlinc` jars, Java/`javac`,
