@@ -240,10 +240,11 @@ pub fn score_plate(img: &Image) -> Option<(f64, (u32, u32, u32, u32))> {
 pub fn pick_subject(plates: &[SourcedPlate]) -> Option<usize> {
     let mut best: Option<(usize, f64)> = None;
     for (i, plate) in plates.iter().enumerate() {
-        if let Some((score, _)) = score_plate(&plate.image) {
-            if score > 0.0 && best.map(|(_, s)| score > s).unwrap_or(true) {
-                best = Some((i, score));
-            }
+        if let Some((score, _)) = score_plate(&plate.image)
+            && score > 0.0
+            && best.map(|(_, s)| score > s).unwrap_or(true)
+        {
+            best = Some((i, score));
         }
     }
     best.map(|(i, _)| i)
@@ -386,19 +387,46 @@ pub async fn imagine(prose: &str, width: u32, height: u32) -> (Image, Vec<String
     }
     // Photo first: a complete photographic subject beats any
     // procedural figure — people pixels come from photographs.
-    // Procedural builds only the world around them, or everything
+    // A sourced backdrop makes it a new photo, not a reframe: a
+    // person and a place that never met. Procedural builds only
     // when no plate qualifies (logged either way).
     if let Some(idx) = pick_subject(&plates) {
         log.push(format!("path: photographic (plate {})", idx));
         let plate = &plates[idx];
-        match super::compose::compose_portrait(&plate.image, "imagine", width, height) {
+        // Backdrop search: a place, not a person. First decodable
+        // plate from a different source wins; the subject's own page
+        // would just rebuild the original photo.
+        let mut backdrop: Option<(&Image, String)> = None;
+        let (bg_plates, bg_refused) = super::plates::source_plates_web("landscape", 2).await;
+        for r in &bg_refused {
+            log.push(format!("backdrop refused: {}", r));
+        }
+        for bg in &bg_plates {
+            if bg.provenance.source_url != plate.provenance.source_url {
+                backdrop = Some((&bg.image, bg.provenance.page_url.clone()));
+                log.push(format!("backdrop: {}", bg.provenance.page_url));
+                break;
+            }
+        }
+        let backdrop_label = backdrop
+            .as_ref()
+            .map(|(_, u)| u.clone())
+            .unwrap_or_else(|| "studio gradient".to_string());
+        let backdrop_ref = backdrop.as_ref().map(|(img, u)| (*img, u.as_str()));
+        match super::compose::compose_portrait_on(
+            &plate.image,
+            "imagine",
+            backdrop_ref,
+            width,
+            height,
+        ) {
             Ok((img, clog)) => {
                 for op in &clog.ops {
                     log.push(format!("compose: {}", op));
                 }
                 log.push(format!(
-                    "subject: bbox {:?}, {:.3} of frame",
-                    clog.subject_bbox, clog.subject_fraction
+                    "subject: bbox {:?}, {:.3} of frame on {}",
+                    clog.subject_bbox, clog.subject_fraction, backdrop_label
                 ));
                 return (img, log);
             }
@@ -536,6 +564,31 @@ mod tests {
         ];
         assert_eq!(pick_subject(&plates), Some(1));
         assert_eq!(pick_subject(&[]), None);
+    }
+
+    #[test]
+    fn two_sources_make_one_new_photo() {
+        // Subject plate (skin rect) + backdrop plate (green field):
+        // the composite centers subject pixels on backdrop pixels —
+        // a photo that existed in neither source.
+        let mut subject = Image::blank(120, 160, Rgb::new(60, 80, 120));
+        subject.draw_rect(35, 40, 50, 70, Rgb::new(200, 150, 115));
+        let bg = Image::blank(200, 150, Rgb::new(40, 120, 60));
+        let (img, log) = super::super::compose::compose_portrait_on(
+            &subject,
+            "test",
+            Some((&bg, "bg-test")),
+            64,
+            80,
+        )
+        .expect("two-source composite");
+        assert_eq!((img.width, img.height), (64, 80));
+        assert!(log.background.contains("bg-test"), "{:?}", log.background);
+        // Corners read backdrop green, center reads subject skin.
+        let corner = img.get(2, 2).unwrap();
+        assert!(corner.g > 80 && corner.r < 100, "{:?}", corner);
+        let center = img.get(32, 30).unwrap();
+        assert!(center.r > 120, "{:?}", center);
     }
 
     #[test]

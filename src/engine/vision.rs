@@ -1159,20 +1159,19 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn shadow_grounds_and_luma_matches() {
         // Shadow: darkest just under the bbox, unity far away.
         let shadow = Image::contact_shadow(60, 60, (20, 40, 40, 50), 0.5);
         assert_eq!(shadow.len(), 3600);
         let under = shadow[(42 * 60 + 30) as usize];
-        assert!(under < 1.0 && under >= 0.5, "soft shade: {}", under);
+        assert!((0.5..1.0).contains(&under), "soft shade: {}", under);
         assert_eq!(shadow[0], 1.0, "far corner untouched");
         assert_eq!(shadow[(59 * 60 + 59) as usize], 1.0);
         // apply_shadow darkens proportionally; length mismatch is a no-op.
         let mut img = Image::blank(4, 4, Rgb::new(200, 200, 200));
-        img.apply_shadow(&vec![0.5; 16]);
+        img.apply_shadow(&[0.5; 16]);
         assert_eq!(img.get(0, 0), Some(Rgb::new(100, 100, 100)));
-        img.apply_shadow(&vec![0.5; 8]);
+        img.apply_shadow(&[0.5; 8]);
         assert_eq!(img.get(0, 0), Some(Rgb::new(100, 100, 100)));
         // match_luma lifts dark toward target, capped at ±40.
         let mut dark = Image::blank(4, 4, Rgb::new(50, 50, 50));

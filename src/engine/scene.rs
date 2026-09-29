@@ -1520,14 +1520,14 @@ mod tests {
         let mut full = 0;
         let mut stub = 0;
         for s in &shapes {
-            if let Shape::Capsule { a, b, mat, .. } = s {
-                if mat.name == "person-hand" {
-                    let len = (b.sub(*a)).len();
-                    if (len - expected_full).abs() < 0.01 {
-                        full += 1;
-                    } else if (len - expected_full * 0.35).abs() < 0.01 {
-                        stub += 1;
-                    }
+            if let Shape::Capsule { a, b, mat, .. } = s
+                && mat.name == "person-hand"
+            {
+                let len = (b.sub(*a)).len();
+                if (len - expected_full).abs() < 0.01 {
+                    full += 1;
+                } else if (len - expected_full * 0.35).abs() < 0.01 {
+                    stub += 1;
                 }
             }
         }

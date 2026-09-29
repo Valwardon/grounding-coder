@@ -20,6 +20,8 @@ pub struct ComposeLog {
     pub pasted: (u32, u32, u32, u32),
     /// Subject area as a fraction of the plate.
     pub subject_fraction: f64,
+    /// What stands behind the subject: gradient or sourced plate.
+    pub background: String,
     /// Ops applied, in order, with parameters.
     pub ops: Vec<String>,
 }
@@ -145,6 +147,20 @@ pub fn compose_portrait(
     out_w: u32,
     out_h: u32,
 ) -> Result<(Image, ComposeLog), String> {
+    compose_portrait_on(plate, source, None, out_w, out_h)
+}
+
+/// Portrait onto a supplied backdrop plate: a person and a place that
+/// never met, in one photograph that never existed. `None` keeps the
+/// studio gradient. The backdrop is named in the log — two sources,
+/// two provenances, one new photo.
+pub fn compose_portrait_on(
+    plate: &Image,
+    source: &str,
+    backdrop_plate: Option<(&Image, &str)>,
+    out_w: u32,
+    out_h: u32,
+) -> Result<(Image, ComposeLog), String> {
     let (pw, ph) = (plate.width, plate.height);
     // Collage handling: gutter seams split the plate into photo cells
     // and each cell is searched independently. Merging across a seam
@@ -227,7 +243,16 @@ pub fn compose_portrait(
     // Feather scales with output: 4px at 640 wide, more in HD.
     let feather_r = (out_w / 160).max(2);
     let alpha = Image::feather(&mask, out_w, out_h, feather_r);
-    let mut backdrop = studio_backdrop(out_w, out_h, Rgb::new(72, 72, 82), Rgb::new(28, 28, 34));
+    let (backdrop, background_note) = match backdrop_plate {
+        Some((bg_img, bg_name)) => (
+            bg_img.resize_smooth(out_w, out_h),
+            format!("sourced backdrop {}", bg_name),
+        ),
+        None => (
+            studio_backdrop(out_w, out_h, Rgb::new(72, 72, 82), Rgb::new(28, 28, 34)),
+            "studio gradient".to_string(),
+        ),
+    };
     // One light: lift the subject toward the backdrop's mean luma so
     // the two halves read as one photo. Logged, bounded ±40.
     let bg_mean = backdrop.mean_brightness();
@@ -257,6 +282,7 @@ pub fn compose_portrait(
         subject_bbox: (fx0, fy0, fx1, fy1),
         pasted: (ox, oy, subject.width, subject.height),
         subject_fraction: fraction,
+        background: background_note,
         ops: vec![
             format!(
                 "collage check: {} seam(s), composing from cell {} ({})",
