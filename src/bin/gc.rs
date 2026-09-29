@@ -33,6 +33,20 @@ enum Commands {
     },
     /// Show recipes in the error-correction log
     Recipes,
+    /// Dream: run the idle learning loop — investigate open questions
+    /// and promote only what verifies. Bounded by budget, then sleeps.
+    Dream {
+        /// Target project directory (holds .grounding/knowledge.jsonl)
+        #[arg(short, long, default_value = ".")]
+        project: String,
+        /// Max investigations this pass
+        #[arg(short, long, default_value_t = 5)]
+        budget: u32,
+        /// Look up unknowns on verified web sources (without it,
+        /// hypotheses are held for a later pass)
+        #[arg(long)]
+        research: bool,
+    },
 }
 
 fn main() {
@@ -47,12 +61,16 @@ fn main() {
                 budget,
             } => {
                 // No model anywhere in this path: the deterministic
-                // understander parses, the engine proves. Below-threshold
-                // parses refuse with their receipt.
+                // understander parses, the disposition engine routes,
+                // the engine proves. Anything but Execute refuses with
+                // its receipt.
                 use grounding_coder::engine::understand;
+                use grounding_coder::engine::understand::Disposition;
                 let understood =
                     understand::understand(&prompt, Some(std::path::Path::new(&project)));
-                if understood.confidence < 0.75 || understood.frame == "unknown" {
+                if understand::disposition(understood.confidence, &understood.frame, &prompt)
+                    != Disposition::Execute
+                {
                     eprintln!(
                         "UNDERSTOOD confidence {:.2} frame={} — too thin: {:?}",
                         understood.confidence,
@@ -91,6 +109,36 @@ fn main() {
                 for recipe in bot.recipes() {
                     println!("  {}", recipe);
                 }
+            }
+            Commands::Dream {
+                project,
+                budget,
+                research,
+            } => {
+                use grounding_coder::engine::knowledge;
+                let outcomes =
+                    knowledge::dream_loop(std::path::Path::new(&project), budget, research).await;
+                if outcomes.is_empty() {
+                    println!("dream: nothing open — sleeping");
+                }
+                for o in &outcomes {
+                    println!(
+                        "dream: {:?} {:?} -> {:?} ({})",
+                        o.concept, o.from, o.to, o.note
+                    );
+                }
+                let store = knowledge::KnowledgeStore::open(std::path::Path::new(&project));
+                let (verified, open) = store.all().iter().fold((0, 0), |(v, o), i| {
+                    use grounding_coder::engine::knowledge::KnowledgeState as S;
+                    match i.state {
+                        S::Verified | S::Generalized => (v + 1, o),
+                        S::Question | S::Unknown | S::Hypothesis | S::Experiment | S::Evidence => {
+                            (v, o + 1)
+                        }
+                        S::Rejected => (v, o),
+                    }
+                });
+                println!("knowledge: {} verified, {} open", verified, open);
             }
         }
     });

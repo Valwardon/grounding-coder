@@ -1,5 +1,29 @@
 # Grounding Coder — Progress
 
+## v0.11.0 — Proactive curiosity and idle learning loop (2026-09-29)
+
+- `engine/knowledge.rs`: every concept carries an explicit lifecycle
+  (Unknown → Question → Hypothesis → Experiment → Evidence →
+  Verified → Generalized, plus terminal Rejected). Promotion to
+  Verified requires verification evidence — DREAM ≠ KNOWLEDGE is a
+  store-enforced error, not a comment. `generalize` needs 2+
+  verified supporters or the pattern is Rejected, never kept.
+- `extract_gaps` turns a finished task (concepts used, unknowns
+  seen, failures, related) into Questions with dependency seeds;
+  solved and disproven concepts are left alone. `prioritize` studies
+  breadth-first (least-visited, least-failed); `neighbors` walks the
+  dependency graph — the what-next engine follows structure.
+- `gc dream --project --budget [--research]`: bounded idle passes
+  (at most `budget` investigations, sleeps when nothing is open),
+  persisting to `.grounding/knowledge.jsonl` every step. `gc chat`
+  now routes through `disposition()` like the rest.
+- Deliberately v1-small: neighbor seeding across verified items is
+  an explicit no-op hook (`guess_neighbors`) — inventing adjacency
+  from spelling would be dreaming disguised as structure. Compiler
+  probes as harder evidence are the named follow-up.
+- 154 tests green (83 lib + 71 integration), clippy `-D warnings`
+  clean on default AND `ui`, fmt clean.
+
 ## v0.10.4 — Benchmark pins the new capabilities (2026-09-29)
 
 - Three new `intent_benchmark` rows so the v0.10.3 fixes cannot

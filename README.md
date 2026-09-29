@@ -109,6 +109,14 @@ Oracle verify (compiler / tests / parser per language)
   authored by synthesis + verified transforms. Replication of owned
   templates requires explicit opt-out (`set_clean_room(false)` /
   `GROUNDING_ALLOW_REPLICATION=1`). (`tests/replicate.rs`)
+- **Idle learning loop** — `gc dream` turns finished tasks into
+  questions (`extract_gaps`), investigates them on spare cycles, and
+  promotes only what verifies. Knowledge carries an explicit
+  lifecycle (Unknown → Question → Hypothesis → Experiment → Evidence
+  → Verified → Generalized); DREAM ≠ KNOWLEDGE is enforced by the
+  store — promotion without verification evidence is refused, and
+  invalid generalizations are Rejected, never re-learned.
+  (`tests/knowledge_loop.rs`)
 - **Generalized Build op** — `TaskKind::Build` ("build …" actions) runs
   the language backend's build oracle: C/`gcc`, Rust/`cargo` (native,
   release, explicit triples), Kotlin/`kotlinc` jars, Java/`javac`,
@@ -190,13 +198,14 @@ Oracle verify (compiler / tests / parser per language)
 
 ## Proof, Not Promises
 
-145 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
+154 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
 `fmt --check` clean:
 
 | Suite | Tests | What it proves |
 |---|---|---|
-| lib (unit) | 77 | recipes, ranker, catalog, pathfind, parsers, manifests, guards, families, understander, disposition, web research |
+| lib (unit) | 83 | recipes, ranker, catalog, pathfind, parsers, manifests, guards, families, understander, disposition, web research, knowledge lifecycle |
 | `intent_benchmark` | 13 | happy path, typo tolerance, head-noun kind rule, typo-verbs-never-names, vague/ambiguous refusal, destructive block (even fully specified), contradiction ask, multi-intent split, unknown-concept curiosity |
+| `knowledge_loop` | 3 | budget-bounded offline dreaming with persistence, sleep when nothing open, failures deprioritize without deleting |
 | `build` | 6 | C/Java/Rust real builds + artifacts run; unknown targets block; dx-output APK discovery |
 | `replicate` | 6 | byte-exact replication, hash-mismatch block, replace-exact rules, clean-room refusal + opt-out |
 | `editplan` | 4 | byte-range apply, stale rejection, invalid-range rejection, LLM-code rejection |

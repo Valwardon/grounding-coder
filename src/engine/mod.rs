@@ -3,6 +3,7 @@ pub mod budget;
 pub mod catalog;
 pub mod corrector;
 pub mod error;
+pub mod knowledge;
 pub mod lang;
 pub mod pathfind;
 pub mod plan;
