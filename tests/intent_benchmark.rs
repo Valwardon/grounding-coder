@@ -46,6 +46,64 @@ fn typo_tolerance_executes() {
 }
 
 #[test]
+fn head_noun_governs_kind() {
+    // "settings page" is a page about Settings — the LAST kind word
+    // (head noun) governs, not the first. A first-match rule would
+    // misfile this as a config.
+    let u = understand::understand("Buld a settings page.", None);
+    let def = u
+        .intent
+        .define
+        .into_iter()
+        .flatten()
+        .next()
+        .expect("define");
+    assert_eq!(def.kind, "page");
+    assert_eq!(def.name, "Settings");
+    // Same rule, single-kind phrase.
+    let u = understand::understand("Create a counter struct.", None);
+    let def = u
+        .intent
+        .define
+        .into_iter()
+        .flatten()
+        .next()
+        .expect("define");
+    assert_eq!(def.kind, "struct");
+    assert_eq!(def.name, "Counter");
+}
+
+#[test]
+fn typo_verb_never_a_name() {
+    // "bild" sits exactly where a name would go, but it is a typo'd
+    // action — the adjacent scan must skip it like any verb, leaving
+    // the request nameless (a question) instead of a "Bild" page.
+    let u = understand::understand("Build a bild page.", None);
+    let names: Vec<String> = u
+        .intent
+        .define
+        .into_iter()
+        .flatten()
+        .map(|d| d.name)
+        .collect();
+    assert!(
+        !names.iter().any(|n| n == "Bild"),
+        "typo'd verb became a name: {:?}",
+        names
+    );
+    let (_, d, _) = disp("Build a bild page.");
+    assert_ne!(d, Disposition::Execute);
+}
+
+#[test]
+fn destructive_blocks_when_fully_specified() {
+    // Disposition checks destructive words BEFORE confidence: even a
+    // complete request (verb + kind + quoted name) never executes.
+    let (frame, d, conf) = disp("Delete the file called Cleanup.");
+    assert_eq!(d, Disposition::Block, "frame {} conf {}", frame, conf);
+}
+
+#[test]
 fn missing_information_asks() {
     // A dashboard with no content and no name: parseable, unactionable.
     let (_frame, d, conf) = disp("Make a dashboard.");

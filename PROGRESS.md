@@ -1,5 +1,16 @@
 # Grounding Coder — Progress
 
+## v0.10.4 — Benchmark pins the new capabilities (2026-09-29)
+
+- Three new `intent_benchmark` rows so the v0.10.3 fixes cannot
+  silently regress: head-noun kind rule ("settings page" → page,
+  "counter struct" → struct), typo-verbs-never-names ("Build a bild
+  page." asks instead of creating "Bild"), destructive-blocks-first
+  ("Delete the file called Cleanup." blocks despite full
+  specification).
+- 145 tests green (77 lib + 68 integration), clippy `-D warnings`
+  clean on default AND `ui`, fmt clean.
+
 ## v0.10.3 — Disposition engine + intent benchmark (2026-09-29)
 
 - `disposition()` in `engine/understand.rs`: confidence + frame +
