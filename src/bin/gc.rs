@@ -47,6 +47,9 @@ enum Commands {
         /// Portrait framing: camera in close on the person
         #[arg(long)]
         closeup: bool,
+        /// Group framing: three studied individuals, three-point light
+        #[arg(long)]
+        group: bool,
     },
     /// Dream: run the idle learning loop — investigate open questions
     /// and promote only what verifies. Bounded by budget, then sleeps.
@@ -130,15 +133,26 @@ fn main() {
                 width,
                 height,
                 closeup,
+                group,
             } => {
                 use grounding_coder::engine::{scene, vision::Image};
                 let width = width.clamp(16, 1920);
                 let height = height.clamp(16, 1920);
-                let (img, receipt) = scene::render(&if closeup {
+                let people = closeup || group;
+                let (mut img, receipt) = scene::render(&if group {
+                    scene::group_scene(width, height)
+                } else if closeup {
                     scene::portrait_scene(width, height)
                 } else {
                     scene::demo_scene(width, height)
                 });
+                // Photo finish on people: grade, vignette, seeded grain.
+                // Deterministic — same flags twice, byte-identical file.
+                if people {
+                    img.grade(1.12, 6.0);
+                    img.vignette(0.30);
+                    img.grain(0xC10C, 5);
+                }
                 let path = std::path::Path::new(&out);
                 match img.save_bmp(path) {
                     Ok(()) => {

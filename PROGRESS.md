@@ -1,5 +1,30 @@
 # Grounding Coder — Progress
 
+## v0.15.0 — The curiosity loop studies anatomy (2026-09-29)
+
+- `BodyPlan`: the 7.5-heads canon as fractions of stature, each
+  with cited sources (`ANATOMY_SOURCES`). `person_plan` builds
+  posable individuals from it — capsule limbs, head with inset
+  eyes, nose, mouth, offset hair cap, three distinct people in the
+  group scene (looks and postures all differ, one waving).
+- `study_anatomy`: renders a canon-built figure and measures its
+  own photo via material labels — head/stature 0.128 (canon 0.133),
+  span/stature 1.056 (canon 1.0), eye-spacing/head 0.35. Two real
+  measurement bugs caught en route: bbox edges add eyeball diameter
+  to the separation (centers are the canon quantity), and eyes go
+  sub-pixel below 320px wide.
+- `record_anatomy` files passing studies as Verified knowledge
+  with the measurements as evidence; failures file Evidence, never
+  promotion. `research_anatomy` does the web half on verified
+  sources (dream loop calls it; tests stay offline).
+- Three-point lighting (key casts shadows, fill/rim don't),
+  capsule intersection, seeded film finish (grade/vignette/grain).
+  The frozen demo renders byte-identical through the refactor.
+- Samples: studied portrait (174 eye pixels) and three-person group
+  join the demo in `samples/`.
+- 179 tests green (106 lib + 73 integration), clippy `-D warnings`
+  clean on default AND `ui`, fmt clean.
+
 ## v0.14.0 — Eyeballs: scenes, photos, manipulation (2026-09-29)
 
 - `engine/vision.rs`: `Image` plus a hand-rolled 24-bit BMP codec

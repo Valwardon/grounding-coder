@@ -251,6 +251,76 @@ impl Image {
         best
     }
 
+    // ── Photographic finish (all deterministic) ──
+    //
+    // Renders look CG-flat; photos don't. Three cheap, seeded,
+    // repeatable post passes close half the gap. Same seed twice →
+    // byte-identical grain, asserted below.
+
+    /// Darken toward the corners (portrait-lens falloff).
+    pub fn vignette(&mut self, strength: f64) {
+        let cx = self.width as f64 / 2.0;
+        let cy = self.height as f64 / 2.0;
+        let max_d = (cx * cx + cy * cy).sqrt();
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let dx = x as f64 + 0.5 - cx;
+                let dy = y as f64 + 0.5 - cy;
+                let fall = (1.0 - strength * (dx * dx + dy * dy).sqrt() / max_d).clamp(0.0, 1.0);
+                let i = (y * self.width + x) as usize;
+                let p = self.pixels[i];
+                self.pixels[i] = Rgb::new(
+                    (p.r as f64 * fall).round() as u8,
+                    (p.g as f64 * fall).round() as u8,
+                    (p.b as f64 * fall).round() as u8,
+                );
+            }
+        }
+    }
+
+    /// Film grain: uniform ±`amount` per channel from a 64-bit LCG
+    /// seeded by the caller. No RNG dependency, fully repeatable.
+    pub fn grain(&mut self, seed: u64, amount: u8) {
+        if amount == 0 {
+            return;
+        }
+        // Golden-ratio mix: every seed (including 0) opens a distinct
+        // stream. (OR-ing an odd bit instead would collide neighbors
+        // like 42 and 43 — the test caught exactly that.)
+        let mut s = seed.wrapping_add(0x9E3779B97F4A7C15);
+        let next = |s: &mut u64| {
+            *s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (*s >> 33) as u8
+        };
+        for p in self.pixels.iter_mut() {
+            let span = amount as u16 * 2 + 1;
+            let jitter = |s: &mut u64, v: u8| {
+                let n = (next(s) as u16) % span;
+                (v as i16 + n as i16 - amount as i16).clamp(0, 255) as u8
+            };
+            *p = Rgb::new(
+                jitter(&mut s, p.r),
+                jitter(&mut s, p.g),
+                jitter(&mut s, p.b),
+            );
+        }
+    }
+
+    /// Grade: contrast pivot at mid-gray plus brightness lift, both in
+    /// 0..255 units. `contrast 1.0, lift 0` is the identity.
+    pub fn grade(&mut self, contrast: f64, lift: f64) {
+        for p in self.pixels.iter_mut() {
+            let adj = |v: u8| {
+                ((v as f64 - 128.0) * contrast + 128.0 + lift)
+                    .clamp(0.0, 255.0)
+                    .round() as u8
+            };
+            *p = Rgb::new(adj(p.r), adj(p.g), adj(p.b));
+        }
+    }
+
     // ── BMP codec (24-bit, uncompressed, hand-rolled) ──
     //
     // No dependency for this: the format is a 54-byte header plus
@@ -402,6 +472,46 @@ mod tests {
             img.find_template(&Image::blank(32, 32, Rgb::new(0, 0, 0)))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn finish_is_deterministic_and_shaped() {
+        let flat = Image::blank(16, 16, Rgb::new(200, 200, 200));
+        // Vignette keeps the center, darkens corners.
+        let mut v = flat.clone();
+        v.vignette(0.5);
+        let center = v.get(8, 8).unwrap().r;
+        let corner = v.get(0, 0).unwrap().r;
+        assert!(center > 190, "center nearly untouched: {}", center);
+        assert!(
+            corner < center,
+            "corners fall off: {} vs {}",
+            corner,
+            center
+        );
+        // Same seed twice: byte-identical grain.
+        let mut g1 = flat.clone();
+        let mut g2 = flat.clone();
+        g1.grain(42, 8);
+        g2.grain(42, 8);
+        for y in 0..16 {
+            for x in 0..16 {
+                assert_eq!(g1.get(x, y), g2.get(x, y));
+            }
+        }
+        // Grain changes pixels but stays near home.
+        assert_ne!(g1.get(0, 0), Some(Rgb::new(200, 200, 200)));
+        assert!(g1.get(0, 0).is_some_and(|p| p.r.abs_diff(200) <= 8));
+        // Different seed, different grain.
+        let mut g3 = flat.clone();
+        g3.grain(43, 8);
+        assert_ne!(g1.get(0, 0), g3.get(0, 0));
+        // Grade identity holds; lift moves values.
+        let mut gr = flat.clone();
+        gr.grade(1.0, 0.0);
+        assert_eq!(gr.get(3, 3), Some(Rgb::new(200, 200, 200)));
+        gr.grade(1.0, 10.0);
+        assert_eq!(gr.get(3, 3), Some(Rgb::new(210, 210, 210)));
     }
 
     #[test]
