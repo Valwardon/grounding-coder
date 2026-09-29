@@ -117,6 +117,13 @@ Oracle verify (compiler / tests / parser per language)
   store — promotion without verification evidence is refused, and
   invalid generalizations are Rejected, never re-learned.
   (`tests/knowledge_loop.rs`)
+- **Compiler-probe evidence** — code claims verify by experimental
+  demonstration, not documentation: the smallest program exhibiting
+  the behavior runs against the real toolchain oracle in a
+  disposable scratch project under a real timeout. Green probes
+  promote concepts to Verified with the oracle transcript as
+  evidence; red, uncompilable, or timed-out probes record negative
+  evidence and never promote. (`src/engine/probe.rs`)
 - **Generalized Build op** — `TaskKind::Build` ("build …" actions) runs
   the language backend's build oracle: C/`gcc`, Rust/`cargo` (native,
   release, explicit triples), Kotlin/`kotlinc` jars, Java/`javac`,
@@ -198,12 +205,12 @@ Oracle verify (compiler / tests / parser per language)
 
 ## Proof, Not Promises
 
-156 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
+162 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
 `fmt --check` clean:
 
 | Suite | Tests | What it proves |
 |---|---|---|
-| lib (unit) | 83 | recipes, ranker, catalog, pathfind, parsers, manifests, guards, families, understander, disposition, web research, knowledge lifecycle |
+| lib (unit) | 89 | recipes, ranker, catalog, pathfind, parsers, manifests, guards, families, understander, disposition, web research, knowledge lifecycle, compiler probes |
 | `intent_benchmark` | 13 | happy path, typo tolerance, head-noun kind rule, typo-verbs-never-names, vague/ambiguous refusal, destructive block (even fully specified), contradiction ask, multi-intent split, unknown-concept curiosity |
 | `knowledge_loop` | 3 | budget-bounded offline dreaming with persistence, sleep when nothing open, failures deprioritize without deleting |
 | `learning_experiment` | 2 | dreaming arm rediscovers family patterns (rate 0.55) vs amnesiac baseline (0.00); both arms solve every task |

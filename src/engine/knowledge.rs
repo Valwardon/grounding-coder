@@ -72,7 +72,7 @@ pub struct KnowledgeItem {
 }
 
 impl KnowledgeItem {
-    fn new(concept: &str, state: KnowledgeState, source: &str) -> Self {
+    pub(crate) fn new(concept: &str, state: KnowledgeState, source: &str) -> Self {
         KnowledgeItem {
             concept: concept.to_string(),
             state,

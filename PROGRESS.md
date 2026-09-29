@@ -1,5 +1,24 @@
 # Grounding Coder — Progress
 
+## v0.13.0 — Compiler-probe evidence (2026-09-29)
+
+- `engine/probe.rs`: `ProbeSpec` (claim + self-contained `main.rs`
+  + required stdout markers) → `run_probe` builds a disposable
+  scratch project and runs the full `CodeVerifier` oracle on it.
+  The oracle runs on its own thread under a real `recv_timeout`
+  deadline (the verifier is synchronous inside, so an async timeout
+  could never fire — this is stated in the code, not hidden).
+- `verify_concept_by_probe` walks Question/Hypothesis → Experiment
+  → Evidence → Verified on a green probe, with the oracle
+  transcript as the verification evidence. Red, uncompilable, and
+  timed-out probes land in Evidence with a failure counted —
+  never promoted, never deleted. Verified and Rejected concepts
+  refuse re-probing with the reason stated.
+- 6 new lib tests (green/red/uncompilable/timeout/chain-walk/
+  failure-accounting), all passing against the real toolchain.
+- 162 tests green (89 lib + 73 integration), clippy `-D warnings`
+  clean on default AND `ui`, fmt clean.
+
 ## v0.12.0 — First learning experiment (2026-09-29)
 
 - `engine/experiment.rs`: `run_family` runs a task family in two

@@ -8,6 +8,7 @@ pub mod knowledge;
 pub mod lang;
 pub mod pathfind;
 pub mod plan;
+pub mod probe;
 pub mod rank;
 pub mod recipes;
 pub mod research;
