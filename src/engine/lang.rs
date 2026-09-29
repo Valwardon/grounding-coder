@@ -2340,47 +2340,140 @@ pub fn backend_for_file<'a>(file: &Path, extra: &'a [LanguageSpec]) -> Backend<'
 }
 
 /// Backend for a whole project by layout markers (override wins).
-pub fn backend_for_project<'a>(project_dir: &Path, extra: &'a [LanguageSpec]) -> Backend<'a> {
+/// Capability dimensions: [native, jvm, interpreted, systems, web,
+/// mobile]. Backends advertise what they afford; tasks state what
+/// they need; cosine matches them. Deterministic, no string
+/// guessing — and ties fall back to declaration order, so single
+/// matches behave exactly as before.
+pub type Capability = [f64; 6];
+
+/// What a backend affords, by name. Custom registry languages
+/// declare their own via `capabilities` (default: zeros, loses
+/// ties — specificity still wins through marker order).
+pub fn affordance(name: &str) -> Capability {
+    match name {
+        "rust" => [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        "python" => [0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+        "c" => [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        "kotlin" | "java" | "jvm" => [0.0, 1.0, 0.0, 0.0, 0.0, 0.5],
+        "node" | "js" => [0.0, 0.0, 1.0, 0.0, 0.5, 0.0],
+        "html" | "web" => [0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+        "go" => [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        _ => [0.0; 6],
+    }
+}
+
+fn cosine6(a: &Capability, b: &Capability) -> f64 {
+    let dot: f64 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let la: f64 = a.iter().map(|x| x * x).sum::<f64>().sqrt();
+    let lb: f64 = b.iter().map(|x| x * x).sum::<f64>().sqrt();
+    if la == 0.0 || lb == 0.0 {
+        0.0
+    } else {
+        (dot / (la * lb)).clamp(-1.0, 1.0)
+    }
+}
+
+fn backend_name<'a>(backend: &Backend<'a>) -> &'a str {
+    match backend {
+        Backend::Rust => "rust",
+        Backend::Python => "python",
+        Backend::Kotlin => "kotlin",
+        Backend::C => "c",
+        Backend::Html => "html",
+        Backend::Generic(g) => g.spec.name.as_str(),
+    }
+}
+
+/// What a build target needs, from its name. Unknown or empty
+/// targets yield zeros — neutral, so declaration order decides and
+/// nothing changes for target-less callers.
+pub fn need_for_target(target: &str) -> Capability {
+    let t = target.to_lowercase();
+    // Empty target states no need: zeros tie everything and
+    // declaration order decides, exactly the old behavior.
+    if t.trim().is_empty() {
+        return [0.0; 6];
+    }
+    if t.contains("apk") || t.contains("android") {
+        [0.0, 0.3, 0.0, 0.0, 0.0, 1.0]
+    } else if t.contains("jvm") || t.contains("jar") || t.contains("java") || t.contains("kotlin") {
+        [0.0, 1.0, 0.0, 0.0, 0.0, 0.0]
+    } else if t.contains("wasm") || t.contains("web") || t.contains("html") || t.contains("js") {
+        [0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    } else if t.contains("script") || t.contains("run") || t.contains("test") {
+        [0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+    } else {
+        [1.0, 0.0, 0.0, 0.5, 0.0, 0.0]
+    }
+}
+
+/// Backend selection with a task need vector: every marker group
+/// that matches is a candidate; the best cosine wins, ties keep
+/// declaration order. Neutral need (all zeros) ties everything, so
+/// plain callers see exactly the old priority order.
+pub fn backend_for_project_with_need<'a>(
+    project_dir: &Path,
+    extra: &'a [LanguageSpec],
+    need: &Capability,
+) -> Backend<'a> {
+    let mut candidates: Vec<Backend<'a>> = Vec::new();
     if project_dir.join("Cargo.toml").exists() {
-        return Backend::Rust;
+        candidates.push(Backend::Rust);
     }
     if project_dir.join("pyproject.toml").exists()
         || project_dir.join("requirements.txt").exists()
         || project_dir.join("setup.py").exists()
         || has_source_files(project_dir, &["py"])
     {
-        return Backend::Python;
+        candidates.push(Backend::Python);
     }
     if project_dir.join("build.gradle").exists()
         || project_dir.join("build.gradle.kts").exists()
         || project_dir.join("settings.gradle").exists()
         || has_source_files(project_dir, &["kt", "java"])
     {
-        return Backend::Kotlin;
+        candidates.push(Backend::Kotlin);
     }
     if project_dir.join("go.mod").exists() || has_source_files(project_dir, &["go"]) {
-        return generic_by_name(extra, "go");
+        candidates.push(generic_by_name(extra, "go"));
     }
     if project_dir.join("package.json").exists()
         || has_source_files(project_dir, &["js", "mjs", "cjs"])
     {
-        return generic_by_name(extra, "node");
+        candidates.push(generic_by_name(extra, "node"));
     }
     if project_dir.join("Makefile").exists()
         || project_dir.join("CMakeLists.txt").exists()
         || has_source_files(project_dir, &["c"])
     {
-        return Backend::C;
+        candidates.push(Backend::C);
     }
     if has_source_files(project_dir, &["html", "htm"]) {
-        return Backend::Html;
+        candidates.push(Backend::Html);
     }
-    // Last resort: first source file's backend wins over the Rust default.
-    if let Some(ext) = first_source_extension(project_dir, extra) {
-        let probe = Path::new("probe").with_extension(ext);
-        return backend_for_file(&probe, extra);
+    if candidates.is_empty() {
+        // Last resort: first source file's backend wins over the Rust default.
+        if let Some(ext) = first_source_extension(project_dir, extra) {
+            let probe = Path::new("probe").with_extension(ext);
+            return backend_for_file(&probe, extra);
+        }
+        return Backend::Rust;
     }
-    Backend::Rust
+    let mut best = 0usize;
+    let mut best_score = -1.0f64;
+    for (i, backend) in candidates.iter().enumerate() {
+        let s = cosine6(need, &affordance(backend_name(backend)));
+        if s > best_score {
+            best_score = s;
+            best = i;
+        }
+    }
+    candidates.swap_remove(best)
+}
+
+pub fn backend_for_project<'a>(project_dir: &Path, extra: &'a [LanguageSpec]) -> Backend<'a> {
+    backend_for_project_with_need(project_dir, extra, &[0.0; 6])
 }
 
 fn generic_by_name<'a>(extra: &'a [LanguageSpec], name: &str) -> Backend<'a> {
@@ -2605,5 +2698,68 @@ mod build_tests {
         assert!(!needs_unwind_retry("error[E0596]: cannot borrow"));
         assert!(!needs_unwind_retry("undefined symbol: foo_bar"));
         assert!(!needs_unwind_retry(""));
+    }
+
+    fn polyglot_project(markers: &[(&str, &str)]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "gc-poly-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("poly dir");
+        for (file, body) in markers {
+            std::fs::write(dir.join(file), body).expect("marker");
+        }
+        dir
+    }
+
+    #[test]
+    fn need_vectors_route_targets() {
+        // Mobile target needs mobile affordance most.
+        let apk = need_for_target("android-apk");
+        assert!(apk[5] >= 1.0);
+        // Empty target is neutral: all zeros, order decides.
+        assert_eq!(need_for_target(""), [0.0; 6]);
+        // Unknown custom backend affords nothing and loses ties.
+        assert_eq!(affordance("zz"), [0.0; 6]);
+    }
+
+    #[test]
+    fn polyglot_tie_breaks_by_need() {
+        use super::LanguageBackend;
+        let dir = polyglot_project(&[
+            ("Cargo.toml", "[package]\nname = \"x\"\n"),
+            ("package.json", "{}\n"),
+        ]);
+        let extra: Vec<LanguageSpec> = Vec::new();
+        // Neutral: declaration order wins, exactly the old behavior.
+        assert_eq!(backend_for_project(&dir, &extra).language(), "rust");
+        // Web need: node outranks rust on cosine.
+        assert_eq!(
+            backend_for_project_with_need(&dir, &extra, &need_for_target("web")).language(),
+            "node"
+        );
+        // Native need: rust keeps it.
+        assert_eq!(
+            backend_for_project_with_need(&dir, &extra, &need_for_target("native")).language(),
+            "rust"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn single_match_ignores_need() {
+        use super::LanguageBackend;
+        let dir = polyglot_project(&[("pyproject.toml", "[project]\nname=\"x\"\n")]);
+        let extra: Vec<LanguageSpec> = Vec::new();
+        // One candidate: need vectors cannot overrule evidence.
+        assert_eq!(
+            backend_for_project_with_need(&dir, &extra, &need_for_target("native")).language(),
+            "python"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

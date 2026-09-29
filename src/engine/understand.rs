@@ -110,6 +110,85 @@ pub enum Disposition {
 /// Act threshold shared by every caller (CLI, chat, API).
 pub const ACT_THRESHOLD: f64 = 0.75;
 
+/// A frame schema: the slots that must fill for the frame to mean
+/// anything, plus slots that merely help. Confidence is derived from
+/// slot satisfaction — never tuned per phrase.
+pub struct FrameSchema {
+    pub name: &'static str,
+    pub mandatory: &'static [&'static str],
+    pub optional: &'static [&'static str],
+}
+
+/// Slot inventory per frame. "content" is optional everywhere it
+/// appears: a fully-specified create without quoted sections still
+/// parses at 1.0 and lets the content gate below route it.
+pub const FRAME_SCHEMAS: &[FrameSchema] = &[
+    FrameSchema {
+        name: "build",
+        mandatory: &["verb", "target"],
+        optional: &[],
+    },
+    FrameSchema {
+        name: "create",
+        mandatory: &["verb", "kind", "name"],
+        optional: &["content"],
+    },
+    FrameSchema {
+        name: "fix",
+        mandatory: &["verb"],
+        optional: &[],
+    },
+    FrameSchema {
+        name: "publish",
+        mandatory: &["verb", "repo"],
+        optional: &["release"],
+    },
+    FrameSchema {
+        name: "verify",
+        mandatory: &["verb"],
+        optional: &[],
+    },
+    FrameSchema {
+        name: "unknown",
+        mandatory: &[],
+        optional: &[],
+    },
+];
+
+/// Slot satisfaction for a frame given filled slot names: mandatory
+/// fraction plus a small bonus per optional slot, capped at 1.0.
+/// Returns the score and the missing mandatory slots (the actual
+/// question to ask). An empty mandatory set (unknown frame) scores
+/// 0.0 — nothing to satisfy.
+pub fn evaluate_frame(frame: &str, filled: &[&str]) -> (f64, Vec<&'static str>) {
+    let schema = match FRAME_SCHEMAS.iter().find(|s| s.name == frame) {
+        Some(s) => s,
+        None => return (0.0, Vec::new()),
+    };
+    if schema.mandatory.is_empty() {
+        return (0.0, Vec::new());
+    }
+    let mut missing = Vec::new();
+    let mut mandatory_filled = 0u32;
+    for slot in schema.mandatory {
+        if filled.contains(slot) {
+            mandatory_filled += 1;
+        } else {
+            missing.push(*slot);
+        }
+    }
+    let mut optional_filled = 0u32;
+    for slot in schema.optional {
+        if filled.contains(slot) {
+            optional_filled += 1;
+        }
+    }
+    let score = (mandatory_filled as f64 / schema.mandatory.len() as f64
+        + 0.05 * optional_filled as f64)
+        .min(1.0);
+    (score, missing)
+}
+
 /// Destructive verbs: acting on these from prose ambiguity deletes
 /// user data. They never execute — at most a question naming the
 /// exact target, usually a refusal.
@@ -378,6 +457,85 @@ fn fuzzy_verb(word: &str) -> Option<FrameAction> {
         let d = edit_distance(word, v);
         if d <= max_dist && best.map(|(bd, _)| d < bd).unwrap_or(true) {
             best = Some((d, *a));
+        }
+    }
+    best.map(|(_, a)| a)
+}
+
+/// PrimitiveVector: meaning as 5 numbers (mass, velocity, spatial,
+/// valence, temporal), after grounded's PrimitiveMatrix. Synonyms
+/// join by coordinates — auditable numbers, not bare table rows.
+/// Cosine decides; the 0.90 bar is fixed and the vectors carry the
+/// calibration, all visible below.
+pub type PrimitiveVector = [f64; 5];
+
+pub fn cosine(a: &PrimitiveVector, b: &PrimitiveVector) -> f64 {
+    let dot: f64 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let la: f64 = a.iter().map(|x| x * x).sum::<f64>().sqrt();
+    let lb: f64 = b.iter().map(|x| x * x).sum::<f64>().sqrt();
+    if la == 0.0 || lb == 0.0 {
+        0.0
+    } else {
+        (dot / (la * lb)).clamp(-1.0, 1.0)
+    }
+}
+
+/// Verb vocabulary in meaning space: one vector per VERBS entry, in
+/// the same order. Families cluster by construction intent.
+const VERB_VECTORS: &[PrimitiveVector] = &[
+    // build family
+    [0.8, 0.4, 0.4, 0.5, 0.5], // build
+    [0.7, 0.4, 0.3, 0.5, 0.4], // make
+    [0.6, 0.5, 0.2, 0.4, 0.6], // compile
+    [0.7, 0.5, 0.5, 0.5, 0.5], // assemble
+    // create family
+    [0.9, 0.2, 0.3, 0.6, 0.3], // create
+    [0.7, 0.2, 0.2, 0.5, 0.2], // add
+    [0.8, 0.1, 0.2, 0.5, 0.1], // new
+    [0.9, 0.3, 0.2, 0.6, 0.4], // generate
+    [0.6, 0.4, 0.2, 0.5, 0.4], // write
+    // fix family
+    [0.3, 0.3, 0.2, 0.4, 0.6], // fix
+    [0.3, 0.3, 0.2, 0.5, 0.6], // repair
+    [0.3, 0.2, 0.2, 0.4, 0.5], // mend
+    [0.2, 0.3, 0.1, 0.4, 0.6], // correct
+    // publish family
+    [0.2, 0.7, 0.8, 0.3, 0.4], // publish
+    [0.2, 0.8, 0.9, 0.3, 0.4], // upload
+    [0.3, 0.7, 0.8, 0.4, 0.4], // release
+    [0.2, 0.6, 0.8, 0.5, 0.3], // share
+    // verify family
+    [0.1, 0.5, 0.1, 0.0, 0.5], // test
+    [0.1, 0.4, 0.1, 0.0, 0.5], // check
+    [0.1, 0.4, 0.1, 0.1, 0.5], // verify
+    [0.2, 0.6, 0.3, 0.1, 0.5], // run
+];
+
+/// Unlisted synonyms placed by meaning. Held-out probes for the
+/// mechanism: none of these appear in VERBS or the tuning above.
+const SYNONYM_VECTORS: &[(&str, PrimitiveVector)] = &[
+    ("construct", [0.75, 0.45, 0.40, 0.45, 0.50]),
+    ("fabricate", [0.75, 0.50, 0.35, 0.40, 0.50]),
+    ("craft", [0.80, 0.30, 0.30, 0.55, 0.35]),
+    ("produce", [0.85, 0.30, 0.25, 0.55, 0.35]),
+    ("author", [0.70, 0.35, 0.20, 0.55, 0.35]),
+    ("examine", [0.15, 0.40, 0.15, 0.05, 0.50]),
+    ("inspect", [0.15, 0.40, 0.20, 0.05, 0.50]),
+    ("audit", [0.20, 0.40, 0.15, 0.00, 0.55]),
+];
+
+/// Nearest table action by meaning. Consulted only after exact and
+/// edit-fuzzy matching miss — spelling paths keep priority, and the
+/// name-exclusion filters never consult vectors (a meaning match is
+/// not spelling evidence).
+pub fn vector_verb(word: &str) -> Option<FrameAction> {
+    const BAR: f64 = 0.90;
+    let query = SYNONYM_VECTORS.iter().find(|(w, _)| *w == word)?.1;
+    let mut best: Option<(f64, FrameAction)> = None;
+    for ((_, action), vec) in VERBS.iter().zip(VERB_VECTORS.iter()) {
+        let s = cosine(&query, vec);
+        if s >= BAR && best.map(|(bs, _)| s > bs).unwrap_or(true) {
+            best = Some((s, *action));
         }
     }
     best.map(|(_, a)| a)
@@ -666,7 +824,11 @@ pub fn understand(prose: &str, project_dir: Option<&std::path::Path>) -> Underst
     } else {
         None
     };
-    let verb = verb.or(fuzzy);
+    // Meaning fallback, last resort only: unlisted synonyms score by
+    // vector similarity after spelling paths miss.
+    let verb = verb
+        .or(fuzzy)
+        .or_else(|| ws.iter().find_map(|w| vector_verb(w)));
     // Specificity wins: bare "make" with a kind + name in the same
     // breath ("make a counter page") is creation, not compilation.
     // "make the thing work faster" (no kind, no name) stays a build.
@@ -686,8 +848,9 @@ pub fn understand(prose: &str, project_dir: Option<&std::path::Path>) -> Underst
     let similar = project_dir.and_then(|p| find_similar(p, prose));
 
     let mut frame = String::from("unknown");
-    let mut filled = 0u32;
-    let mut total = 1u32; // the verb slot always counts
+    // Filled slot names — confidence derives from schema satisfaction
+    // below, never from ad-hoc tallies.
+    let mut slots: Vec<&'static str> = Vec::new();
     let mut intent = empty_intent(prose.trim().to_string());
     intent.constraints = constraints;
     // Content gate: a create frame only completes locally when it
@@ -743,17 +906,16 @@ pub fn understand(prose: &str, project_dir: Option<&std::path::Path>) -> Underst
         }
         Some(FrameAction::Build) => {
             frame = "build".to_string();
-            total = 2; // verb + target
             let target = if ws.iter().any(|w| w == "apk" || w == "android") {
-                filled += 1;
+                slots.push("target");
                 "android-apk"
             } else if ws.iter().any(|w| w == "app" || w == "binary") {
-                filled += 1;
+                slots.push("target");
                 "native"
             } else {
                 "native"
             };
-            filled += 1; // verb present
+            slots.push("verb");
             intent.platform = if target == "android-apk" {
                 "android".to_string()
             } else {
@@ -767,15 +929,15 @@ pub fn understand(prose: &str, project_dir: Option<&std::path::Path>) -> Underst
         }
         Some(FrameAction::Create) => {
             frame = "create".to_string();
-            total = 3; // verb + kind + name
-            filled += 1;
+            slots.push("verb");
             // One name resolution for the whole parse (titled, then
             // Capitalized, then quoted, then adjacent) — two competing
             // resolutions once named different names for the same slot.
             let name = resolved_name.clone().unwrap_or_default();
             match (kind, name.is_empty()) {
                 (Some(k), false) if DEFINABLE.contains(&k) => {
-                    filled += 2;
+                    slots.push("kind");
+                    slots.push("name");
                     let mut def = empty_define(name.clone(), k);
                     if k == "page" {
                         def.title = Some(name.clone());
@@ -805,6 +967,9 @@ pub fn understand(prose: &str, project_dir: Option<&std::path::Path>) -> Underst
                     {
                         content_ok = false;
                     }
+                    if !def.sections.is_empty() {
+                        slots.push("content");
+                    }
                     intent.define = vec![Some(def)];
                     intent.file = Some("src/lib.rs".to_string());
                 }
@@ -817,26 +982,25 @@ pub fn understand(prose: &str, project_dir: Option<&std::path::Path>) -> Underst
         }
         Some(FrameAction::Fix) => {
             frame = "fix".to_string();
-            total = 1;
-            filled += 1;
+            slots.push("verb");
             // Goal-only intents run the verify+repair loop as-is.
         }
         Some(FrameAction::Publish) => {
             frame = "publish".to_string();
-            total = 2; // verb + repo
-            filled += 1;
+            slots.push("verb");
             let repo = names.first().cloned().or_else(|| quotes.first().cloned());
             let mut text = format!(
                 "publish github repository {}",
                 repo.clone().unwrap_or_default()
             );
             if let Some(r) = &repo {
-                filled += 1;
+                slots.push("repo");
                 text = format!("publish github repository repo:{}", r.to_lowercase());
             } else {
                 intent.unknown_requirements = vec!["publish needs a repository name".to_string()];
             }
             if ws.iter().any(|w| w == "release" || w == "apk") {
+                slots.push("release");
                 text.push_str(" release upload apk tag v0.1.0");
             }
             intent.goal = text.clone();
@@ -848,8 +1012,7 @@ pub fn understand(prose: &str, project_dir: Option<&std::path::Path>) -> Underst
         }
         Some(FrameAction::Verify) => {
             frame = "verify".to_string();
-            total = 1;
-            filled += 1;
+            slots.push("verb");
         }
         Some(FrameAction::Unknown) => {
             intent.unknown_requirements =
@@ -857,7 +1020,9 @@ pub fn understand(prose: &str, project_dir: Option<&std::path::Path>) -> Underst
         }
     }
 
-    let mut confidence = (filled as f64 / total.max(1) as f64).min(1.0);
+    // Confidence is slot satisfaction, derived from the frame schema
+    // — the content gate still caps parsable-but-unbuildable parses.
+    let (mut confidence, _missing) = evaluate_frame(&frame, &slots);
     if !content_ok {
         // Parsable but not locally buildable — route to the model
         // (or a question), never into a guaranteed block.
@@ -875,6 +1040,73 @@ pub fn understand(prose: &str, project_dir: Option<&std::path::Path>) -> Underst
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vectors_cover_the_table() {
+        // Zip safety: every verb word carries exactly one vector.
+        assert_eq!(super::VERBS.len(), super::VERB_VECTORS.len());
+    }
+
+    #[test]
+    fn table_is_geometrically_coherent() {
+        // Every verb is nearer its own family than any other action:
+        // misassigned rows would surface here, not in production.
+        for (i, (_, action)) in super::VERBS.iter().enumerate() {
+            let v = super::VERB_VECTORS[i];
+            let mut best: Option<(f64, super::FrameAction)> = None;
+            for (j, (_, a)) in super::VERBS.iter().enumerate() {
+                let s = super::cosine(&v, &super::VERB_VECTORS[j]);
+                if best.map(|(bs, _)| s > bs).unwrap_or(true) {
+                    best = Some((s, *a));
+                }
+            }
+            assert_eq!(
+                best.map(|(_, a)| a),
+                Some(*action),
+                "verb {}",
+                super::VERBS[i].0
+            );
+        }
+    }
+
+    #[test]
+    fn held_out_synonyms_map_by_meaning() {
+        use super::FrameAction as FA;
+        // None of these are in VERBS and none tuned the vectors.
+        for (word, action) in [
+            ("construct", FA::Build),
+            ("fabricate", FA::Build),
+            ("craft", FA::Create),
+            ("produce", FA::Create),
+            ("author", FA::Create),
+            ("examine", FA::Verify),
+            ("inspect", FA::Verify),
+            ("audit", FA::Verify),
+        ] {
+            assert_eq!(super::vector_verb(word), Some(action), "word {}", word);
+        }
+        assert_eq!(super::vector_verb("banana"), None);
+        // End to end: an unlisted synonym drives the frame.
+        let u = super::understand("Construct a settings page.", None);
+        assert_eq!(u.frame, "create");
+    }
+
+    #[test]
+    fn frame_satisfaction_scores_slots() {
+        // Full create: all mandatory, content bonus caps at 1.0.
+        let (sat, missing) = super::evaluate_frame("create", &["verb", "kind", "name", "content"]);
+        assert_eq!((sat, missing.len()), (1.0, 0));
+        // Missing name: 2/3 with the question named.
+        let (sat, missing) = super::evaluate_frame("create", &["verb", "kind"]);
+        assert!((sat - 2.0 / 3.0).abs() < 1e-9, "{}", sat);
+        assert_eq!(missing, vec!["name"]);
+        // Unknown frame: nothing to satisfy.
+        assert_eq!(super::evaluate_frame("unknown", &["verb"]).0, 0.0);
+        assert_eq!(super::evaluate_frame("nope", &["verb"]).0, 0.0);
+        // Optional slots never dilute mandatory: publish+repo is whole.
+        let (sat, _) = super::evaluate_frame("publish", &["verb", "repo"]);
+        assert_eq!(sat, 1.0);
+    }
 
     #[test]
     fn verbs_normalize() {

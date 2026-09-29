@@ -979,7 +979,14 @@ impl CodeBot {
                     .unwrap_or("");
                 let extra = crate::engine::lang::load_extra(&self.project_dir);
                 let backend: crate::engine::lang::Backend<'_> = if language.trim().is_empty() {
-                    crate::engine::lang::backend_for_project(&self.project_dir, &extra)
+                    // No language named: match the build target's needs
+                    // against backend affordances (polyglot projects
+                    // stop losing to declaration order).
+                    crate::engine::lang::backend_for_project_with_need(
+                        &self.project_dir,
+                        &extra,
+                        &crate::engine::lang::need_for_target(target),
+                    )
                 } else {
                     match language.trim().to_lowercase().as_str() {
                         "rust" => crate::engine::lang::Backend::Rust,

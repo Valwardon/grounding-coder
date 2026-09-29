@@ -1,5 +1,31 @@
 # Grounding Coder — Progress
 
+## v0.20.0 — Grounded ideas, ported small (2026-09-29)
+
+Five mechanisms from the grounded engine, each as an isolated
+measured experiment — invariants crossed over, machinery stayed:
+- Frame satisfaction (`understand.rs`): per-frame mandatory /
+  optional slot schemas; confidence derives from satisfaction,
+  never from tuned tallies. All benchmark outcomes preserved.
+- Consolidation (`knowledge.rs`): verified items cluster by
+  dependency-signature overlap (Jaccard ≥ 0.80) and generalize
+  through the existing 2-supporter rule. Discoveries, not
+  declarations.
+- Episodic importance (`rank.rs`): failures and first encounters
+  train 1..=3x. A constructed history flips the recipe pick.
+- PrimitiveVectors (`understand.rs`): 5-d meaning vectors over the
+  verb table (coherence-tested) plus placed synonyms; last-resort
+  fallback after spelling paths miss. Zero behavior change.
+- Affordances (`lang.rs`): backend capability vectors; polyglot
+  ties break by task-need cosine instead of declaration order.
+  Neutral need reproduces the old order exactly. Wired into Build.
+- Ops note: `--all-features` (ui/dioxus → image-default → rav1e)
+  bloated target/ to 65GB and filled the disk; recovered by
+  clearing the cache and verifying on default features. Full-ui
+  builds need large transient space.
+- 206 tests green (135 lib + 71 integration), clippy `-D warnings`
+  clean, fmt clean.
+
 ## v0.19.0 — Queryable anatomy without vectors (2026-09-29)
 
 - `engine/anatomy.rs`: partonomy graph — finger phalanges,

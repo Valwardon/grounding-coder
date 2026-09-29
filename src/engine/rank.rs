@@ -163,22 +163,66 @@ pub fn save_outcomes(project_dir: &std::path::Path, rows: &[OutcomeRow]) {
     let _ = std::fs::write(&path, out);
 }
 
+/// Episodic importance of one outcome row: failures and first
+/// encounters teach more. Base 1.0; +1.0 when the recipe failed
+/// (the "don't" lesson — faults outweigh routine wins); +1.0 when
+/// the (code, ext, recipe) triple is novel in the prefix before
+/// `idx`. Returns 1..=3. Pure function of the history order.
+pub fn outcome_importance(outcomes: &[OutcomeRow], idx: usize) -> f64 {
+    let mut w = 1.0;
+    if let Some(r) = outcomes.get(idx) {
+        if !r.fixed {
+            w += 1.0;
+        }
+        let novel = !outcomes[..idx]
+            .iter()
+            .any(|o| o.code == r.code && o.ext == r.ext && o.recipe == r.recipe);
+        if novel {
+            w += 1.0;
+        }
+    }
+    w
+}
+
+/// Episodic importance of one rank row: base 1.0; +1.0 when the code
+/// proved unplannable (dead ends are worth remembering); +1.0 when
+/// the (code, ext) pair is novel in the prefix before `idx`.
+pub fn rank_importance(rows: &[RankRow], idx: usize) -> f64 {
+    let mut w = 1.0;
+    if let Some(r) = rows.get(idx) {
+        if !r.planned {
+            w += 1.0;
+        }
+        let novel = !rows[..idx]
+            .iter()
+            .any(|o| o.code == r.code && o.ext == r.ext);
+        if novel {
+            w += 1.0;
+        }
+    }
+    w
+}
+
 /// Choose among candidate recipe names for one error: highest learned
 /// P(fix | code, ext, recipe), ties and cold starts take index 0
-/// (the deterministic priority order). Pure, testable.
+/// (the deterministic priority order). Training rows repeat by
+/// episodic importance (1..=3x) — failures and first encounters
+/// steer splits harder. Pure, testable.
 pub fn choose_recipe(outcomes: &[OutcomeRow], code: &str, ext: &str, candidates: &[&str]) -> usize {
     if candidates.is_empty() || outcomes.len() < MIN_ROWS {
         return 0;
     }
     use linfa::prelude::*;
-    let n = outcomes.len();
-    let mut feats = Vec::with_capacity(n * 3);
-    let mut labels = Vec::with_capacity(n);
-    for r in outcomes {
+    let mut feats = Vec::new();
+    let mut labels = Vec::new();
+    for (i, r) in outcomes.iter().enumerate() {
         let f = [code_idx(&r.code), ext_idx(&r.ext), recipe_idx(&r.recipe)];
-        feats.extend_from_slice(&f);
-        labels.push(usize::from(r.fixed));
+        for _ in 0..outcome_importance(outcomes, i) as usize {
+            feats.extend_from_slice(&f);
+            labels.push(usize::from(r.fixed));
+        }
     }
+    let n = labels.len();
     let xs = match ndarray::Array2::from_shape_vec((n, 3), feats) {
         Ok(a) => a,
         Err(_) => return 0,
@@ -250,15 +294,17 @@ fn train(rows: &[RankRow]) -> Option<linfa_trees::DecisionTree<f64, usize>> {
         return None;
     }
     use linfa::prelude::*;
-    let n = rows.len();
-    let mut feats = Vec::with_capacity(n * 2);
-    let mut labels = Vec::with_capacity(n);
-    for r in rows {
+    let mut feats = Vec::new();
+    let mut labels = Vec::new();
+    for (i, r) in rows.iter().enumerate() {
         let f = features(&r.code, &r.ext);
-        feats.push(f[0]);
-        feats.push(f[1]);
-        labels.push(usize::from(r.planned));
+        for _ in 0..rank_importance(rows, i) as usize {
+            feats.push(f[0]);
+            feats.push(f[1]);
+            labels.push(usize::from(r.planned));
+        }
     }
+    let n = labels.len();
     let xs = ndarray::Array2::from_shape_vec((n, 2), feats).ok()?;
     let ys = ndarray::Array1::from_vec(labels);
     let ds = Dataset::new(xs, ys);
@@ -388,6 +434,49 @@ mod tests {
             choose_recipe(&outcomes, "E0596", "rs", &["mut-binding", "fnmut-param"]),
             0
         );
+    }
+
+    #[test]
+    fn importance_grades_novelty_and_failure() {
+        let rows = vec![
+            orow("E1", "rs", "r1", true),
+            orow("E1", "rs", "r1", true),
+            orow("E1", "rs", "r1", false),
+            orow("E1", "rs", "r2", false),
+        ];
+        // First sighting that succeeds: base + novelty.
+        assert_eq!(outcome_importance(&rows, 0), 2.0);
+        // Seen success: base only.
+        assert_eq!(outcome_importance(&rows, 1), 1.0);
+        // Seen failure: base + failure salience.
+        assert_eq!(outcome_importance(&rows, 2), 2.0);
+        // Novel failure: everything at once.
+        assert_eq!(outcome_importance(&rows, 3), 3.0);
+        // Rank rows: unplannable dead ends weigh double, novelty adds.
+        let rrows = vec![row("E1", "rs", true), row("E2", "rs", false)];
+        assert_eq!(rank_importance(&rrows, 0), 2.0);
+        assert_eq!(rank_importance(&rrows, 1), 3.0);
+    }
+
+    #[test]
+    fn failure_weight_flips_the_pick() {
+        // Real recipe names (distinct vocabulary buckets — unknown
+        // names share one bucket and cannot separate). Raw: both
+        // leaves predict fixed (A 4T3F majority true, B 3T pure) so
+        // priority order wins (A). Weighted: A's failures duplicate
+        // to a 5T6F minority and B takes it.
+        let mut outcomes = Vec::new();
+        for _ in 0..4 {
+            outcomes.push(orow("E9", "rs", "rsx-let", true));
+        }
+        for _ in 0..3 {
+            outcomes.push(orow("E9", "rs", "rsx-let", false));
+        }
+        for _ in 0..3 {
+            outcomes.push(orow("E9", "rs", "into-string", true));
+        }
+        let pick = choose_recipe(&outcomes, "E9", "rs", &["rsx-let", "into-string"]);
+        assert_eq!(pick, 1, "failure weight must demote rsx-let");
     }
 
     #[test]

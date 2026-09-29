@@ -257,6 +257,73 @@ impl KnowledgeStore {
         }
     }
 
+    /// Jaccard overlap of two dependency sets: shared edges over all
+    /// edges. Two items with no dependencies score 0.0 — sharing
+    /// nothing is not kinship.
+    pub fn signature_overlap(a: &[String], b: &[String]) -> f64 {
+        if a.is_empty() && b.is_empty() {
+            return 0.0;
+        }
+        let set_a: std::collections::HashSet<&String> = a.iter().collect();
+        let set_b: std::collections::HashSet<&String> = b.iter().collect();
+        let inter = set_a.intersection(&set_b).count() as f64;
+        let union = set_a.union(&set_b).count() as f64;
+        if union == 0.0 { 0.0 } else { inter / union }
+    }
+
+    /// Consolidation: cluster verified items by dependency-signature
+    /// overlap (≥0.80) and generalize each cluster. Discoveries, not
+    /// declarations — the dream loop finds patterns instead of being
+    /// handed supporters. Each cluster still passes through
+    /// [`KnowledgeStore::generalize`], so the 2-supporter rule and
+    /// the rejection path hold unchanged. Returns created patterns.
+    pub fn consolidate(&mut self) -> Vec<String> {
+        let mut verified: Vec<String> = self
+            .items
+            .values()
+            .filter(|i| i.state == KnowledgeState::Verified)
+            .map(|i| i.concept.clone())
+            .collect();
+        verified.sort();
+        let mut clustered = std::collections::HashSet::new();
+        let mut created = Vec::new();
+        for concept in &verified {
+            if clustered.contains(concept) {
+                continue;
+            }
+            let deps_c = self
+                .items
+                .get(concept)
+                .map(|i| i.dependencies.clone())
+                .unwrap_or_default();
+            let mut cluster = vec![concept.clone()];
+            for other in verified.iter() {
+                if other == concept || clustered.contains(other) {
+                    continue;
+                }
+                let deps_o = self
+                    .items
+                    .get(other)
+                    .map(|i| i.dependencies.clone())
+                    .unwrap_or_default();
+                if Self::signature_overlap(&deps_c, &deps_o) >= 0.80 {
+                    cluster.push(other.clone());
+                }
+            }
+            if cluster.len() >= 2 {
+                cluster.sort();
+                let pattern = format!("cluster:{}", cluster.join("+"));
+                if self.get(&pattern).is_none() && self.generalize(&pattern, &cluster).is_ok() {
+                    created.push(pattern);
+                }
+                for member in &cluster {
+                    clustered.insert(member.clone());
+                }
+            }
+        }
+        created
+    }
+
     /// Concepts structurally adjacent to this one: its dependencies
     /// plus everything depending on it. The what-next engine walks
     /// these edges, not a syllabus.
@@ -700,6 +767,71 @@ mod tests {
         let g = store.get("all-tasks-need-x2").unwrap();
         assert_eq!(g.state, KnowledgeState::Generalized);
         assert_eq!(g.dependencies.len(), 2);
+    }
+
+    #[test]
+    fn overlap_grades_kinship() {
+        use super::KnowledgeStore as KS;
+        assert_eq!(KS::signature_overlap(&[], &[]), 0.0);
+        let (a, b): (Vec<String>, Vec<String>) = (vec![], vec!["x".to_string()]);
+        assert_eq!(KS::signature_overlap(&a, &b), 0.0);
+        let (a, b) = (vec!["x".to_string()], vec!["x".to_string()]);
+        assert_eq!(KS::signature_overlap(&a, &b), 1.0);
+        let (a, b) = (
+            vec![
+                "x".to_string(),
+                "y".to_string(),
+                "z".to_string(),
+                "w".to_string(),
+            ],
+            vec![
+                "x".to_string(),
+                "y".to_string(),
+                "z".to_string(),
+                "v".to_string(),
+            ],
+        );
+        assert!((KS::signature_overlap(&a, &b) - 0.6).abs() < 1e-9);
+    }
+
+    #[test]
+    fn consolidation_discovers_clusters() {
+        let mut store = mem_store();
+        // Two verified items with identical signatures: kin.
+        for name in ["task-a", "task-b"] {
+            let mut item = KnowledgeItem::new(name, KnowledgeState::Verified, "test");
+            item.provenance.verification = Some("test".to_string());
+            item.dependencies = vec![
+                "d1".to_string(),
+                "d2".to_string(),
+                "d3".to_string(),
+                "d4".to_string(),
+            ];
+            store.insert(item);
+        }
+        // Near-miss at 0.6 overlap: similar is not kin.
+        let mut near = KnowledgeItem::new("task-d", KnowledgeState::Verified, "test");
+        near.provenance.verification = Some("test".to_string());
+        near.dependencies = vec![
+            "d1".to_string(),
+            "d2".to_string(),
+            "d3".to_string(),
+            "e1".to_string(),
+        ];
+        store.insert(near);
+        // One verified loner: nothing shared, never clustered.
+        let mut lone = KnowledgeItem::new("task-c", KnowledgeState::Verified, "test");
+        lone.provenance.verification = Some("test".to_string());
+        lone.dependencies = vec!["elsewhere".to_string()];
+        store.insert(lone);
+        let created = store.consolidate();
+        assert_eq!(created.len(), 1, "{:?}", created);
+        assert_eq!(created[0], "cluster:task-a+task-b");
+        let g = store.get(&created[0]).expect("pattern stored");
+        assert_eq!(g.state, KnowledgeState::Generalized);
+        assert_eq!(g.dependencies.len(), 2);
+        // Second pass finds nothing new — consolidation converges.
+        assert!(store.consolidate().is_empty());
     }
 
     #[test]
