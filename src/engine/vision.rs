@@ -808,6 +808,70 @@ impl Image {
         Ok(out)
     }
 
+    // ── Contact shadows and blending ──
+    //
+    // A floating cutout reads as a sticker; a soft shadow grounds it.
+    // Ellipse under the subject bbox, blurred by construction,
+    // multiply-blended. All deterministic, all logged by callers.
+
+    /// Soft elliptical shadow mask for a subject bbox: 1.0 outside,
+    /// down to `1.0 - strength` at the ellipse center just below the
+    /// subject's bottom edge. Gaussian-ish falloff via squared radius.
+    pub fn contact_shadow(
+        width: u32,
+        height: u32,
+        bbox: (u32, u32, u32, u32),
+        strength: f64,
+    ) -> Vec<f64> {
+        let (x0, y1, x1, _) = (bbox.0, bbox.1, bbox.2, bbox.3);
+        let cx = (x0 + x1) as f64 / 2.0;
+        let rx = ((x1 - x0) as f64 / 2.0).max(1.0) * 1.1;
+        let top = y1 as f64;
+        let ry = ((x1 - x0) as f64 * 0.12).max(2.0);
+        let mut out = vec![1.0; (width * height) as usize];
+        for y in 0..height {
+            for x in 0..width {
+                let dx = (x as f64 - cx) / rx;
+                let dy = (y as f64 - top) / ry;
+                let r2 = dx * dx + dy * dy;
+                if r2 < 4.0 {
+                    let shade = 1.0 - strength * (-r2).exp();
+                    out[(y * width + x) as usize] = shade.clamp(0.0, 1.0);
+                }
+            }
+        }
+        out
+    }
+
+    /// Multiply blend: backdrop darkened through the shadow mask.
+    pub fn apply_shadow(&mut self, shadow: &[f64]) {
+        if shadow.len() != self.pixels.len() {
+            return;
+        }
+        for (p, s) in self.pixels.iter_mut().zip(shadow.iter()) {
+            let m = s.clamp(0.0, 1.0);
+            *p = Rgb::new(
+                (p.r as f64 * m).round() as u8,
+                (p.g as f64 * m).round() as u8,
+                (p.b as f64 * m).round() as u8,
+            );
+        }
+    }
+
+    /// Lift or drop mean luma toward a target (photographic grade
+    /// matching: subject and backdrop share one light). Returns the
+    /// applied lift in 0..255 units for the log.
+    pub fn match_luma(&mut self, target_mean: f64) -> f64 {
+        if self.pixels.is_empty() {
+            return 0.0;
+        }
+        let mean: f64 =
+            self.pixels.iter().map(|p| p.brightness()).sum::<f64>() / self.pixels.len() as f64;
+        let lift = ((target_mean - mean) * 255.0).clamp(-40.0, 40.0);
+        self.grade(1.0, lift);
+        lift
+    }
+
     // ── BMP codec (24-bit, uncompressed, hand-rolled) ──
     //
     // No dependency for this: the format is a 54-byte header plus
@@ -1092,6 +1156,31 @@ mod tests {
         let flat = Image::blank(7, 5, Rgb::new(12, 34, 56));
         let grown = flat.resize_smooth(13, 11);
         assert!(grown.get(6, 5) == Some(Rgb::new(12, 34, 56)));
+    }
+
+    #[test]
+    #[test]
+    fn shadow_grounds_and_luma_matches() {
+        // Shadow: darkest just under the bbox, unity far away.
+        let shadow = Image::contact_shadow(60, 60, (20, 40, 40, 50), 0.5);
+        assert_eq!(shadow.len(), 3600);
+        let under = shadow[(42 * 60 + 30) as usize];
+        assert!(under < 1.0 && under >= 0.5, "soft shade: {}", under);
+        assert_eq!(shadow[0], 1.0, "far corner untouched");
+        assert_eq!(shadow[(59 * 60 + 59) as usize], 1.0);
+        // apply_shadow darkens proportionally; length mismatch is a no-op.
+        let mut img = Image::blank(4, 4, Rgb::new(200, 200, 200));
+        img.apply_shadow(&vec![0.5; 16]);
+        assert_eq!(img.get(0, 0), Some(Rgb::new(100, 100, 100)));
+        img.apply_shadow(&vec![0.5; 8]);
+        assert_eq!(img.get(0, 0), Some(Rgb::new(100, 100, 100)));
+        // match_luma lifts dark toward target, capped at ±40.
+        let mut dark = Image::blank(4, 4, Rgb::new(50, 50, 50));
+        let lift = dark.match_luma(0.8);
+        assert!(lift > 0.0 && lift <= 40.0, "{}", lift);
+        assert!(dark.get(0, 0).unwrap().r > 50);
+        let mut bright = Image::blank(4, 4, Rgb::new(200, 200, 200));
+        assert!(bright.match_luma(0.2) < 0.0);
     }
 
     #[test]

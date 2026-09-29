@@ -1,5 +1,22 @@
 # Grounding Coder — Progress
 
+## v0.22.0 — Photo-first imagine, HD finish (2026-09-29)
+
+- Structural admission: capsule people read as Minecraft, and no
+  geometry iteration fixes that. People pixels come from
+  photographs now; procedural builds the world around them.
+- `imagine` tries the photo path first: best complete subject
+  across plates (margins on all sides or refused) → upgraded
+  compose → done. Procedural fallback logged when nothing
+  qualifies.
+- Finish upgrades: proportional feather, subject-to-backdrop luma
+  match (±40, logged), contact shadow under the subject, bilinear
+  fit. HD defaults (960×1200 out, 2560px source thumbs).
+- Proved live: CC0 studio plate → 960×1200 portrait with shadow
+  and matched grade, committed with source and op log.
+- 217 tests green (146 lib + 71 integration), clippy `-D warnings`
+  clean, fmt clean.
+
 ## v0.21.0 — Imagine: prose to photo in one command (2026-09-29)
 
 - `engine/imagine.rs`: brief (subject/pose/props keyword scan) →

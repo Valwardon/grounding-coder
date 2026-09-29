@@ -50,20 +50,19 @@ pub fn studio_backdrop(w: u32, h: u32, top: Rgb, bottom: Rgb) -> Image {
 /// upper three-quarters. A mahogany table dead-center would pass;
 /// the log records the bbox so the assumption stays checkable.
 /// A found subject: bbox in the searched image, area, part count.
-struct Subject {
-    x0: u32,
-    y0: u32,
-    x1: u32,
-    y1: u32,
-    area: u64,
-    parts: usize,
-    cx: f64,
-    cy: f64,
+/// A found subject: bbox, area, assembly parts, centroid.
+pub(crate) struct Subject {
+    pub(crate) x0: u32,
+    pub(crate) y0: u32,
+    pub(crate) x1: u32,
+    pub(crate) y1: u32,
+    pub(crate) area: u64,
+    pub(crate) parts: usize,
+    pub(crate) cx: f64,
+    pub(crate) cy: f64,
 }
 
-/// Subject search on one image region: mask, clean, assemble, gate.
-/// Shared by whole plates and collage cells alike.
-fn find_subject(img: &Image) -> Result<Subject, String> {
+pub(crate) fn find_subject(img: &Image) -> Result<Subject, String> {
     let (w, h) = (img.width, img.height);
     let frame_area = (w * h) as f64;
     let cleaned = Image::morph_close(&Image::morph_open(&img.skin_mask(), w, h, 2), w, h, 2);
@@ -217,19 +216,39 @@ pub fn compose_portrait(
     let sh = ((crop.height as f64 * fit).round() as u32).max(1);
     let subject = crop.resize_smooth(sw, sh);
 
-    let mut fg = Image::blank(out_w, out_h, Rgb::new(0, 0, 0));
     let ox = (out_w.saturating_sub(subject.width)) / 2;
     let oy = out_h.saturating_sub(subject.height) / 2 / 2;
-    fg.overlay(&subject, ox, oy);
     let mut mask = vec![false; (out_w * out_h) as usize];
     for y in oy..(oy + subject.height).min(out_h) {
         for x in ox..(ox + subject.width).min(out_w) {
             mask[(y * out_w + x) as usize] = true;
         }
     }
-    let alpha = Image::feather(&mask, out_w, out_h, 4);
-    let backdrop = studio_backdrop(out_w, out_h, Rgb::new(72, 72, 82), Rgb::new(28, 28, 34));
+    // Feather scales with output: 4px at 640 wide, more in HD.
+    let feather_r = (out_w / 160).max(2);
+    let alpha = Image::feather(&mask, out_w, out_h, feather_r);
+    let mut backdrop = studio_backdrop(out_w, out_h, Rgb::new(72, 72, 82), Rgb::new(28, 28, 34));
+    // One light: lift the subject toward the backdrop's mean luma so
+    // the two halves read as one photo. Logged, bounded ±40.
+    let bg_mean = backdrop.mean_brightness();
+    let mut subject_only = subject.clone();
+    let lift = subject_only.match_luma(bg_mean);
+    let mut fg = Image::blank(out_w, out_h, Rgb::new(0, 0, 0));
+    fg.overlay(&subject_only, ox, oy);
     let mut out = Image::composite(&fg, &backdrop, &alpha)?;
+    // Contact shadow under the subject's feet grounds the cutout.
+    let shadow = Image::contact_shadow(
+        out_w,
+        out_h,
+        (
+            ox,
+            oy + subject.height,
+            ox + subject.width,
+            oy + subject.height,
+        ),
+        0.35,
+    );
+    out.apply_shadow(&shadow);
     out.grain(0xC0FFEE, 4);
     out.vignette(0.22);
 
@@ -259,7 +278,10 @@ pub fn compose_portrait(
                 "fit {}x{} keep-aspect → {}x{} at ({},{})",
                 crop.width, crop.height, subject.width, subject.height, ox, oy
             ),
-            "feather radius 4, studio backdrop, grain(0xC0FFEE,4), vignette(0.22)".to_string(),
+            format!(
+                "feather r{}, luma lift {:+.1}, contact shadow, grain(0xC0FFEE,4), vignette(0.22)",
+                feather_r, lift
+            ),
         ],
     };
     Ok((out, log))

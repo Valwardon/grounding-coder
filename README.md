@@ -241,12 +241,12 @@ Oracle verify (compiler / tests / parser per language)
 
 ## Proof, Not Promises
 
-214 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
+217 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
 `fmt --check` clean:
 
 | Suite | Tests | What it proves |
 |---|---|---|
-| lib (unit) | 143 | recipes, ranker (importance-weighted), catalog, pathfind, parsers, manifests, guards, families, understander (slot satisfaction, vector synonyms), disposition, web research, knowledge lifecycle (consolidation, evidence tiers), compiler probes, deterministic vision (pixels, studied bodies, film finish, masks, compositing, collages, peace articulation, roses), plate sourcing + provenance (Commons and web search), backend affordances, imagine trajectory |
+| lib (unit) | 146 | recipes, ranker (importance-weighted), catalog, pathfind, parsers, manifests, guards, families, understander (slot satisfaction, vector synonyms), disposition, web research, knowledge lifecycle (consolidation, evidence tiers), compiler probes, deterministic vision (pixels, studied bodies, film finish, masks, compositing, collages, peace articulation, roses, shadows, photo-first), plate sourcing + provenance (Commons and web search), backend affordances, imagine trajectory |
 | `intent_benchmark` | 13 | happy path, typo tolerance, head-noun kind rule, typo-verbs-never-names, vague/ambiguous refusal, destructive block (even fully specified), contradiction ask, multi-intent split, unknown-concept curiosity |
 | `knowledge_loop` | 3 | budget-bounded offline dreaming with persistence, sleep when nothing open, failures deprioritize without deleting |
 | `learning_experiment` | 2 | dreaming arm rediscovers family patterns (rate 0.55) vs amnesiac baseline (0.00); both arms solve every task |

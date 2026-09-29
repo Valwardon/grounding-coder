@@ -1,0 +1,23 @@
+{
+  "output": "photo-hd-960x1200.bmp",
+  "source_plate": "plates/plate-02.bmp",
+  "source_provenance": {
+    "author": "Karina Maier",
+    "basis": "page states \"cc0\"",
+    "file": "plate-02.bmp",
+    "license": "cc0",
+    "page_url": "https://www.pinterest.com/pin/188517934395037700/",
+    "source_url": "https://i.pinimg.com/736x/04/16/61/0416618300d1c9723b405c844d18bbda.jpg"
+  },
+  "path": "photographic (plate research -> segment -> compose)",
+  "ops": [
+    "collage split",
+    "assembly",
+    "anchored gate",
+    "keep-aspect bilinear fit",
+    "proportional feather",
+    "luma match",
+    "contact shadow",
+    "grain/vignette"
+  ]
+}

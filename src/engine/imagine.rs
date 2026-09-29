@@ -212,6 +212,43 @@ pub fn study_references(plates: &[SourcedPlate]) -> Study {
     }
 }
 
+/// Score one plate as a compositing source: a complete subject
+/// (margins on all four sides — cropped figures score zero no
+/// matter how large) times its area fraction. Returns the subject
+/// and score, or None when the plate holds nothing composable.
+pub fn score_plate(img: &Image) -> Option<(f64, (u32, u32, u32, u32))> {
+    let (w, h) = (img.width, img.height);
+    let subject = super::compose::find_subject(img).ok()?;
+    let margins = [
+        subject.x0 as f64 / w as f64,
+        subject.y0 as f64 / h as f64,
+        (w - 1 - subject.x1) as f64 / w as f64,
+        (h - 1 - subject.y1) as f64 / h as f64,
+    ];
+    let worst = margins.iter().cloned().fold(1.0f64, f64::min);
+    if worst < 0.03 {
+        return None; // cropped by the frame edge: unusable whole
+    }
+    let fraction = subject.area as f64 / (w * h) as f64;
+    Some((
+        fraction * worst * 10.0,
+        (subject.x0, subject.y0, subject.x1, subject.y1),
+    ))
+}
+
+/// Best compositing source across plates, if any scores above zero.
+pub fn pick_subject(plates: &[SourcedPlate]) -> Option<usize> {
+    let mut best: Option<(usize, f64)> = None;
+    for (i, plate) in plates.iter().enumerate() {
+        if let Some((score, _)) = score_plate(&plate.image) {
+            if score > 0.0 && best.map(|(_, s)| score > s).unwrap_or(true) {
+                best = Some((i, score));
+            }
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
 /// Build the fresh scene: procedural figure (measured skin or
 /// default), measured backdrop palette on sky + darkened ground,
 /// camera distance set so the figure fills the measured fraction,
@@ -347,6 +384,29 @@ pub async fn imagine(prose: &str, width: u32, height: u32) -> (Image, Vec<String
     if let Some(f) = study.subject_fill {
         log.push(format!("study: fill {:.2}", f));
     }
+    // Photo first: a complete photographic subject beats any
+    // procedural figure — people pixels come from photographs.
+    // Procedural builds only the world around them, or everything
+    // when no plate qualifies (logged either way).
+    if let Some(idx) = pick_subject(&plates) {
+        log.push(format!("path: photographic (plate {})", idx));
+        let plate = &plates[idx];
+        match super::compose::compose_portrait(&plate.image, "imagine", width, height) {
+            Ok((img, clog)) => {
+                for op in &clog.ops {
+                    log.push(format!("compose: {}", op));
+                }
+                log.push(format!(
+                    "subject: bbox {:?}, {:.3} of frame",
+                    clog.subject_bbox, clog.subject_fraction
+                ));
+                return (img, log);
+            }
+            Err(e) => log.push(format!("photo path refused ({}); procedural fallback", e)),
+        }
+    } else {
+        log.push("path: procedural (no complete photographic subject)".to_string());
+    }
     let (scene_obj, mut build_log) = build_fresh(&brief, &study, width, height);
     log.append(&mut build_log);
     let (mut img, receipt) = scene::render(&scene_obj);
@@ -445,6 +505,37 @@ mod tests {
             })
             .expect("head built");
         assert_eq!(head, Rgb::new(150, 100, 70));
+    }
+
+    #[test]
+    fn photo_path_takes_complete_subjects() {
+        // Centered subject with margins: composable.
+        let mut centered = Image::blank(120, 160, Rgb::new(60, 80, 120));
+        centered.draw_rect(35, 40, 50, 70, Rgb::new(200, 150, 115));
+        assert!(score_plate(&centered).is_some());
+        // Same mass bleeding off every edge: cropped, refused.
+        let mut cropped = Image::blank(120, 160, Rgb::new(60, 80, 120));
+        cropped.draw_rect(0, 0, 120, 160, Rgb::new(200, 150, 115));
+        assert!(score_plate(&cropped).is_none());
+        // Nothing at all: nothing to score.
+        assert!(score_plate(&Image::blank(120, 160, Rgb::new(60, 80, 120))).is_none());
+        // Picker takes the best of several plates.
+        let mk = |img: Image| SourcedPlate {
+            image: img,
+            provenance: PlateProvenance {
+                source_url: "s".to_string(),
+                page_url: "s".to_string(),
+                author: "t".to_string(),
+                license: "t".to_string(),
+            },
+            basis: "t".to_string(),
+        };
+        let plates = vec![
+            mk(Image::blank(120, 160, Rgb::new(60, 80, 120))),
+            mk(centered),
+        ];
+        assert_eq!(pick_subject(&plates), Some(1));
+        assert_eq!(pick_subject(&[]), None);
     }
 
     #[test]
