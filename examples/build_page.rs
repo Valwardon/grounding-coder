@@ -91,6 +91,8 @@ async fn show_understanding(project: &str, prompt: &str, research: bool) {
         Some(hit) => println!("precedent: {:.2} {}", hit.score, hit.goal),
         None => println!("precedent: none"),
     }
+    let disposition = understand::disposition(understood.confidence, &understood.frame, prompt);
+    println!("disposition: {:?}", disposition);
     match serde_json::to_string_pretty(&understood.intent) {
         Ok(json) => println!("{}", json),
         Err(e) => {
@@ -136,15 +138,17 @@ async fn show_understanding(project: &str, prompt: &str, research: bool) {
 }
 
 /// Resolve prose into an intent with no model anywhere in the path.
-/// Confidence at or above [`LOCAL_CONFIDENCE`] with a known frame
-/// executes; anything vaguer refuses with its receipt (run
-/// `--understand` to see exactly which slots are missing) instead of
+/// The disposition engine decides: Execute runs, Ask and Block refuse
+/// with receipts (run `--understand` to see the full parse) instead of
 /// running blind. Routing is printed to stderr so the outcome on
 /// stdout stays machine-readable.
 async fn resolve_prose(project: &str, prompt: &str) -> String {
     use grounding_coder::engine::understand;
+    use grounding_coder::engine::understand::Disposition;
     let understood = understand::understand(prompt, Some(std::path::Path::new(project)));
-    if understood.confidence >= LOCAL_CONFIDENCE && understood.frame != "unknown" {
+    if understand::disposition(understood.confidence, &understood.frame, prompt)
+        == Disposition::Execute
+    {
         eprintln!(
             "UNDERSTOOD (frame={}, confidence={:.2})",
             understood.frame, understood.confidence
@@ -185,7 +189,3 @@ async fn resolve_prose(project: &str, prompt: &str) -> String {
     eprintln!("{}", msg);
     std::process::exit(2);
 }
-
-/// Minimum deterministic confidence to act. Below this the parse is
-/// too thin to act on blind (missing verb, kind, or name).
-const LOCAL_CONFIDENCE: f64 = 0.75;

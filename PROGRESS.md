@@ -1,5 +1,23 @@
 # Grounding Coder — Progress
 
+## v0.10.3 — Disposition engine + intent benchmark (2026-09-29)
+
+- `disposition()` in `engine/understand.rs`: confidence + frame +
+  prompt surface route to `Execute` / `Ask` / `Block`. Destructive
+  verbs, contradiction pairs ("add but keep unchanged"), and
+  multi-clause prompts never execute blind — even at high confidence.
+  `ACT_THRESHOLD` (0.75) lives next to the lexicon; `--prose`,
+  `--understand`, and chat refusal all route through it.
+- Name-resolution fixes from the benchmark's typo case: the adjacent
+  scan now skips typo'd verbs too (`fuzzy_verb` exclusion, so "Buld"
+  stays an action), and kind comes from the head noun — the LAST kind
+  word ("settings page" is a page about Settings, not a config).
+- `tests/intent_benchmark.rs`: 8 categories, 10 cases (happy path,
+  typo tolerance, vague, ambiguous, destructive, contradiction,
+  multi-intent, unknown concepts) — all green.
+- 142 tests green (77 lib + 65 integration), clippy `-D warnings`
+  clean on default AND `ui`, fmt clean.
+
 ## Goal
 Pivot grounded from an overly ambitious cognitive engine into a deterministic, non-guessing coding agent for Android — `grounding-coder`. The LLM is ONLY an unverified NL→intent translator; all code generation, verification, and correction is driven by grounded's deterministic engine patterns.
 

@@ -94,6 +94,122 @@ pub struct Curiosity {
 /// Split markers for multi-request prose ("do X and also Y").
 const CLAUSE_SPLITS: &[&str] = &[" and also ", " and then ", " then "];
 
+/// What the system should do with a parse: act on it, ask about it,
+/// or refuse it. Decided from the receipt, never from vibes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Disposition {
+    /// Confidence clears the bar with a known frame: execute.
+    Execute,
+    /// Something specific is missing or contradictory: ask one question.
+    Ask,
+    /// Nothing actionable (vacuous input) or destructive ambiguity:
+    /// refuse with the reason stated.
+    Block,
+}
+
+/// Act threshold shared by every caller (CLI, chat, API).
+pub const ACT_THRESHOLD: f64 = 0.75;
+
+/// Destructive verbs: acting on these from prose ambiguity deletes
+/// user data. They never execute — at most a question naming the
+/// exact target, usually a refusal.
+const DESTRUCTIVE: &[&str] = &["delete", "remove", "destroy", "wipe", "drop", "erase", "rm"];
+
+/// Contradiction pairs: both sides present means the request fights
+/// itself. Each side is a set of equivalent words.
+const CONTRADICTIONS: &[(&[&str], &[&str])] = &[
+    (
+        &["readonly", "read-only", "immutable"],
+        &["edit", "write", "change", "mutate"],
+    ),
+    (&["create", "make", "add"], &["delete", "remove", "destroy"]),
+    (
+        &["allow", "permit", "enable"],
+        &["forbid", "deny", "block", "disable"],
+    ),
+    (&["fast", "faster", "quick"], &["slow", "slower"]),
+];
+
+/// Context words: the request points at conversation history.
+const CONTEXT_WORDS: &[&str] = &["previous", "last", "prior", "same", "other", "that"];
+
+/// Decide what to do with a parse. Pure and total.
+pub fn disposition(confidence: f64, frame: &str, prose: &str) -> Disposition {
+    let ws = words(prose);
+    // Destructive ambiguity refuses first: no threshold can bless it.
+    if ws.iter().any(|w| DESTRUCTIVE.contains(&w.as_str())) {
+        return Disposition::Block;
+    }
+    // Contradictions ask: the user must pick a side. Inflections
+    // match too ("editing" counts as "edit") via a tiny local stemmer
+    // — full Snowball would be a dependency for one comparison.
+    fn stem_lite(w: &str) -> &str {
+        if w.len() > 5 && w.ends_with("ing") {
+            &w[..w.len() - 3]
+        } else if w.len() > 4 && w.ends_with("ed") {
+            &w[..w.len() - 2]
+        } else if w.len() > 3 && w.ends_with('s') && !w.ends_with("ss") {
+            &w[..w.len() - 1]
+        } else {
+            w
+        }
+    }
+    let lower: Vec<String> = ws.clone();
+    for (a, b) in CONTRADICTIONS {
+        if lower.iter().any(|w| a.contains(&stem_lite(w)))
+            && lower.iter().any(|w| b.contains(&stem_lite(w)))
+        {
+            return Disposition::Ask;
+        }
+    }
+    // Multiple requests in one breath stage as questions, not as a
+    // blind batch: half-failing a compound is worse than asking where
+    // to start. (Staged execution is the follow-up project.)
+    if clause_count(prose) > 1 {
+        return Disposition::Ask;
+    }
+    if confidence >= ACT_THRESHOLD && frame != "unknown" {
+        return Disposition::Execute;
+    }
+    // Anything with content words left to ask about gets a question;
+    // vacuous input gets a refusal.
+    let content = ws.iter().any(|w| {
+        w.len() > 2
+            && !STOPWORDS.contains(&w.as_str())
+            && fuzzy_verb(w).is_none()
+            && !VERBS.iter().any(|(v, _)| v == w)
+            && !KINDS.iter().any(|(k, _)| k == w)
+    });
+    if content {
+        Disposition::Ask
+    } else {
+        Disposition::Block
+    }
+}
+
+/// Names of previously defined items of a kind, newest first, from
+/// verified history. Powers "the previous screen" without guessing:
+/// the caller shows these as options, never silently reuses them.
+pub fn history_names(project_dir: &std::path::Path, kind: &str) -> Vec<String> {
+    load_history(project_dir)
+        .into_iter()
+        .rev()
+        .filter_map(|r| {
+            r.defines
+                .into_iter()
+                .find(|(_, k)| k == kind)
+                .map(|(n, _)| n)
+        })
+        .collect::<Vec<_>>()
+}
+
+/// True when the prose points at conversation history.
+pub fn wants_context(prose: &str) -> bool {
+    words(prose)
+        .iter()
+        .any(|w| CONTEXT_WORDS.contains(&w.as_str()))
+}
+
 /// Lexicon surface for neighbor search: verbs and kind words alike.
 fn lexicon_words() -> Vec<(&'static str, &'static str)> {
     let mut out: Vec<(&str, &str)> = Vec::new();
@@ -280,9 +396,27 @@ const CONSTRAINTS: &[(&str, &str)] = &[
     ("safe", "security"),
 ];
 
-/// Lowercased alphanumeric tokens in order.
+/// Lowercased alphanumeric tokens in order. Intra-word hyphens fuse
+/// first (`read-only` → `readonly`), so hyphenated compounds match the
+/// lexicon instead of shattering into misleading pieces.
 fn words(prose: &str) -> Vec<String> {
-    prose
+    let fused: String = {
+        let chars: Vec<char> = prose.chars().collect();
+        let mut out = String::new();
+        for (i, c) in chars.iter().enumerate() {
+            if *c == '-'
+                && i > 0
+                && i + 1 < chars.len()
+                && chars[i - 1].is_alphanumeric()
+                && chars[i + 1].is_alphanumeric()
+            {
+                continue;
+            }
+            out.push(*c);
+        }
+        out
+    };
+    fused
         .split(|c: char| !c.is_alphanumeric())
         .filter(|w| !w.is_empty())
         .map(|w| w.to_lowercase())
@@ -322,11 +456,15 @@ fn adjacent_name(words: &[String], kind: &str) -> Option<String> {
     let mut i = pos;
     while i > 0 {
         i -= 1;
-        // Articles, verbs, and kind words are grammar, never names —
-        // "create a struct" must not name the struct "Create".
+        // Articles and verbs (exact or typo'd — "buld" is an action,
+        // never a name) are grammar. The anchor kind itself is skipped,
+        // but OTHER kind words may be the referent ("settings page"
+        // names Settings; "create a struct" names nothing).
+        let is_anchor = KINDS.iter().any(|(k, v)| k == &words[i] && *v == kind);
         if articles.contains(&words[i].as_str())
             || VERBS.iter().any(|(v, _)| v == &words[i])
-            || KINDS.iter().any(|(k, _)| k == &words[i])
+            || fuzzy_verb(&words[i]).is_some()
+            || is_anchor
         {
             continue;
         }
@@ -344,12 +482,19 @@ fn adjacent_name(words: &[String], kind: &str) -> Option<String> {
 }
 
 /// Capitalized words in original case (candidate proper names).
+/// Words that are exactly verbs — or typos of verbs ("Buld") — are
+/// actions, never names, and are excluded so a capitalized typo does
+/// not become a struct called Buld.
 fn capitals(prose: &str) -> Vec<String> {
     prose
         .split(|c: char| !c.is_alphanumeric())
         .filter(|w| {
             let mut cs = w.chars();
             matches!(cs.next(), Some(c) if c.is_uppercase()) && !w.chars().all(|c| c.is_uppercase())
+        })
+        .filter(|w| {
+            let lower = w.to_lowercase();
+            !VERBS.iter().any(|(v, _)| v == &lower) && fuzzy_verb(&lower).is_none()
         })
         .map(|w| w.to_string())
         .collect()
@@ -525,8 +670,11 @@ pub fn understand(prose: &str, project_dir: Option<&std::path::Path>) -> Underst
     // Specificity wins: bare "make" with a kind + name in the same
     // breath ("make a counter page") is creation, not compilation.
     // "make the thing work faster" (no kind, no name) stays a build.
+    // Head-noun rule: the LAST kind word governs ("settings page" is a
+    // page about settings, not a config). Single pass, deterministic.
     let kind = ws
         .iter()
+        .rev()
         .find_map(|w| KINDS.iter().find(|(k, _)| k == w).map(|(_, k)| *k));
     // Constraint words ride along as intent constraints.
     let constraints: Vec<String> = CONSTRAINTS
@@ -858,6 +1006,54 @@ mod tests {
         assert_eq!(clause_count("do this"), 1);
         assert_eq!(clause_count("build the apk and also fix the bug"), 2);
         assert_eq!(clause_count("make a page then make it blue"), 2);
+    }
+
+    #[test]
+    fn disposition_execute_ask_block() {
+        use super::Disposition::*;
+        use super::disposition;
+        assert_eq!(
+            disposition(0.9, "create", "create a Counter struct"),
+            Execute
+        );
+        assert_eq!(disposition(0.9, "unknown", "flibber the widget"), Ask);
+        assert_eq!(disposition(0.3, "create", "create a thing"), Ask);
+        assert_eq!(disposition(0.0, "unknown", "!!!"), Block);
+        // Destructive beats confident.
+        assert_eq!(disposition(0.99, "fix", "delete the old files now"), Block);
+        // Contradictions ask.
+        assert_eq!(
+            disposition(0.9, "fix", "make it read-only but allow editing"),
+            Ask
+        );
+        // Multi-clause stages as a question even when parseable.
+        assert_eq!(
+            disposition(1.0, "create", "create a config and then add tests"),
+            Ask
+        );
+    }
+
+    #[test]
+    fn history_names_lists_known_defines() {
+        let dir = std::env::temp_dir().join(format!(
+            "gc-und-hn-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut intent = empty_intent("make a counter page".to_string());
+        intent.define = vec![Some(empty_define("Counter".to_string(), "page"))];
+        save_history(&dir, "make a counter page", &intent);
+        assert_eq!(
+            super::history_names(&dir, "page"),
+            vec!["Counter".to_string()]
+        );
+        assert!(super::history_names(&dir, "struct").is_empty());
+        assert!(super::wants_context("same layout as the previous screen"));
+        assert!(!super::wants_context("build the apk"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

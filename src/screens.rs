@@ -231,11 +231,14 @@ async fn run_task_inner(
     progress: Option<crate::engine::ProgressCallback>,
 ) -> (String, Vec<String>) {
     // No model anywhere: the deterministic understander parses, and
-    // below-threshold parses become chat text naming what's missing.
+    // the disposition engine decides. Anything but Execute becomes
+    // chat text naming what's missing plus the top curiosity.
     let project_dir = crate::resolve_project_dir(&cfg.project_path);
     let understood =
         crate::engine::understand::understand(prompt, Some(std::path::Path::new(&project_dir)));
-    if understood.confidence < 0.75 || understood.frame == "unknown" {
+    if crate::engine::understand::disposition(understood.confidence, &understood.frame, prompt)
+        != crate::engine::understand::Disposition::Execute
+    {
         let mut text = format!(
             "UNDERSTOOD confidence {:.2} frame={} — too thin to act on: {:?}",
             understood.confidence, understood.frame, understood.intent.unknown_requirements,
