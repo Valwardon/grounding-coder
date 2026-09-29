@@ -3,6 +3,7 @@ pub mod budget;
 pub mod catalog;
 pub mod corrector;
 pub mod error;
+pub mod experiment;
 pub mod knowledge;
 pub mod lang;
 pub mod pathfind;
@@ -1697,5 +1698,11 @@ impl CodeBot {
 
     pub fn recipes(&self) -> Vec<String> {
         self.recipes.list()
+    }
+
+    /// Budget left after the last task — the experiment harness reads
+    /// this to measure attempts consumed (initial minus remaining).
+    pub fn budget_remaining(&self) -> u32 {
+        self.budget.remaining()
     }
 }

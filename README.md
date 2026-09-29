@@ -198,7 +198,7 @@ Oracle verify (compiler / tests / parser per language)
 
 ## Proof, Not Promises
 
-154 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
+156 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
 `fmt --check` clean:
 
 | Suite | Tests | What it proves |
@@ -206,6 +206,7 @@ Oracle verify (compiler / tests / parser per language)
 | lib (unit) | 83 | recipes, ranker, catalog, pathfind, parsers, manifests, guards, families, understander, disposition, web research, knowledge lifecycle |
 | `intent_benchmark` | 13 | happy path, typo tolerance, head-noun kind rule, typo-verbs-never-names, vague/ambiguous refusal, destructive block (even fully specified), contradiction ask, multi-intent split, unknown-concept curiosity |
 | `knowledge_loop` | 3 | budget-bounded offline dreaming with persistence, sleep when nothing open, failures deprioritize without deleting |
+| `learning_experiment` | 2 | dreaming arm rediscovers family patterns (rate 0.55) vs amnesiac baseline (0.00); both arms solve every task |
 | `build` | 6 | C/Java/Rust real builds + artifacts run; unknown targets block; dx-output APK discovery |
 | `replicate` | 6 | byte-exact replication, hash-mismatch block, replace-exact rules, clean-room refusal + opt-out |
 | `editplan` | 4 | byte-range apply, stale rejection, invalid-range rejection, LLM-code rejection |

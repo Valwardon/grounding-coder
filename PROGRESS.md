@@ -1,5 +1,24 @@
 # Grounding Coder — Progress
 
+## v0.12.0 — First learning experiment (2026-09-29)
+
+- `engine/experiment.rs`: `run_family` runs a task family in two
+  arms — dreaming (shared store + bounded idle passes between
+  tasks) vs amnesiac (fresh store per task). Each task solves for
+  real (fresh bot + scratch project); only the store carries state.
+  The report records duration, budget consumed, research used,
+  recognized vs new gaps, reused knowledge, and dream outcomes.
+- `tests/learning_experiment.rs`: three word-count-shaped functions
+  through the real bot. Dream arm: 3/3 solved, 6 recognized, 5 new,
+  rediscovery rate **0.55**. Amnesiac: 3/3 solved, 0 recognized, 15
+  new, rate **0.00**. Offline hypotheses verify nothing (firewall
+  holds: 0 verified) and solving takes the same time — the measured
+  learning is recognition, not speed. Speed is the probe follow-up.
+- New `CodeBot::budget_remaining` accessor so attempts consumed are
+  measured, not guessed.
+- 156 tests green (83 lib + 73 integration), clippy `-D warnings`
+  clean on default AND `ui`, fmt clean.
+
 ## v0.11.0 — Proactive curiosity and idle learning loop (2026-09-29)
 
 - `engine/knowledge.rs`: every concept carries an explicit lifecycle
