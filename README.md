@@ -124,17 +124,13 @@ Oracle verify (compiler / tests / parser per language)
   promote concepts to Verified with the oracle transcript as
   evidence;   red, uncompilable, or timed-out probes record negative
   evidence and never promote. (`src/engine/probe.rs`)
-- **Deterministic eyeballs** — photos are scene renders, not pixel
-  guesses: a scene graph (camera, light, ground, decomposed person,
-  tower) renders through a tiny raytracer with a per-material pixel
-  receipt, so "put a tower behind me" is a graph edit whose effect
-  is proven (tower pixels appear, person pixels byte-identical).
+- **Deterministic eyeballs** — the raytracer builds worlds (tower,
+  ground, sky, props), never bodies: "put a tower behind me" is a
+  graph edit whose effect is proven by per-material pixel receipts.
   Classical perception without any model: hand-rolled BMP codec,
   crop/resize/overlay, histograms, Sobel edges, template matching —
-  every op exact and repeatable. People are built from a studied
-  body canon (7.5-head proportions with cited sources) and verified
-  by measuring the renders — head/stature, arm-span/stature, and
-  eye-spacing ratios all check out. (`src/engine/vision.rs`,
+  every op exact and repeatable. People come from researched
+  photographs with ground-truth boxes. (`src/engine/vision.rs`,
   `src/engine/scene.rs`, `gc render`; sample photos in `samples/`)
 - **Self-sourced plates** — the loop finds its own base photos:
   Commons search or general web image search (`--source web` via
@@ -154,12 +150,15 @@ Oracle verify (compiler / tests / parser per language)
 - **Queryable anatomy, no vectors** — a researched partonomy graph
   (bones, vessels, relations: part-of, articulates, supplied-by)
   answers "vessels near the distal phalanges" by graph walk, with
-  Gray's Anatomy citations. Finger counts and chains come from the
-  graph; every part routes to the torso. (`src/engine/anatomy.rs`)
+  Gray's Anatomy citations; joint ROM tables validate poses instead
+  of imagining them, with hair and physique notes alongside.
+  (`src/engine/anatomy.rs`)
 - **Imagine** — one command from prose to photo: brief, reference
-  research, palette/composition study, fresh procedural build with
-  articulated hands (peace sign included) and grown props (roses).
-  (`src/engine/imagine.rs`, `gc imagine`; samples in `samples/`)
+  research across Commons, web search, and Open Images (adult-
+  filtered ground-truth boxes), palette/composition study, then a
+  two-source montage of real people in real places. Refuses rather
+  than meshing block figures. (`src/engine/imagine.rs`,
+  `gc imagine`; samples in `samples/`)
 - **Generalized Build op** — `TaskKind::Build` ("build …" actions) runs
   the language backend's build oracle: C/`gcc`, Rust/`cargo` (native,
   release, explicit triples), Kotlin/`kotlinc` jars, Java/`javac`,
@@ -241,12 +240,12 @@ Oracle verify (compiler / tests / parser per language)
 
 ## Proof, Not Promises
 
-217 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
+219 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
 `fmt --check` clean:
 
 | Suite | Tests | What it proves |
 |---|---|---|
-| lib (unit) | 146 | recipes, ranker (importance-weighted), catalog, pathfind, parsers, manifests, guards, families, understander (slot satisfaction, vector synonyms), disposition, web research, knowledge lifecycle (consolidation, evidence tiers), compiler probes, deterministic vision (pixels, studied bodies, film finish, masks, compositing, collages, peace articulation, roses, shadows, photo-first), plate sourcing + provenance (Commons and web search), backend affordances, imagine trajectory |
+| lib (unit) | 148 | recipes, ranker (importance-weighted), catalog, pathfind, parsers, manifests, guards, families, understander (slot satisfaction, vector synonyms), disposition, web research, knowledge lifecycle (consolidation, evidence tiers), compiler probes, deterministic vision (pixels, film finish, masks, compositing, collages, roses, shadows, photo-first, ground-truth boxes), plate sourcing + provenance (Commons, web search, Open Images), backend affordances, imagine trajectory, movement knowledge |
 | `intent_benchmark` | 13 | happy path, typo tolerance, head-noun kind rule, typo-verbs-never-names, vague/ambiguous refusal, destructive block (even fully specified), contradiction ask, multi-intent split, unknown-concept curiosity |
 | `knowledge_loop` | 3 | budget-bounded offline dreaming with persistence, sleep when nothing open, failures deprioritize without deleting |
 | `learning_experiment` | 2 | dreaming arm rediscovers family patterns (rate 0.55) vs amnesiac baseline (0.00); both arms solve every task |

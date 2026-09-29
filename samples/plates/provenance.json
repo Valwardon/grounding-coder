@@ -22,5 +22,20 @@
     "license": "cc0",
     "page_url": "https://www.pinterest.com/pin/188517934395037700/",
     "source_url": "https://i.pinimg.com/736x/04/16/61/0416618300d1c9723b405c844d18bbda.jpg"
+  },
+  {
+    "author": "Bob Park,ADP-AHA Golf 012",
+    "basis": "Open Images V4 box /m/03bt1vf by Bob Park,ADP-AHA Golf 012",
+    "bbox": [
+      0.217122,
+      0.203768,
+      0.546283,
+      0.999926
+    ],
+    "file": "plate-03.bmp",
+    "label": "/m/03bt1vf",
+    "license": "CC-BY",
+    "page_url": "https://www.flickr.com/photos/bob_park/16954781749",
+    "source_url": "https://farm3.staticflickr.com/8729/16954781749_340ce8b52b_o.jpg"
   }
 ]

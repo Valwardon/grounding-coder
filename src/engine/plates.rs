@@ -598,6 +598,357 @@ pub async fn source_plates_web(query: &str, limit: u32) -> (Vec<SourcedPlate>, V
     (plates, refused)
 }
 
+/// Open Images (Google) as a people source: millions of CC-licensed
+/// photographs with machine-readable person boxes. No segmentation
+/// needed — the dataset states where people stand. Adult rule: any
+/// image carrying a Girl or Boy box is excluded, no exceptions; the
+/// remaining Woman/Person boxes are composable strangers, never
+/// named individuals (the metadata carries no identities by design).
+pub mod openimages {
+    use super::{SourcedPlate, decode_plate, require_provenance};
+
+    const BASE: &str = "https://storage.googleapis.com/openimages/2018_04/validation";
+    const IMAGES_FILE: &str = "validation-images-with-rotation.csv";
+    const BBOX_FILE: &str = "validation-annotations-bbox.csv";
+
+    /// Boxable label IDs (V4–V7 stable).
+    pub const PERSON: &str = "/m/01g317";
+    pub const WOMAN: &str = "/m/03bt1vf";
+    pub const GIRL: &str = "/m/05r655";
+    pub const BOY: &str = "/m/01bl7v";
+
+    /// One annotated person: the plate plus its box as fractions.
+    #[derive(Debug, Clone)]
+    pub struct OpenPlate {
+        pub plate: SourcedPlate,
+        pub bbox: (f64, f64, f64, f64),
+        pub label: String,
+    }
+
+    /// Query words to target/excluded label sets. "man" has no
+    /// boxable ID: Person-labeled images with no Woman/Girl/Boy
+    /// labels anywhere. A stated heuristic, not a guarantee.
+    pub fn labels_for(query: &str) -> (Vec<&'static str>, Vec<&'static str>) {
+        let q = query.to_lowercase();
+        if q.contains("woman") || q.contains("female") || q.contains("lady") {
+            (vec![WOMAN], vec![GIRL, BOY])
+        } else if q.contains("man") || q.contains("male") || q.contains("gentleman") {
+            (vec![PERSON], vec![WOMAN, GIRL, BOY])
+        } else {
+            (vec![PERSON, WOMAN], vec![GIRL, BOY])
+        }
+    }
+
+    /// Fetch a metadata file into the cache dir (once; reuse after).
+    async fn cached_file(
+        cache_dir: &std::path::Path,
+        name: &str,
+    ) -> Result<std::path::PathBuf, String> {
+        let path = cache_dir.join(name);
+        if path.exists() {
+            return Ok(path);
+        }
+        std::fs::create_dir_all(cache_dir)
+            .map_err(|e| format!("plate cache unavailable: {}", e))?;
+        let url = format!("{}/{}", BASE, name);
+        let bytes = crate::http::get_bytes(&url)
+            .await
+            .map_err(|e| format!("metadata fetch failed: {}", e))?;
+        std::fs::write(&path, bytes).map_err(|e| format!("metadata cache write failed: {}", e))?;
+        Ok(path)
+    }
+
+    pub struct ImageMeta {
+        pub url: String,
+        pub page: String,
+        pub license: String,
+        pub author: String,
+        pub title: String,
+        pub rotation: f64,
+    }
+
+    /// Parse one images-TSV row. Front fields (ID..Profile) and back
+    /// fields (Size, MD5, Thumb, Rotation) never contain commas;
+    /// Author and Title do, unquoted. The Author display name is
+    /// recovered whole by joining the middle; Title is dropped (the
+    /// landing page carries it) rather than guessed.
+    pub fn parse_image_row(line: &str) -> Option<(String, ImageMeta)> {
+        let parts: Vec<&str> = line.split(',').collect();
+        if parts.len() < 12 {
+            return None;
+        }
+        let n = parts.len();
+        let rotation: f64 = parts[n - 1].trim().parse().unwrap_or(0.0);
+        let id = parts[0].trim().to_string();
+        let url = parts[2].trim().to_string();
+        let page = parts[3].trim().to_string();
+        let license = parts[4].trim().to_string();
+        let author = parts[6..n - 4].join(",").trim().to_string();
+        if id.is_empty() || id == "ImageID" || url.is_empty() {
+            return None;
+        }
+        Some((
+            id,
+            ImageMeta {
+                url,
+                page,
+                license,
+                author,
+                title: String::new(),
+                rotation,
+            },
+        ))
+    }
+
+    pub struct BoxRow {
+        pub image: String,
+        pub label: String,
+        pub x0: f64,
+        pub y0: f64,
+        pub x1: f64,
+        pub y1: f64,
+        pub clean: bool,
+    }
+
+    /// Parse one bbox-TSV row: ImageID,Source,LabelName,Confidence,
+    /// XMin,XMax,YMin,YMax,IsOccluded,IsTruncated,IsGroupOf,
+    /// IsDepiction,IsInside. Clean = no occlusion/truncation/group/
+    /// depiction flags.
+    pub fn parse_box_row(line: &str) -> Option<BoxRow> {
+        let p: Vec<&str> = line.split(',').collect();
+        if p.len() < 13 || p[0] == "ImageID" {
+            return None;
+        }
+        let num = |i: usize| p.get(i).and_then(|v| v.trim().parse::<f64>().ok());
+        let flag = |i: usize| p.get(i).map(|v| v.trim() == "1").unwrap_or(false);
+        Some(BoxRow {
+            image: p[0].trim().to_string(),
+            label: p[2].trim().to_string(),
+            x0: num(4)?,
+            y0: num(6)?,
+            x1: num(5)?,
+            y1: num(7)?,
+            clean: !(flag(8) || flag(9) || flag(10) || flag(11)),
+        })
+    }
+
+    /// Creative-Commons license URLs to allowlist tokens. Anything
+    /// else (NC/ND variants, unknown) refuses downstream.
+    pub fn license_token(url: &str) -> Option<String> {
+        let u = url.to_lowercase();
+        if u.contains("/licenses/by-sa/") {
+            Some("CC-BY-SA".to_string())
+        } else if u.contains("/licenses/by/") {
+            Some("CC-BY".to_string())
+        } else if u.contains("publicdomain/zero") || u.contains("/publicdomain/") {
+            Some("CC0".to_string())
+        } else {
+            None
+        }
+    }
+
+    /// Search cached metadata: target boxes minus excluded images,
+    /// joined to image rows, largest clean box per image first.
+    /// Streams both files; early-exits at `limit` plates.
+    pub async fn search_openimages(
+        cache_dir: &std::path::Path,
+        query: &str,
+        limit: u32,
+    ) -> (Vec<OpenPlate>, Vec<String>) {
+        let mut refused = Vec::new();
+        let images_path = match cached_file(cache_dir, IMAGES_FILE).await {
+            Ok(p) => p,
+            Err(e) => {
+                refused.push(e);
+                return (Vec::new(), refused);
+            }
+        };
+        let bbox_path = match cached_file(cache_dir, BBOX_FILE).await {
+            Ok(p) => p,
+            Err(e) => {
+                refused.push(e);
+                return (Vec::new(), refused);
+            }
+        };
+        let (targets, excluded) = labels_for(query);
+        // Pass 1 (boxes): target rows per image + excluded image set.
+        let mut hits: std::collections::HashMap<String, Vec<BoxRow>> =
+            std::collections::HashMap::new();
+        let mut banned: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let bbox_text = match std::fs::read_to_string(&bbox_path) {
+            Ok(t) => t,
+            Err(e) => {
+                refused.push(format!("bbox cache unreadable: {}", e));
+                return (Vec::new(), refused);
+            }
+        };
+        for line in bbox_text.lines() {
+            let Some(row) = parse_box_row(line) else {
+                continue;
+            };
+            if excluded.contains(&row.label.as_str()) {
+                banned.insert(row.image.clone());
+            }
+            if targets.contains(&row.label.as_str()) {
+                hits.entry(row.image.clone()).or_default().push(row);
+            }
+        }
+        if hits.is_empty() {
+            refused.push(format!("no {:?} boxes in metadata", query));
+            return (Vec::new(), refused);
+        }
+        // Pass 2 (images): join metadata for surviving images.
+        let images_text = match std::fs::read_to_string(&images_path) {
+            Ok(t) => t,
+            Err(e) => {
+                refused.push(format!("image cache unreadable: {}", e));
+                return (Vec::new(), refused);
+            }
+        };
+        let mut metas: std::collections::HashMap<String, ImageMeta> =
+            std::collections::HashMap::new();
+        for line in images_text.lines() {
+            if let Some((id, meta)) = parse_image_row(line)
+                && hits.contains_key(&id)
+            {
+                metas.insert(id, meta);
+            }
+        }
+        // Assemble: biggest clean box wins per image; anything else
+        // takes the biggest box available. Banned images drop out.
+        let mut plates = Vec::new();
+        let mut order: Vec<String> = hits.keys().cloned().collect();
+        order.sort();
+        for id in order {
+            if plates.len() >= limit as usize {
+                break;
+            }
+            if banned.contains(&id) {
+                continue;
+            }
+            let Some(meta) = metas.get(&id) else {
+                refused.push(format!("{}: no image row", id));
+                continue;
+            };
+            if meta.rotation.abs() > 0.01 {
+                refused.push(format!("{}: rotated, boxes would misalign", id));
+                continue;
+            }
+            let rows = &hits[&id];
+            let pick = rows
+                .iter()
+                .filter(|r| r.clean)
+                .max_by(|a, b| {
+                    let area = |r: &BoxRow| (r.x1 - r.x0) * (r.y1 - r.y0);
+                    area(a)
+                        .partial_cmp(&area(b))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .or_else(|| {
+                    rows.iter().max_by(|a, b| {
+                        let area = |r: &BoxRow| (r.x1 - r.x0) * (r.y1 - r.y0);
+                        area(a)
+                            .partial_cmp(&area(b))
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                });
+            let Some(row) = pick else { continue };
+            let Some(token) = license_token(&meta.license) else {
+                refused.push(format!(
+                    "{}: license {:?} not allowlisted",
+                    id, meta.license
+                ));
+                continue;
+            };
+            let provenance =
+                match require_provenance(&id, &meta.page, &meta.url, &meta.author, &token) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        refused.push(e);
+                        continue;
+                    }
+                };
+            let bytes = match crate::http::get_bytes(&provenance.source_url).await {
+                Ok(b) => b,
+                Err(e) => {
+                    refused.push(format!("{}: fetch failed: {}", id, e));
+                    continue;
+                }
+            };
+            match decode_plate(&bytes) {
+                Ok(image) => plates.push(OpenPlate {
+                    plate: SourcedPlate {
+                        image,
+                        provenance,
+                        basis: format!("Open Images V4 box {} by {}", row.label, meta.author),
+                    },
+                    bbox: (row.x0, row.y0, row.x1, row.y1),
+                    label: row.label.clone(),
+                }),
+                Err(e) => refused.push(format!("{}: {}", id, e)),
+            }
+            // Politeness between file fetches (shared infra).
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+        (plates, refused)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn image_rows_parse_around_commas() {
+            // Author carries a comma; the middle-join recovers it whole.
+            let line = "abc123,validation,https://farm1/x.jpg,https://flickr.com/p/1,https://creativecommons.org/licenses/by/2.0/,https://flickr.com/people/u,Doe, Jane,4405052,QUJD,https://thumb/z.jpg,0.0";
+            let (id, meta) = parse_image_row(line).expect("parses");
+            assert_eq!(id, "abc123");
+            assert_eq!(meta.author, "Doe, Jane");
+            assert_eq!(meta.license, "https://creativecommons.org/licenses/by/2.0/");
+            assert_eq!(license_token(&meta.license).as_deref(), Some("CC-BY"));
+            assert!(parse_image_row("ImageID,Subset,URL").is_none());
+            // Real header shape (12 clean fields) parses.
+            let clean = "abc123,validation,https://farm1/x.jpg,https://flickr.com/p/1,https://creativecommons.org/licenses/by/2.0/,https://flickr.com/people/u,Jane,Beach portrait,4405052,QUJD,https://thumb/z.jpg,0.0";
+            let (_, meta) = parse_image_row(clean).expect("parses");
+            // Middle joined whole: author and title inseparable raw.
+            assert_eq!(meta.author, "Jane,Beach portrait");
+        }
+
+        #[test]
+        fn box_rows_parse_flags() {
+            let clean = "img1,freeform,/m/03bt1vf,1,0.1,0.5,0.2,0.8,0,0,0,0,0";
+            let row = parse_box_row(clean).expect("parses");
+            assert_eq!((row.label.as_str(), row.clean), ("/m/03bt1vf", true));
+            assert!((row.x0, row.y0, row.x1, row.y1) == (0.1, 0.2, 0.5, 0.8));
+            let dirty = "img1,freeform,/m/01g317,1,0.1,0.5,0.2,0.8,1,0,0,0,0";
+            assert!(!parse_box_row(dirty).expect("parses").clean);
+            assert!(parse_box_row("ImageID,Source,LabelName").is_none());
+        }
+
+        #[test]
+        fn queries_map_to_adult_labels() {
+            assert_eq!(labels_for("woman"), (vec![WOMAN], vec![GIRL, BOY]));
+            let (t, e) = labels_for("man");
+            assert_eq!(t, vec![PERSON]);
+            assert!(e.contains(&WOMAN) && e.contains(&GIRL) && e.contains(&BOY));
+            assert_eq!(
+                labels_for("portrait"),
+                (vec![PERSON, WOMAN], vec![GIRL, BOY])
+            );
+        }
+
+        #[test]
+        fn licenses_gate_cleanly() {
+            assert_eq!(
+                license_token("https://creativecommons.org/licenses/by-sa/2.0/").as_deref(),
+                Some("CC-BY-SA")
+            );
+            assert!(license_token("https://creativecommons.org/licenses/by-nc/2.0/").is_none());
+            assert!(license_token("").is_none());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

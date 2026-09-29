@@ -1,5 +1,26 @@
 # Grounding Coder — Progress
 
+## v0.23.0 — Canon bodies deleted; Open Images people; movement knowledge (2026-09-29)
+
+- Deleted, permanently: procedural humanoid meshes (`person`,
+  `person_plan`, poses, fingers, people scenes, the render-measure
+  anatomy study, procedural-people samples). The renderer builds
+  worlds, never bodies. People come from researched photographs.
+- Open Images (Google) as a people source: CC validation metadata
+  cached locally, Woman/Person boxes with Girl/Boy exclusion,
+  clean-box preference, license/author from the dataset rows,
+  ground-truth boxes into `compose_known_box` (no discovery run).
+  Automatic selection additionally skips full-frame boxes,
+  edge-cropped boxes, and name-titled plates — all logged.
+- Joints + ROM validator, hair behavior, physique notes: sourced,
+  queryable movement knowledge (poses validate instead of being
+  imagined). No training-data or model claims anywhere.
+- Sourcing reliability: thumbnail-first fetching, politeness
+  delays, metadata + plate caches, max-dim discipline on every
+  source path, `.grounding/` gitignored as runtime state.
+- 219 tests green (148 lib + 71 integration), clippy `-D warnings`
+  clean, fmt clean.
+
 ## v0.22.0 — Photo-first imagine, HD finish (2026-09-29)
 
 - Structural admission: capsule people read as Minecraft, and no

@@ -16,13 +16,11 @@
 //! back to defaults and the log says so. Hair is not measured in v1
 //! (no reliable classical cue) — the log states the default used.
 use super::plates::SourcedPlate;
-use super::scene::{
-    self, ArmPose, BodyPlan, Camera, Light, Material, PersonSpec, Scene, Shape, Vec3,
-};
 use super::vision::{Image, Rgb};
 
-/// Who stands in the photo. All figures are synthetic adults built
-/// from the BodyPlan — no likenesses, no minors, by construction.
+/// Who stands in the photo. Subjects come from researched
+/// photographs with complete provenance — no likenesses generated,
+/// no minors composited, by construction of the pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubjectKind {
     Man,
@@ -37,11 +35,13 @@ pub enum PropKind {
 }
 
 /// The parsed request: deterministic keyword scan, stated limits —
-/// no grammar beyond "contains the word".
+/// no grammar beyond "contains the word". Subject, pose, and props
+/// shape RESEARCH queries now, not geometry: people come from
+/// photographs, never from meshes.
 #[derive(Debug, Clone)]
 pub struct Brief {
     pub subject: SubjectKind,
-    pub pose: ArmPose,
+    pub pose: String,
     pub props: Vec<PropKind>,
     pub raw: String,
 }
@@ -57,13 +57,11 @@ pub fn parse_brief(prose: &str) -> Brief {
         SubjectKind::Person
     };
     let pose = if has("peace") {
-        ArmPose::PeaceRight
+        "peace sign".to_string()
     } else if has("wav") {
-        ArmPose::WaveRight
-    } else if has("arms out") || has("t-pose") {
-        ArmPose::Out
+        "waving".to_string()
     } else {
-        ArmPose::Down
+        "standing".to_string()
     };
     let mut props = Vec::new();
     if has("rose") || has("flower") || has("bouquet") {
@@ -212,6 +210,34 @@ pub fn study_references(plates: &[SourcedPlate]) -> Study {
     }
 }
 
+/// A bare personal name as author-or-title ("Firstname Lastname",
+/// optional trailing number, nothing else): evidence of an
+/// identified subject. Automatic selection skips these — compositing
+/// strangers is the job; named individuals are a human decision.
+pub fn looks_like_person_name(s: &str) -> bool {
+    // Author strings glue photographer credit and photo title with
+    // commas ("lifrita lifi,Christina Hendricks 3"). Only segments
+    // AFTER the first can be the title: a lone "John Smith" reads as
+    // photographer credit (legitimate), while a trailing bare name
+    // reads as subject identity (automatic selection skips it).
+    // Single-segment strings therefore pass — residual misses stay
+    // visible in the logged author string for human curation.
+    let segments: Vec<&str> = s.split(',').collect();
+    segments.iter().skip(1).any(|segment| {
+        let words: Vec<&str> = segment.split_whitespace().collect();
+        let words = if words.len() == 3 && words[2].chars().all(|c| c.is_ascii_digit()) {
+            &words[..2]
+        } else {
+            &words[..]
+        };
+        words.len() == 2
+            && words.iter().all(|w| {
+                let mut cs = w.chars();
+                matches!(cs.next(), Some(c) if c.is_uppercase()) && cs.all(|c| c.is_lowercase())
+            })
+    })
+}
+
 /// Score one plate as a compositing source: a complete subject
 /// (margins on all four sides — cropped figures score zero no
 /// matter how large) times its area fraction. Returns the subject
@@ -250,117 +276,73 @@ pub fn pick_subject(plates: &[SourcedPlate]) -> Option<usize> {
     best.map(|(i, _)| i)
 }
 
-/// Build the fresh scene: procedural figure (measured skin or
-/// default), measured backdrop palette on sky + darkened ground,
-/// camera distance set so the figure fills the measured fraction,
-/// props at the hand. All pixels rendered; none copied.
-pub fn build_fresh(brief: &Brief, study: &Study, width: u32, height: u32) -> (Scene, Vec<String>) {
-    let mut log = Vec::new();
-    let plan = BodyPlan::canon();
-    let (scale, skin_default, hair, shirt) = match brief.subject {
-        SubjectKind::Man => (
-            1.0,
-            Rgb::new(200, 150, 115),
-            Rgb::new(50, 35, 22),
-            Rgb::new(70, 110, 180),
-        ),
-        SubjectKind::Woman => (
-            0.94,
-            Rgb::new(210, 160, 125),
-            Rgb::new(90, 55, 30),
-            Rgb::new(150, 70, 90),
-        ),
-        SubjectKind::Person => (
-            1.0,
-            Rgb::new(200, 150, 115),
-            Rgb::new(60, 38, 24),
-            Rgb::new(70, 120, 190),
-        ),
-    };
-    let skin = study.skin.unwrap_or_else(|| {
-        log.push("skin: default (no measured tone)".to_string());
-        skin_default
-    });
-    if study.skin.is_some() {
-        log.push(format!("skin: measured {:?}", skin));
+/// Compose from already-sourced plates (no network): pick the best
+/// subject, pair it with a backdrop from a different source, build
+/// the new photo. Pure over its inputs — the offline-testable core.
+pub fn imagine_from_plates(
+    brief: &Brief,
+    plates: &[SourcedPlate],
+    bg_plates: &[SourcedPlate],
+    width: u32,
+    height: u32,
+) -> Result<(Image, Vec<String>), String> {
+    let mut log = vec![format!(
+        "brief: {:?} {:?} {:?}",
+        brief.subject, brief.pose, brief.props
+    )];
+    let idx = pick_subject(plates).ok_or_else(|| {
+        "no complete photographic subject — refusing; people come from photographs".to_string()
+    })?;
+    log.push(format!("path: photographic (plate {})", idx));
+    let plate = &plates[idx];
+    let mut backdrop: Option<(&Image, String)> = None;
+    for bg in bg_plates {
+        if bg.provenance.source_url != plate.provenance.source_url {
+            backdrop = Some((&bg.image, bg.provenance.page_url.clone()));
+            log.push(format!("backdrop: {}", bg.provenance.page_url));
+            break;
+        }
     }
-    let spec = PersonSpec {
-        skin,
-        hair,
-        shirt,
-        pants: Rgb::new(45, 45, 55),
-        pose: brief.pose,
-    };
-    let base = Vec3::new(0.0, 0.0, 0.0);
-    let mut shapes = vec![Shape::Plane {
-        y: 0.0,
-        mat: Material::named("ground", Rgb::new(86, 148, 86)),
-    }];
-    shapes.extend(scene::person_plan(base, scale, &spec, &plan));
-    if brief.props.contains(&PropKind::Roses) {
-        let (_, hand) = scene::arm_endpoints(base, scale, &spec, &plan, 1.0);
-        shapes.extend(scene::bouquet(
-            hand,
-            scale,
-            &[
-                Rgb::new(200, 40, 60),
-                Rgb::new(210, 90, 110),
-                Rgb::new(185, 30, 50),
-            ],
-        ));
-        log.push("props: rose bouquet at right hand".to_string());
+    let backdrop_label = backdrop
+        .as_ref()
+        .map(|(_, u)| u.clone())
+        .unwrap_or_else(|| "studio gradient".to_string());
+    let backdrop_ref = backdrop.as_ref().map(|(img, u)| (*img, u.as_str()));
+    let (img, clog) =
+        super::compose::compose_portrait_on(&plate.image, "imagine", backdrop_ref, width, height)?;
+    for op in &clog.ops {
+        log.push(format!("compose: {}", op));
     }
-    // Camera frames the measured fill; default head-and-shoulders.
-    let fill = study.subject_fill.unwrap_or(0.75);
-    let figure_h = 1.8 * scale;
-    let fov = 42.0f64;
-    let dist = (figure_h / (2.0 * (fov.to_radians() / 2.0).tan() * fill)).clamp(1.5, 12.0);
-    log.push(format!("camera: dist {:.2} for fill {:.2}", dist, fill));
-    let scene_obj = Scene {
-        camera: Camera {
-            pos: Vec3::new(0.0, 1.1 * scale + 0.35, dist),
-            look_at: Vec3::new(0.0, 0.95 * scale, 0.0),
-            fov_deg: fov,
-            width,
-            height,
-        },
-        lights: vec![
-            Light::key(Vec3::new(-0.45, 0.8, 0.35)),
-            Light::fill(Vec3::new(0.6, 0.25, 0.7), 0.30),
-            Light::fill(Vec3::new(0.3, 0.4, -0.8), 0.25),
-        ],
-        ambient: 0.35,
-        sky_top: study.backdrop_top.unwrap_or(Rgb::new(110, 170, 235)),
-        sky_bottom: study.backdrop_bottom.unwrap_or(Rgb::new(215, 235, 250)),
-        shapes,
-    };
-    if study.backdrop_top.is_some() {
-        log.push("backdrop: measured palette".to_string());
-    } else {
-        log.push("backdrop: default sky".to_string());
-    }
-    // Ground follows the measured bottom, darkened for footing.
-    (scene_obj, log)
+    log.push(format!(
+        "subject: bbox {:?}, {:.3} of frame on {}",
+        clog.subject_bbox, clog.subject_fraction, backdrop_label
+    ));
+    Ok((img, log))
 }
 
 /// The full trajectory: research references for the brief, study
-/// them, build fresh, finish the photo. One command, full receipts.
-pub async fn imagine(prose: &str, width: u32, height: u32) -> (Image, Vec<String>) {
+/// them, composite the new photo. One command, full receipts.
+pub async fn imagine(
+    prose: &str,
+    width: u32,
+    height: u32,
+) -> Result<(Image, Vec<String>), Vec<String>> {
     let brief = parse_brief(prose);
     let mut log = vec![format!(
         "brief: {:?} {:?} {:?}",
         brief.subject, brief.pose, brief.props
     )];
-    // Reference query follows the ask: pose terms, else portraiture.
-    let query = if prose.to_lowercase().contains("peace") {
-        "peace sign hand"
-    } else if brief.props.contains(&PropKind::Roses) {
-        "woman with roses portrait"
-    } else {
-        "portrait"
-    };
+    // Subject query follows the ask (pose/subject/props words feed
+    // research now); backdrop query seeks a place.
+    let mut query = String::from("portrait");
+    if brief.pose != "standing" {
+        query = format!("{} portrait", brief.pose);
+    }
+    if brief.props.contains(&PropKind::Roses) {
+        query = format!("{} with roses", query);
+    }
     log.push(format!("research: query {:?}", query));
-    let (mut plates, refused) = super::plates::source_plates_web(query, 3).await;
+    let (mut plates, refused) = super::plates::source_plates_web(&query, 3).await;
     for r in &refused {
         log.push(format!("refused: {}", r));
     }
@@ -375,6 +357,88 @@ pub async fn imagine(prose: &str, width: u32, height: u32) -> (Image, Vec<String
         plates = fallback;
     }
     log.push(format!("references: {} plate(s)", plates.len()));
+    // Open Images first for people: ground-truth boxes beat
+    // segmentation, and the adult filter is structural. Metadata
+    // caches under .grounding/openimages (the plate library).
+    let oi_cache = std::path::Path::new(".grounding/openimages");
+    let (oi_plates, oi_refused) =
+        super::plates::openimages::search_openimages(oi_cache, prose, 3).await;
+    for r in &oi_refused {
+        log.push(format!("openimages refused: {}", r));
+    }
+    log.push(format!("openimages: {} plate(s)", oi_plates.len()));
+    // Best sane box wins, not the first hit: full-frame boxes
+    // reframe the whole photo (nothing learned), and name-titled
+    // plates name an identified person — automatic selection skips
+    // them (logged) while the library keeps them listed. Sample
+    // curation stays human either way.
+    let mut ranked: Vec<(usize, f64)> = oi_plates
+        .iter()
+        .enumerate()
+        .filter_map(|(i, hit)| {
+            let area = (hit.bbox.2 - hit.bbox.0) * (hit.bbox.3 - hit.bbox.1);
+            if area > 0.9 {
+                return None;
+            }
+            // Portrait convention, not full containment: headroom
+            // plus both sides must clear the edge; the bottom may
+            // crop (half-body portraits cut at the legs routinely).
+            // Skin-path margins stay stricter (it can't see heads).
+            let worst = hit.bbox.0.min(hit.bbox.1).min(1.0 - hit.bbox.2);
+            if worst < 0.03 {
+                log.push(format!(
+                    "skipped edge-cropped box {:?} ({:.3} margin)",
+                    hit.bbox, worst
+                ));
+                return None;
+            }
+            if looks_like_person_name(&hit.plate.provenance.author) {
+                log.push(format!(
+                    "skipped name-titled plate: {:?}",
+                    hit.plate.provenance.author
+                ));
+                return None;
+            }
+            Some((i, area))
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    if let Some((oi_idx, _)) = ranked.first() {
+        let hit = &oi_plates[*oi_idx];
+        log.push(format!(
+            "path: openimages box {} by {}",
+            hit.label, hit.plate.provenance.author
+        ));
+        let (bg_plates, bg_refused) = super::plates::source_plates_web("landscape", 1).await;
+        for r in &bg_refused {
+            log.push(format!("backdrop refused: {}", r));
+        }
+        let bg_ref = bg_plates.first().and_then(|bg| {
+            (bg.provenance.source_url != hit.plate.provenance.source_url)
+                .then_some((&bg.image, bg.provenance.page_url.as_str()))
+        });
+        match super::compose::compose_known_box(
+            &hit.plate.image,
+            hit.bbox,
+            &hit.label,
+            "imagine-openimages",
+            bg_ref,
+            width,
+            height,
+        ) {
+            Ok((img, clog)) => {
+                for op in &clog.ops {
+                    log.push(format!("compose: {}", op));
+                }
+                log.push(format!(
+                    "subject: box {:?} on {}",
+                    clog.subject_bbox, clog.background
+                ));
+                return Ok((img, log));
+            }
+            Err(e) => log.push(format!("openimages box refused ({}); web path", e)),
+        }
+    }
     let study = study_references(&plates);
     for n in &study.notes {
         log.push(format!("study: {}", n));
@@ -385,70 +449,23 @@ pub async fn imagine(prose: &str, width: u32, height: u32) -> (Image, Vec<String
     if let Some(f) = study.subject_fill {
         log.push(format!("study: fill {:.2}", f));
     }
-    // Photo first: a complete photographic subject beats any
-    // procedural figure — people pixels come from photographs.
-    // A sourced backdrop makes it a new photo, not a reframe: a
-    // person and a place that never met. Procedural builds only
-    // when no plate qualifies (logged either way).
-    if let Some(idx) = pick_subject(&plates) {
-        log.push(format!("path: photographic (plate {})", idx));
-        let plate = &plates[idx];
-        // Backdrop search: a place, not a person. First decodable
-        // plate from a different source wins; the subject's own page
-        // would just rebuild the original photo.
-        let mut backdrop: Option<(&Image, String)> = None;
-        let (bg_plates, bg_refused) = super::plates::source_plates_web("landscape", 2).await;
-        for r in &bg_refused {
-            log.push(format!("backdrop refused: {}", r));
-        }
-        for bg in &bg_plates {
-            if bg.provenance.source_url != plate.provenance.source_url {
-                backdrop = Some((&bg.image, bg.provenance.page_url.clone()));
-                log.push(format!("backdrop: {}", bg.provenance.page_url));
-                break;
-            }
-        }
-        let backdrop_label = backdrop
-            .as_ref()
-            .map(|(_, u)| u.clone())
-            .unwrap_or_else(|| "studio gradient".to_string());
-        let backdrop_ref = backdrop.as_ref().map(|(img, u)| (*img, u.as_str()));
-        match super::compose::compose_portrait_on(
-            &plate.image,
-            "imagine",
-            backdrop_ref,
-            width,
-            height,
-        ) {
-            Ok((img, clog)) => {
-                for op in &clog.ops {
-                    log.push(format!("compose: {}", op));
-                }
-                log.push(format!(
-                    "subject: bbox {:?}, {:.3} of frame on {}",
-                    clog.subject_bbox, clog.subject_fraction, backdrop_label
-                ));
-                return (img, log);
-            }
-            Err(e) => log.push(format!("photo path refused ({}); procedural fallback", e)),
-        }
-    } else {
-        log.push("path: procedural (no complete photographic subject)".to_string());
+    // Backdrop search: a place, not a person.
+    let (bg_plates, bg_refused) = super::plates::source_plates_web("landscape", 2).await;
+    for r in &bg_refused {
+        log.push(format!("backdrop refused: {}", r));
     }
-    let (scene_obj, mut build_log) = build_fresh(&brief, &study, width, height);
-    log.append(&mut build_log);
-    let (mut img, receipt) = scene::render(&scene_obj);
-    let person_px: u64 = receipt
-        .iter()
-        .filter(|(n, _)| n.starts_with("person-"))
-        .map(|(_, c)| c)
-        .sum();
-    log.push(format!("render: {} person pixels", person_px));
-    img.grade(1.12, 6.0);
-    img.vignette(0.30);
-    img.grain(0xC10C, 5);
-    log.push("finish: grade/vignette/seeded grain".to_string());
-    (img, log)
+    // Photo-only: without a complete photographic subject the
+    // command refuses instead of meshing a block figure.
+    match imagine_from_plates(&brief, &plates, &bg_plates, width, height) {
+        Ok((img, mut chain)) => {
+            log.append(&mut chain);
+            Ok((img, log))
+        }
+        Err(e) => {
+            log.push(format!("refused: {}", e));
+            Err(log)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -474,21 +491,22 @@ mod tests {
 
     #[test]
     fn brief_parses_plain_words() {
+        // Poses are query words now, not geometry: they shape research.
         let b = parse_brief("man holding peace sign");
         assert_eq!(b.subject, SubjectKind::Man);
-        assert_eq!(b.pose, ArmPose::PeaceRight);
+        assert_eq!(b.pose, "peace sign");
         assert!(b.props.is_empty());
         let b = parse_brief("woman with roses");
         assert_eq!(b.subject, SubjectKind::Woman);
-        assert_eq!(b.pose, ArmPose::Down);
+        assert_eq!(b.pose, "standing");
         assert_eq!(b.props, vec![PropKind::Roses]);
         let b = parse_brief("person waving");
-        assert_eq!(
-            (b.subject, b.pose),
-            (SubjectKind::Person, ArmPose::WaveRight)
-        );
+        assert_eq!(b.pose, "waving");
         let b = parse_brief("do the thing");
-        assert_eq!((b.subject, b.pose), (SubjectKind::Person, ArmPose::Down));
+        assert_eq!(
+            (b.subject, b.pose.as_str()),
+            (SubjectKind::Person, "standing")
+        );
     }
 
     #[test]
@@ -511,28 +529,29 @@ mod tests {
     }
 
     #[test]
-    fn build_uses_measured_skin() {
-        // Color in → color out through measurement: the learning step
-        // is real, not decorative.
-        let plates = vec![reference_plate(
-            Rgb::new(150, 100, 70),
-            Rgb::new(60, 80, 120),
-        )];
-        let study = study_references(&plates);
-        assert_eq!(study.plates_used, 1);
-        let brief = parse_brief("man standing");
-        let (scene_obj, _) = build_fresh(&brief, &study, 160, 120);
-        let head = scene_obj
-            .shapes
-            .iter()
-            .find_map(|s| match s {
-                Shape::Sphere { center: _, mat, .. } if mat.name == "person-head" => {
-                    Some(mat.color)
-                }
-                _ => None,
-            })
-            .expect("head built");
-        assert_eq!(head, Rgb::new(150, 100, 70));
+    fn from_plates_composes_or_refuses() {
+        // With a subject plate and a backdrop plate: a new photo.
+        let mut subject = Image::blank(120, 160, Rgb::new(60, 80, 120));
+        subject.draw_rect(35, 40, 50, 70, Rgb::new(200, 150, 115));
+        let bg = Image::blank(200, 150, Rgb::new(40, 120, 60));
+        let mk = |img: Image| SourcedPlate {
+            image: img,
+            provenance: PlateProvenance {
+                source_url: "s".to_string(),
+                page_url: "s".to_string(),
+                author: "t".to_string(),
+                license: "t".to_string(),
+            },
+            basis: "t".to_string(),
+        };
+        let brief = parse_brief("person standing");
+        let (img, log) =
+            imagine_from_plates(&brief, &[mk(subject)], &[mk(bg)], 64, 80).expect("composes");
+        assert_eq!((img.width, img.height), (64, 80));
+        assert!(log.iter().any(|l| l.contains("photographic")), "{:?}", log);
+        // With no plates at all: honest refusal, never a mesh.
+        let err = imagine_from_plates(&brief, &[], &[], 64, 80).expect_err("must refuse");
+        assert!(err.contains("photograph"), "{:?}", err);
     }
 
     #[test]
@@ -592,20 +611,24 @@ mod tests {
     }
 
     #[test]
-    fn fallback_builds_with_defaults_logged() {
+    fn name_titles_skip_but_credits_pass() {
+        assert!(looks_like_person_name("lifrita lifi,Christina Hendricks 3"));
+        assert!(!looks_like_person_name("Bob Park,ADP-AHA Golf 012"));
+        assert!(!looks_like_person_name("Aaron Shikler"));
+        assert!(!looks_like_person_name("John Smith"));
+        assert!(!looks_like_person_name("beach portrait sunset"));
+        assert!(!looks_like_person_name(""));
+    }
+
+    #[test]
+    fn empty_study_falls_back_logged() {
         let study = study_references(&[]);
         assert_eq!(study.plates_used, 0);
         assert!(study.skin.is_none());
-        let brief = parse_brief("person standing");
-        let (scene_obj, log) = build_fresh(&brief, &study, 160, 120);
-        assert!(log.iter().any(|l| l.contains("default")), "{:?}", log);
-        let (img, receipt) = scene::render(&scene_obj);
-        assert_eq!((img.width, img.height), (160, 120));
-        let person_px: u64 = receipt
-            .iter()
-            .filter(|(n, _)| n.starts_with("person-"))
-            .map(|(_, c)| *c)
-            .sum();
-        assert!(person_px > 100, "{:?}", receipt);
+        assert!(
+            study.notes.iter().any(|n| n.contains("defaults")),
+            "{:?}",
+            study.notes
+        );
     }
 }

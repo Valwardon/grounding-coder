@@ -211,16 +211,144 @@ pub fn compose_portrait_on(
     let (area, parts, cx, cy) = (subj.area, subj.parts, subj.cx, subj.cy + cell_y0 as f64);
     let frame_area = (pw * ph) as f64;
     let fraction = area as f64 / frame_area;
+    let discovery = vec![
+        format!(
+            "collage check: {} seam(s), composing from cell {} ({})",
+            seams.len(),
+            cell_idx,
+            cell_notes.join("; ")
+        ),
+        format!("skin_mask Cb[77,127] Cr[133,173] Y>40 on {}x{}", pw, ph),
+        "morph_open x2 then morph_close x2".to_string(),
+        format!(
+            "assembled subject: area={} centroid=({:.0},{:.0}) parts={}",
+            area, cx, cy, parts
+        ),
+    ];
+    let (img, clog) = finish_from_frame(
+        plate,
+        (x0, y0, x1, y1),
+        (0, cell_y0, pw - 1, cell_y1),
+        source,
+        discovery,
+        fraction,
+        backdrop_plate,
+        out_w,
+        out_h,
+    )?;
+    Ok((img, clog))
+}
 
-    // Frame: expand the bbox, clamp to the winning cell (never bleed
-    // into the neighboring photo), crop, fit to 88% of output height
+/// Compose from a known box (Open Images ground truth): no discovery
+/// run, no gates to tune — the dataset states where the person
+/// stands. The box is sanity-checked (sane fraction, inside frame),
+/// then takes the identical finish path: frame, fit, feather, grade,
+/// shadow, grain. Same photo discipline, minus the guesswork.
+pub fn compose_known_box(
+    plate: &Image,
+    bbox: (f64, f64, f64, f64),
+    label: &str,
+    source: &str,
+    backdrop_plate: Option<(&Image, &str)>,
+    out_w: u32,
+    out_h: u32,
+) -> Result<(Image, ComposeLog), String> {
+    let (pw, ph) = (plate.width, plate.height);
+    if pw < 16 || ph < 16 {
+        return Err("plate too small to frame".to_string());
+    }
+    let x0 = (bbox.0 * pw as f64).clamp(0.0, pw as f64 - 1.0) as u32;
+    let y0 = (bbox.1 * ph as f64).clamp(0.0, ph as f64 - 1.0) as u32;
+    let x1 = (bbox.2 * pw as f64).clamp(0.0, pw as f64 - 1.0) as u32;
+    let y1 = (bbox.3 * ph as f64).clamp(0.0, ph as f64 - 1.0) as u32;
+    if x1 <= x0 || y1 <= y0 {
+        return Err("degenerate box — refusing".to_string());
+    }
+    let fraction = ((x1 - x0 + 1) * (y1 - y0 + 1)) as f64 / (pw * ph) as f64;
+    if !(0.001..=0.9).contains(&fraction) {
+        return Err(format!(
+            "box implausible ({:.3} of frame) — refusing",
+            fraction
+        ));
+    }
+    let discovery = vec![format!(
+        "Open Images box {} at ({:.2},{:.02},{:.2},{:.2})",
+        label, bbox.0, bbox.1, bbox.2, bbox.3
+    )];
+    finish_from_frame_margin(
+        plate,
+        (x0, y0, x1, y1),
+        (0, 0, pw - 1, ph - 1),
+        source,
+        discovery,
+        fraction,
+        backdrop_plate,
+        out_w,
+        out_h,
+        0.25,
+    )
+}
+
+/// Shared finish: frame with margin inside a clamp region, keep-aspect
+/// fit, feathered composite, luma match, contact shadow, grain,
+/// vignette. Discovery paths differ; finishing never does.
+#[allow(clippy::too_many_arguments)]
+fn finish_from_frame(
+    plate: &Image,
+    subj: (u32, u32, u32, u32),
+    clamp_box: (u32, u32, u32, u32),
+    source: &str,
+    ops: Vec<String>,
+    fraction: f64,
+    backdrop_plate: Option<(&Image, &str)>,
+    out_w: u32,
+    out_h: u32,
+) -> Result<(Image, ComposeLog), String> {
+    finish_from_frame_margin(
+        plate,
+        subj,
+        clamp_box,
+        source,
+        ops,
+        fraction,
+        backdrop_plate,
+        out_w,
+        out_h,
+        0.6,
+    )
+}
+
+/// Shared finish with an explicit margin fraction: discovery paths
+/// use 0.6 (skin blobs understate bodies); known boxes arrive
+/// complete and take 0.25.
+#[allow(clippy::too_many_arguments)]
+fn finish_from_frame_margin(
+    plate: &Image,
+    subj: (u32, u32, u32, u32),
+    clamp_box: (u32, u32, u32, u32),
+    source: &str,
+    mut ops: Vec<String>,
+    fraction: f64,
+    backdrop_plate: Option<(&Image, &str)>,
+    out_w: u32,
+    out_h: u32,
+    margin: f64,
+) -> Result<(Image, ComposeLog), String> {
+    let (pw, ph) = (plate.width, plate.height);
+    let (x0, y0, x1, y1) = subj;
+    let (cx0, cy0, cx1, cy1) = clamp_box;
+    // Frame: expand the bbox, clamp to the region (never bleed into
+    // a neighboring photo), crop, fit to 88% of output height
     // preserving aspect.
-    let mx = ((x1 - x0) as f64 * 0.6) as u32;
-    let my = ((y1 - y0) as f64 * 0.6) as u32;
-    let fx0 = x0.saturating_sub(mx);
-    let fy0 = y0.saturating_sub(my).max(cell_y0);
-    let fx1 = (x1 + mx).min(pw - 1);
-    let fy1 = (y1 + my).min(cell_y1);
+    let mx = ((x1 - x0) as f64 * margin) as u32;
+    let my = ((y1 - y0) as f64 * margin) as u32;
+    let fx0 = x0.saturating_sub(mx).max(cx0);
+    let fy0 = y0.saturating_sub(my).max(cy0);
+    let fx1 = (x1 + mx).min(cx1).min(pw - 1);
+    let fy1 = (y1 + my).min(cy1).min(ph - 1);
+    if fx1 <= fx0 || fy1 <= fy0 {
+        return Err("frame collapsed — refusing".to_string());
+    }
     let crop = plate.crop(fx0, fy0, fx1 - fx0 + 1, fy1 - fy0 + 1);
     // Fit inside (out_w, 88% out_h) preserving aspect: clamping width
     // without rescaling height stretches faces — the test caught a
@@ -277,38 +405,25 @@ pub fn compose_portrait_on(
     out.grain(0xC0FFEE, 4);
     out.vignette(0.22);
 
+    ops.push(format!(
+        "frame bbox ({},{})-({},{}) with 60% margin",
+        fx0, fy0, fx1, fy1
+    ));
+    ops.push(format!(
+        "fit {}x{} keep-aspect → {}x{} at ({},{})",
+        crop.width, crop.height, subject.width, subject.height, ox, oy
+    ));
+    ops.push(format!(
+        "feather r{}, luma lift {:+.1}, contact shadow, grain(0xC0FFEE,4), vignette(0.22)",
+        feather_r, lift
+    ));
     let log = ComposeLog {
         source: source.to_string(),
         subject_bbox: (fx0, fy0, fx1, fy1),
         pasted: (ox, oy, subject.width, subject.height),
         subject_fraction: fraction,
         background: background_note,
-        ops: vec![
-            format!(
-                "collage check: {} seam(s), composing from cell {} ({})",
-                seams.len(),
-                cell_idx,
-                cell_notes.join("; ")
-            ),
-            format!("skin_mask Cb[77,127] Cr[133,173] Y>40 on {}x{}", pw, ph),
-            "morph_open x2 then morph_close x2".to_string(),
-            format!(
-                "assembled subject: area={} centroid=({:.0},{:.0}) parts={}",
-                area, cx, cy, parts
-            ),
-            format!(
-                "frame bbox ({},{})-({},{}) with 60% margin",
-                fx0, fy0, fx1, fy1
-            ),
-            format!(
-                "fit {}x{} keep-aspect → {}x{} at ({},{})",
-                crop.width, crop.height, subject.width, subject.height, ox, oy
-            ),
-            format!(
-                "feather r{}, luma lift {:+.1}, contact shadow, grain(0xC0FFEE,4), vignette(0.22)",
-                feather_r, lift
-            ),
-        ],
+        ops,
     };
     Ok((out, log))
 }
@@ -402,6 +517,30 @@ mod tests {
             "{}",
             log.subject_fraction
         );
+    }
+
+    #[test]
+    fn known_box_skips_discovery() {
+        // Ground-truth box: no segmentation run, no gates to tune.
+        // Subject rect on blue, composed over green.
+        let plate = Image::blank(120, 160, Rgb::new(60, 80, 120));
+        let bg = Image::blank(200, 150, Rgb::new(40, 120, 60));
+        let (img, log) = compose_known_box(
+            &plate,
+            (0.25, 0.25, 0.75, 0.75),
+            "/m/03bt1vf",
+            "test",
+            Some((&bg, "bg-test")),
+            64,
+            80,
+        )
+        .expect("known box composes");
+        assert_eq!((img.width, img.height), (64, 80));
+        assert!(log.background.contains("bg-test"), "{:?}", log.background);
+        assert!(log.ops[0].contains("/m/03bt1vf"), "{:?}", log.ops);
+        // Degenerate and insane boxes refuse.
+        assert!(compose_known_box(&plate, (0.5, 0.5, 0.5, 0.5), "x", "t", None, 64, 80).is_err());
+        assert!(compose_known_box(&plate, (0.0, 0.0, 1.0, 1.0), "x", "t", None, 64, 80).is_err());
     }
 
     #[test]

@@ -9,3 +9,6 @@ android/build/
 android/app/build/
 android/local.properties
 android/.kotlin/
+# Runtime state: knowledge stores, rank logs, plate metadata caches.
+# Curated manifests under samples/plates stay tracked.
+.grounding/

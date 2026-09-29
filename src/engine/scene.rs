@@ -274,33 +274,6 @@ fn intersect(shape: &Shape, origin: Vec3, dir: Vec3) -> Option<Hit> {
     }
 }
 
-/// A person, decomposed: head sphere, torso box, arm boxes, leg
-/// boxes. Feet at `base.y`, facing +z. All materials named
-/// `person-*` so edits and receipts can address the person as one.
-pub fn person(base: Vec3, scale: f64, skin: Rgb, clothes: Rgb) -> Vec<Shape> {
-    let s = scale;
-    let skin_m = Material::named("person-skin", skin);
-    let cloth_m = Material::named("person-clothes", clothes);
-    let pants_m = Material::named("person-pants", Rgb::new(40, 40, 48));
-    let bx = |dx: f64, w: f64, y0: f64, y1: f64, mat: Material| Shape::Box {
-        min: Vec3::new(base.x + dx - w / 2.0, base.y + y0, base.z - w / 2.0),
-        max: Vec3::new(base.x + dx + w / 2.0, base.y + y1, base.z + w / 2.0),
-        mat,
-    };
-    vec![
-        bx(-0.12 * s, 0.15 * s, 0.0, 0.8 * s, pants_m.clone()),
-        bx(0.12 * s, 0.15 * s, 0.0, 0.8 * s, pants_m),
-        bx(0.0, 0.5 * s, 0.8 * s, 1.5 * s, cloth_m.clone()),
-        bx(-0.36 * s, 0.13 * s, 0.8 * s, 1.45 * s, cloth_m.clone()),
-        bx(0.36 * s, 0.13 * s, 0.8 * s, 1.45 * s, cloth_m),
-        Shape::Sphere {
-            center: Vec3::new(base.x, base.y + 1.68 * s, base.z),
-            radius: 0.16 * s,
-            mat: skin_m,
-        },
-    ]
-}
-
 /// The studied canon: adult body proportions as fractions of
 /// standing height, after the 7.5-heads artistic canon (head ≈ 1/7.5
 /// of stature, arm span ≈ stature). These are claims with sources
@@ -357,250 +330,6 @@ pub const ANATOMY_SOURCES: &[&str] = &[
     "https://en.wikipedia.org/wiki/Body_proportions",
     "https://en.wikipedia.org/wiki/Human_body",
 ];
-
-/// One individual: looks plus posture. Distinct specs are distinct
-/// people — the group photo proves it with three of them.
-#[derive(Debug, Clone)]
-pub struct PersonSpec {
-    pub skin: Rgb,
-    pub hair: Rgb,
-    pub shirt: Rgb,
-    pub pants: Rgb,
-    pub pose: ArmPose,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ArmPose {
-    Down,
-    Out,
-    WaveLeft,
-    WaveRight,
-    PeaceLeft,
-    PeaceRight,
-}
-
-impl ArmPose {
-    fn raised_side(self, side: f64) -> bool {
-        (matches!(self, ArmPose::WaveLeft | ArmPose::PeaceLeft) && side < 0.0)
-            || (matches!(self, ArmPose::WaveRight | ArmPose::PeaceRight) && side > 0.0)
-    }
-
-    /// Peace sign: index + middle extended, ring + pinky curled —
-    /// on the raised hand only. The other hand stays relaxed and
-    /// open; a two-handed peace sign is a different request.
-    /// Finger slot k runs inner→outer on right hands, mirrored left.
-    fn finger_extended(self, side: f64, k: i32) -> bool {
-        let peace =
-            matches!(self, ArmPose::PeaceLeft | ArmPose::PeaceRight) && self.raised_side(side);
-        if !peace {
-            return true;
-        }
-        if side > 0.0 { k >= 2 } else { k < 2 }
-    }
-}
-
-/// Shoulder pivot and hand target for one arm: single source of
-/// truth shared by the builder and prop placement (bouquets meet
-/// hands exactly, not approximately).
-pub fn arm_endpoints(
-    base: Vec3,
-    scale: f64,
-    spec: &PersonSpec,
-    plan: &BodyPlan,
-    side: f64,
-) -> (Vec3, Vec3) {
-    let h = 1.8 * scale;
-    let y = |f: f64| base.y + f * h;
-    let shoulder = Vec3::new(
-        base.x + side * plan.shoulder_half * h,
-        y(plan.shoulder_y),
-        base.z,
-    );
-    let hand = if spec.pose.raised_side(side) {
-        Vec3::new(
-            base.x + side * (plan.shoulder_half + 0.10) * h,
-            y(plan.shoulder_y) + 0.28 * h,
-            base.z + 0.05 * h,
-        )
-    } else {
-        match spec.pose {
-            ArmPose::Out => Vec3::new(
-                base.x + side * (plan.shoulder_half + plan.arm_len) * h,
-                y(plan.shoulder_y),
-                base.z,
-            ),
-            _ => Vec3::new(
-                base.x + side * (plan.shoulder_half + 0.02) * h,
-                y(plan.hip_y) + 0.05 * h,
-                base.z,
-            ),
-        }
-    };
-    (shoulder, hand)
-}
-
-/// A person built from the studied plan, not from magic numbers.
-/// Faces +z: head sphere, inset eyes, nose bump, mouth bar, hair cap
-/// offset up-back so the face reads. Capsule limbs posed by
-/// [`ArmPose`]; hands are skin spheres at the wrist ends. Materials:
-/// person-head/hand (skin, kept separate so head measurements exclude
-/// waving hands), person-eyes/mouth/hair, person-clothes/pants.
-pub fn person_plan(base: Vec3, scale: f64, spec: &PersonSpec, plan: &BodyPlan) -> Vec<Shape> {
-    let h = 1.8 * scale;
-    let y = |f: f64| base.y + f * h;
-    let head_h = plan.head_h * h;
-    let head_c = Vec3::new(base.x, y(1.0) - head_h * 0.5, base.z);
-    let head_r = head_h * 0.51;
-    let skin_head = Material::named("person-head", spec.skin);
-    let skin_hand = Material::named("person-hand", spec.skin);
-    let cloth_m = Material::named("person-clothes", spec.shirt);
-    let pants_m = Material::named("person-pants", spec.pants);
-    let hair_m = Material::named("person-hair", spec.hair);
-    let eye_m = Material::named("person-eyes", Rgb::new(22, 20, 24));
-    let mouth_m = Material::named("person-mouth", Rgb::new(130, 70, 60));
-
-    let mut out = vec![
-        // Legs: hip capsules to near-ground, feet boxes on the plane.
-        Shape::Capsule {
-            a: Vec3::new(base.x - plan.hip_half * h, y(plan.hip_y), base.z),
-            b: Vec3::new(base.x - plan.hip_half * h, y(0.03), base.z),
-            radius: plan.leg_r * h,
-            mat: pants_m.clone(),
-        },
-        Shape::Capsule {
-            a: Vec3::new(base.x + plan.hip_half * h, y(plan.hip_y), base.z),
-            b: Vec3::new(base.x + plan.hip_half * h, y(0.03), base.z),
-            radius: plan.leg_r * h,
-            mat: pants_m.clone(),
-        },
-        // Torso box, hip to shoulder.
-        Shape::Box {
-            min: Vec3::new(
-                base.x - plan.torso_half * h,
-                y(plan.hip_y),
-                base.z - plan.torso_half * h * 0.6,
-            ),
-            max: Vec3::new(
-                base.x + plan.torso_half * h,
-                y(plan.shoulder_y),
-                base.z + plan.torso_half * h * 0.6,
-            ),
-            mat: cloth_m.clone(),
-        },
-    ];
-    for side in [-1.0, 1.0] {
-        let fx = base.x + side * plan.hip_half * h;
-        out.push(Shape::Box {
-            min: Vec3::new(fx - 0.05 * h, y(0.0), base.z - 0.02 * h),
-            max: Vec3::new(fx + 0.05 * h, y(0.055), base.z + 0.09 * h),
-            mat: pants_m.clone(),
-        });
-    }
-    // Arms: endpoints from the shared helper so props meet hands
-    // exactly. Fingers fan across the knuckles; peace poses extend
-    // index+middle and curl ring+pinky into short stubs.
-    for side in [-1.0, 1.0] {
-        let (shoulder, hand) = arm_endpoints(base, scale, spec, plan, side);
-        out.push(Shape::Capsule {
-            a: shoulder,
-            b: hand,
-            radius: plan.arm_r * h,
-            mat: cloth_m.clone(),
-        });
-        out.push(Shape::Sphere {
-            center: hand,
-            radius: plan.arm_r * h * 1.25,
-            mat: skin_hand.clone(),
-        });
-        // Fingers from the anatomy graph: four continuing the arm
-        // line, fanned across the knuckles; thumb angled out-forward.
-        // Fingertips (not wrists) set the measured span.
-        let fdir = hand.sub(shoulder).norm();
-        for k in 0..4 {
-            let kx = hand.x + (k as f64 - 1.5) * 0.018 * h;
-            let start = Vec3::new(kx, hand.y, hand.z + 0.005 * h).add(fdir.scale(0.012 * h));
-            let len = if spec.pose.finger_extended(side, k) {
-                plan.finger_len * h
-            } else {
-                // Curled: foreshortened stub folding into the palm.
-                plan.finger_len * h * 0.35
-            };
-            out.push(Shape::Capsule {
-                a: start,
-                b: start.add(fdir.scale(len)),
-                radius: plan.arm_r * h * 0.5,
-                mat: skin_hand.clone(),
-            });
-        }
-        let outer = if shoulder.x < base.x { -1.0 } else { 1.0 };
-        let peace = matches!(spec.pose, ArmPose::PeaceLeft | ArmPose::PeaceRight);
-        let tdir = if peace {
-            // Thumb folds across the curled fingers to hold the sign.
-            fdir.scale(0.4)
-                .add(Vec3::new(-outer * 0.45, 0.0, 0.15))
-                .norm()
-        } else {
-            fdir.scale(0.7)
-                .add(Vec3::new(outer * 0.5, 0.0, 0.35))
-                .norm()
-        };
-        out.push(Shape::Capsule {
-            a: hand,
-            b: hand.add(tdir.scale(plan.thumb_len * h)),
-            radius: plan.arm_r * h * 0.55,
-            mat: skin_hand.clone(),
-        });
-    }
-    // Head plus face, all in head units off the crown.
-    out.push(Shape::Sphere {
-        center: head_c,
-        radius: head_r,
-        mat: skin_head.clone(),
-    });
-    for side in [-1.0, 1.0] {
-        out.push(Shape::Sphere {
-            center: Vec3::new(
-                head_c.x + side * 0.18 * head_h,
-                head_c.y + 0.06 * head_h,
-                head_c.z + 0.44 * head_h,
-            ),
-            radius: 0.085 * head_h,
-            mat: eye_m.clone(),
-        });
-    }
-    out.push(Shape::Box {
-        min: Vec3::new(
-            head_c.x - 0.07 * head_h,
-            head_c.y - 0.12 * head_h,
-            head_c.z + 0.42 * head_h,
-        ),
-        max: Vec3::new(
-            head_c.x + 0.07 * head_h,
-            head_c.y - 0.02 * head_h,
-            head_c.z + 0.50 * head_h,
-        ),
-        mat: skin_head.clone(),
-    });
-    out.push(Shape::Box {
-        min: Vec3::new(
-            head_c.x - 0.17 * head_h,
-            head_c.y - 0.28 * head_h,
-            head_c.z + 0.40 * head_h,
-        ),
-        max: Vec3::new(
-            head_c.x + 0.17 * head_h,
-            head_c.y - 0.20 * head_h,
-            head_c.z + 0.46 * head_h,
-        ),
-        mat: mouth_m,
-    });
-    out.push(Shape::Sphere {
-        center: Vec3::new(head_c.x, head_c.y + 0.22 * head_h, head_c.z - 0.20 * head_h),
-        radius: head_h * 0.55,
-        mat: hair_m,
-    });
-    out
-}
 
 /// One rose: stem capsule, two leaves, bloom of center + petal
 /// ring. Materials rose-stem/leaf/bloom, all receipt-addressable.
@@ -791,111 +520,16 @@ impl Scene {
     }
 }
 
-/// Portrait variant: one studied individual, camera in close —
-/// head and torso fill the frame. Sample photos of people.
-pub fn portrait_scene(width: u32, height: u32) -> Scene {
-    let plan = BodyPlan::canon();
-    let spec = PersonSpec {
-        skin: Rgb::new(200, 150, 115),
-        hair: Rgb::new(60, 38, 24),
-        shirt: Rgb::new(60, 110, 200),
-        pants: Rgb::new(42, 42, 50),
-        pose: ArmPose::Down,
-    };
-    let mut shapes = vec![Shape::Plane {
-        y: 0.0,
-        mat: Material::named("ground", Rgb::new(86, 148, 86)),
-    }];
-    shapes.extend(person_plan(Vec3::new(-1.2, 0.0, 0.0), 1.0, &spec, &plan));
-    let mut scene = demo_scene(width, height);
-    scene.shapes = shapes;
-    scene.camera = Camera {
-        pos: Vec3::new(-1.2, 1.55, 2.4),
-        look_at: Vec3::new(-1.2, 1.15, 0.0),
-        fov_deg: 42.0,
-        width,
-        height,
-    };
-    scene
-}
-
-/// Group photo: three distinct individuals (looks and postures all
-/// differ), three-point lighting, no tower — people are the subject.
-pub fn group_scene(width: u32, height: u32) -> Scene {
-    let plan = BodyPlan::canon();
-    let people = [
-        (
-            Vec3::new(-2.0, 0.0, 0.0),
-            PersonSpec {
-                skin: Rgb::new(150, 100, 70),
-                hair: Rgb::new(25, 20, 18),
-                shirt: Rgb::new(170, 60, 55),
-                pants: Rgb::new(45, 45, 55),
-                pose: ArmPose::Down,
-            },
-        ),
-        (
-            Vec3::new(0.0, 0.0, 0.3),
-            PersonSpec {
-                skin: Rgb::new(232, 190, 150),
-                hair: Rgb::new(110, 65, 35),
-                shirt: Rgb::new(45, 140, 140),
-                pants: Rgb::new(40, 40, 48),
-                pose: ArmPose::WaveLeft,
-            },
-        ),
-        (
-            Vec3::new(2.0, 0.0, 0.0),
-            PersonSpec {
-                skin: Rgb::new(200, 150, 115),
-                hair: Rgb::new(190, 190, 195),
-                shirt: Rgb::new(200, 170, 60),
-                pants: Rgb::new(50, 50, 60),
-                pose: ArmPose::Down,
-            },
-        ),
-    ];
-    let mut shapes = vec![Shape::Plane {
-        y: 0.0,
-        mat: Material::named("ground", Rgb::new(88, 146, 88)),
-    }];
-    for (base, spec) in &people {
-        shapes.extend(person_plan(*base, 1.0, spec, &plan));
-    }
-    Scene {
-        camera: Camera {
-            pos: Vec3::new(0.0, 1.9, 6.6),
-            look_at: Vec3::new(0.0, 1.1, -0.3),
-            fov_deg: 58.0,
-            width,
-            height,
-        },
-        lights: vec![
-            Light::key(Vec3::new(-0.45, 0.8, 0.35)),
-            Light::fill(Vec3::new(0.6, 0.25, 0.7), 0.30),
-            Light::fill(Vec3::new(0.3, 0.4, -0.8), 0.25),
-        ],
-        ambient: 0.35,
-        sky_top: Rgb::new(110, 170, 235),
-        sky_bottom: Rgb::new(215, 235, 250),
-        shapes,
-    }
-}
-
-/// The demo: a person, a tower behind them, ground, sky, one light.
+/// The demo: a tower on open ground under one light. People are
+/// researched and composited, never procedurally meshed — the
+/// renderer builds worlds, not bodies.
 pub fn demo_scene(width: u32, height: u32) -> Scene {
     let mut shapes = vec![Shape::Plane {
         y: 0.0,
         mat: Material::named("ground", Rgb::new(86, 148, 86)),
     }];
-    shapes.extend(person(
-        Vec3::new(-1.2, 0.0, 0.0),
-        1.0,
-        Rgb::new(232, 190, 150),
-        Rgb::new(60, 110, 200),
-    ));
     shapes.extend(tower(
-        Vec3::new(1.8, 0.0, -2.5),
+        Vec3::new(0.6, 0.0, -2.5),
         1.1,
         3.2,
         Rgb::new(150, 150, 158),
@@ -908,10 +542,6 @@ pub fn demo_scene(width: u32, height: u32) -> Scene {
             width,
             height,
         },
-        // Light from behind-left: tower shadows fall away from the
-        // person, so adding the tower never repaints them.
-        // Single key light — pixel-identical to the old single-dir
-        // math, so the frozen demo tests keep passing.
         lights: vec![Light::key(Vec3::new(-0.45, 0.8, 0.35))],
         ambient: 0.35,
         sky_top: Rgb::new(110, 170, 235),
@@ -1036,212 +666,11 @@ pub fn render_labels(scene: &Scene) -> (Image, Vec<usize>, Vec<String>) {
     render_core(scene)
 }
 
-/// What the study measured on its own render.
-#[derive(Debug, Clone)]
-pub struct AnatomyReport {
-    /// Head height / stature (canon ≈ 1/7.5 ≈ 0.133).
-    pub head_ratio: f64,
-    /// Arm span / stature, Out pose (canon ≈ 1.0).
-    pub span_ratio: f64,
-    /// Eye separation / head width (canon ≈ 0.35).
-    pub eye_ratio: f64,
-    pub passed: bool,
-    /// The evidence string: measurements plus sources.
-    pub evidence: String,
-}
-
-fn label_id(table: &[String], name: &str) -> Option<usize> {
-    table.iter().position(|n| n == name)
-}
-
-fn bbox_of(labels: &[usize], width: u32, id: usize) -> Option<(u32, u32, u32, u32)> {
-    let mut found = false;
-    let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
-    for (i, l) in labels.iter().enumerate() {
-        if *l != id {
-            continue;
-        }
-        found = true;
-        let x = (i as u32) % width;
-        let y = (i as u32) / width;
-        x0 = x0.min(x);
-        y0 = y0.min(y);
-        x1 = x1.max(x);
-        y1 = y1.max(y);
-    }
-    found.then_some((x0, y0, x1, y1))
-}
-
-/// The curiosity loop studying anatomy: build a figure from the
-/// canon, photograph it, measure the photo. A frontal Out-pose
-/// figure at close range keeps perspective distortion small and
-/// pixels many. Tolerances are pixel-quantization honest (±1px on a
-/// ~170px figure ≈ ±0.01, doubled for safety).
-pub fn study_anatomy() -> AnatomyReport {
-    let plan = BodyPlan::canon();
-    let spec = PersonSpec {
-        skin: Rgb::new(200, 150, 115),
-        hair: Rgb::new(60, 38, 24),
-        shirt: Rgb::new(70, 120, 190),
-        pants: Rgb::new(45, 45, 55),
-        pose: ArmPose::Out,
-    };
-    let mut shapes = vec![Shape::Plane {
-        y: 0.0,
-        mat: Material::named("ground", Rgb::new(86, 148, 86)),
-    }];
-    shapes.extend(person_plan(Vec3::new(0.0, 0.0, 0.0), 1.0, &spec, &plan));
-    let scene = Scene {
-        camera: Camera {
-            pos: Vec3::new(0.0, 1.0, 3.5),
-            look_at: Vec3::new(0.0, 0.9, 0.0),
-            fov_deg: 40.0,
-            width: 320,
-            height: 240,
-        },
-        lights: vec![Light::key(Vec3::new(-0.45, 0.8, 0.35))],
-        ambient: 0.35,
-        sky_top: Rgb::new(110, 170, 235),
-        sky_bottom: Rgb::new(215, 235, 250),
-        shapes,
-    };
-    let (_, labels, table) = render_labels(&scene);
-    let person_ids: Vec<usize> = table
-        .iter()
-        .enumerate()
-        .filter(|(_, n)| n.starts_with("person-"))
-        .map(|(i, _)| i)
-        .collect();
-    let mut person_pixels: Vec<usize> = labels.clone();
-    for p in person_pixels.iter_mut() {
-        if !person_ids.contains(p) {
-            *p = usize::MAX;
-        }
-    }
-    let head_ratio = match label_id(&table, "person-head").and_then(|id| bbox_of(&labels, 320, id))
-    {
-        Some((_, hy0, _, hy1)) => {
-            let person_h = person_height(&person_pixels, 320);
-            (hy1 - hy0 + 1) as f64 / person_h
-        }
-        None => -1.0,
-    };
-    let span_ratio = {
-        let person_w = person_width(&person_pixels, 320);
-        let person_h = person_height(&person_pixels, 320);
-        person_w / person_h
-    };
-    // Eyes center-to-center over head width: bbox edges would add
-    // the eyeball diameters to the separation, measuring the wrong
-    // thing. Split the eye mask at the head center and average halves.
-    let eye_ratio = match (
-        label_id(&table, "person-eyes"),
-        label_id(&table, "person-head").and_then(|id| bbox_of(&labels, 320, id)),
-    ) {
-        (Some(eye_id), Some((hx0, _, hx1, _))) => {
-            let mid = (hx0 + hx1) as f64 / 2.0;
-            let (mut l_sum, mut l_n, mut r_sum, mut r_n) = (0.0, 0u32, 0.0, 0u32);
-            for (i, l) in labels.iter().enumerate() {
-                if *l != eye_id {
-                    continue;
-                }
-                let x = ((i as u32) % 320) as f64;
-                if x < mid {
-                    l_sum += x;
-                    l_n += 1;
-                } else {
-                    r_sum += x;
-                    r_n += 1;
-                }
-            }
-            if l_n == 0 || r_n == 0 {
-                -1.0
-            } else {
-                (r_sum / r_n as f64 - l_sum / l_n as f64) / (hx1 - hx0 + 1) as f64
-            }
-        }
-        _ => -1.0,
-    };
-    let passed = (head_ratio - 0.133).abs() <= 0.025
-        && (span_ratio - 1.0).abs() <= 0.07
-        && (eye_ratio - 0.35).abs() <= 0.10;
-    AnatomyReport {
-        head_ratio,
-        span_ratio,
-        eye_ratio,
-        passed,
-        evidence: format!(
-            "anatomy study: head/stature={:.3} (canon 0.133), span/stature={:.3} (canon 1.0), eyes/head={:.3} (canon 0.35); sources: {}",
-            head_ratio,
-            span_ratio,
-            eye_ratio,
-            ANATOMY_SOURCES.join(", ")
-        ),
-    }
-}
-
-fn person_height(masked: &[usize], width: u32) -> f64 {
-    let mut y0 = u32::MAX;
-    let mut y1 = 0;
-    for (i, l) in masked.iter().enumerate() {
-        if *l == usize::MAX {
-            continue;
-        }
-        let y = (i as u32) / width;
-        y0 = y0.min(y);
-        y1 = y1.max(y);
-    }
-    if y1 < y0 { 1.0 } else { (y1 - y0 + 1) as f64 }
-}
-
-fn person_width(masked: &[usize], width: u32) -> f64 {
-    let mut x0 = u32::MAX;
-    let mut x1 = 0;
-    for (i, l) in masked.iter().enumerate() {
-        if *l == usize::MAX {
-            continue;
-        }
-        let x = (i as u32) % width;
-        x0 = x0.min(x);
-        x1 = x1.max(x);
-    }
-    if x1 < x0 { 1.0 } else { (x1 - x0 + 1) as f64 }
-}
-
-/// File the study in the knowledge store: a passing study becomes
-/// Verified knowledge with the measurements as evidence; anything
-/// else stays unpromoted with the numbers recorded.
-pub fn record_anatomy(store: &mut super::knowledge::KnowledgeStore, report: &AnatomyReport) {
-    use super::knowledge::{KnowledgeItem, KnowledgeState, Provenance, VerificationTier};
-    // insert() keeps the first item it sees: the first study files,
-    // later studies are re-verifications (out of scope in v1).
-    let mut item = KnowledgeItem::new(
-        "human-proportions",
-        if report.passed {
-            KnowledgeState::Verified
-        } else {
-            KnowledgeState::Evidence
-        },
-        "anatomy study of rendered figure",
-    );
-    item.provenance = Provenance {
-        source: "anatomy study of rendered figure".to_string(),
-        experiment: Some("render canon-built figure, measure masks".to_string()),
-        verification: if report.passed {
-            Some(report.evidence.clone())
-        } else {
-            None
-        },
-        rejection: None,
-        tier: if report.passed {
-            VerificationTier::Measured
-        } else {
-            VerificationTier::Sourced
-        },
-    };
-    store.insert(item);
-}
-
+/// REMOVED: the render-measure study built figures from the canon
+/// and measured its own renders (self-consistency, not validation).
+/// Canon bodies are gone; people come from researched photographs.
+/// The measurement machinery (render_labels, masks) stays for
+/// measuring real plates — that validation is future work.
 /// The research half of the anatomy curiosity: look up the published
 /// canon on verified sources. The returned summary seeds the store's
 /// provenance; the study verifies the geometry. Needs the network —
@@ -1271,15 +700,16 @@ mod tests {
 
     #[test]
     fn demo_renders_every_layer() {
+        // Tower demo: sky, ground, tower. People come from
+        // photographs, never from meshes — no person-* materials here.
         let (img, receipt) = render(&small_demo());
         assert_eq!((img.width, img.height), (160, 120));
         assert!(receipt_count(&receipt, "sky") > 1000, "{:?}", receipt);
         assert!(receipt_count(&receipt, "ground") > 1000, "{:?}", receipt);
         assert!(receipt_count(&receipt, "tower") > 50, "{:?}", receipt);
-        assert!(receipt_count(&receipt, "person-skin") > 5, "{:?}", receipt);
         assert!(
-            receipt_count(&receipt, "person-clothes") > 20,
-            "{:?}",
+            receipt.iter().all(|(n, _)| !n.starts_with("person-")),
+            "no procedural people: {:?}",
             receipt
         );
         // Not blank: sky and ground dominate different regions.
@@ -1304,61 +734,26 @@ mod tests {
         assert_eq!(removed, 2, "tower is shaft plus cap");
         let (before, r_before) = render(&scene);
         assert_eq!(receipt_count(&r_before, "tower"), 0);
-        let person_before = receipt_count(&r_before, "person-clothes")
-            + receipt_count(&r_before, "person-skin")
-            + receipt_count(&r_before, "person-pants");
 
         scene.shapes.extend(tower(
-            Vec3::new(1.8, 0.0, -2.5),
+            Vec3::new(0.6, 0.0, -2.5),
             1.1,
             3.2,
             Rgb::new(150, 150, 158),
         ));
         let (after, r_after) = render(&scene);
         assert!(receipt_count(&r_after, "tower") > 50, "{:?}", r_after);
-        let person_after = receipt_count(&r_after, "person-clothes")
-            + receipt_count(&r_after, "person-skin")
-            + receipt_count(&r_after, "person-pants");
-        // The light placement guarantees this: tower shadows fall away.
-        assert_eq!(person_before, person_after, "person untouched by the edit");
+        // The tower occludes whatever stood behind it — sky, ground,
+        // or both — and adds nothing else.
+        let bg_before = receipt_count(&r_before, "ground") + receipt_count(&r_before, "sky");
+        let bg_after = receipt_count(&r_after, "ground") + receipt_count(&r_after, "sky");
+        assert!(bg_after < bg_before, "tower must cover background");
         // And the tower visibly differs from sky where it stands.
         assert_ne!(
-            before.get(110, 40),
-            after.get(110, 40),
+            before.get(80, 40),
+            after.get(80, 40),
             "tower region must change"
         );
-    }
-
-    #[test]
-    fn person_head_rides_above_torso() {
-        let (_, receipt) = render(&small_demo());
-        assert!(receipt_count(&receipt, "person-skin") > 0);
-        assert!(receipt_count(&receipt, "person-clothes") > 0);
-        // Structural check at the source: head center above torso top.
-        let shapes = person(
-            Vec3::new(0.0, 0.0, 0.0),
-            1.0,
-            Rgb::new(1, 1, 1),
-            Rgb::new(2, 2, 2),
-        );
-        let head_y = shapes.iter().find_map(|s| match s {
-            Shape::Sphere { center, mat, .. } if mat.name == "person-skin" => Some(center.y),
-            _ => None,
-        });
-        assert!(head_y.is_some_and(|y| y > 1.5), "head above torso");
-    }
-
-    fn plan_spec() -> (PersonSpec, BodyPlan) {
-        (
-            PersonSpec {
-                skin: Rgb::new(200, 150, 115),
-                hair: Rgb::new(60, 38, 24),
-                shirt: Rgb::new(70, 120, 190),
-                pants: Rgb::new(45, 45, 55),
-                pose: ArmPose::Down,
-            },
-            BodyPlan::canon(),
-        )
     }
 
     #[test]
@@ -1398,40 +793,6 @@ mod tests {
     }
 
     #[test]
-    fn plan_person_has_a_face() {
-        let (spec, plan) = plan_spec();
-        let mut shapes = vec![Shape::Plane {
-            y: 0.0,
-            mat: Material::named("ground", Rgb::new(86, 148, 86)),
-        }];
-        shapes.extend(person_plan(Vec3::new(0.0, 0.0, 2.0), 1.0, &spec, &plan));
-        let scene = Scene {
-            camera: Camera {
-                pos: Vec3::new(0.0, 1.2, 4.5),
-                look_at: Vec3::new(0.0, 1.0, 2.0),
-                fov_deg: 40.0,
-                width: 160,
-                height: 120,
-            },
-            lights: vec![Light::key(Vec3::new(-0.4, 0.8, 0.4))],
-            ambient: 0.4,
-            sky_top: Rgb::new(100, 100, 200),
-            sky_bottom: Rgb::new(200, 200, 220),
-            shapes,
-        };
-        let (_, receipt) = render(&scene);
-        for name in [
-            "person-head",
-            "person-hair",
-            "person-eyes",
-            "person-mouth",
-            "person-hand",
-        ] {
-            assert!(receipt_count(&receipt, name) > 0, "{:?}", receipt);
-        }
-    }
-
-    #[test]
     fn labels_agree_with_receipt() {
         let scene = small_demo();
         let (_, receipt) = render(&scene);
@@ -1446,130 +807,15 @@ mod tests {
         }
     }
 
-    #[test]
-    fn study_measures_the_canon() {
-        let report = study_anatomy();
-        assert!(
-            report.passed,
-            "canon-built figure must measure canon: head={:.3} span={:.3} eyes={:.3}",
-            report.head_ratio, report.span_ratio, report.eye_ratio
-        );
-        assert!(
-            report.evidence.contains("Body_proportions"),
-            "{}",
-            report.evidence
-        );
-    }
-
-    #[test]
-    fn record_files_verified_knowledge() {
-        use super::super::knowledge::{KnowledgeState, KnowledgeStore};
-        let dir = std::env::temp_dir().join(format!("gc-anat-{}", unique_test_id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut store = KnowledgeStore::open(&dir);
-        let report = study_anatomy();
-        assert!(report.passed);
-        record_anatomy(&mut store, &report);
-        let item = store.get("human-proportions").expect("filed");
-        assert_eq!(item.state, KnowledgeState::Verified);
-        assert_eq!(
-            item.provenance.tier,
-            super::super::knowledge::VerificationTier::Measured,
-            "render measurement is measured, not merely sourced"
-        );
-        assert!(
-            item.provenance
-                .verification
-                .as_ref()
-                .is_some_and(|v| v.contains("head/stature"))
-        );
-        // A failing study files Evidence, never Verified.
-        let mut bad = report.clone();
-        bad.passed = false;
-        let dir2 = std::env::temp_dir().join(format!("gc-anat-bad-{}", unique_test_id()));
-        std::fs::create_dir_all(&dir2).unwrap();
-        let mut store2 = KnowledgeStore::open(&dir2);
-        record_anatomy(&mut store2, &bad);
-        assert_eq!(
-            store2.get("human-proportions").map(|i| i.state),
-            Some(KnowledgeState::Evidence)
-        );
-    }
-
-    #[test]
-    fn group_photo_shows_three_people() {
-        // Faces need pixels: at 160x120 the eyes go sub-pixel, so the
-        // group proves itself at 320x240 (still a fraction of a second).
-        let (_, receipt) = render(&group_scene(320, 240));
-        // Shared materials, but three bodies worth of pixels: hair and
-        // hands scale with headcount, and the waving hand reads.
-        assert!(receipt_count(&receipt, "person-hair") > 60, "{:?}", receipt);
-        assert!(receipt_count(&receipt, "person-hand") > 40, "{:?}", receipt);
-        assert!(receipt_count(&receipt, "person-eyes") > 5, "{:?}", receipt);
-        assert_eq!(
-            receipt_count(&receipt, "tower"),
-            0,
-            "people are the subject"
-        );
-    }
-
-    fn finger_lengths(spec: &PersonSpec) -> (usize, usize) {
-        let plan = BodyPlan::canon();
-        let shapes = person_plan(Vec3::new(0.0, 0.0, 0.0), 1.0, spec, &plan);
-        let expected_full = plan.finger_len * 1.8;
-        let mut full = 0;
-        let mut stub = 0;
-        for s in &shapes {
-            if let Shape::Capsule { a, b, mat, .. } = s
-                && mat.name == "person-hand"
-            {
-                let len = (b.sub(*a)).len();
-                if (len - expected_full).abs() < 0.01 {
-                    full += 1;
-                } else if (len - expected_full * 0.35).abs() < 0.01 {
-                    stub += 1;
-                }
-            }
-        }
-        (full, stub)
-    }
-
-    #[test]
-    fn peace_sign_extends_two_curls_two() {
-        let down = PersonSpec {
-            skin: Rgb::new(200, 150, 115),
-            hair: Rgb::new(60, 38, 24),
-            shirt: Rgb::new(70, 120, 190),
-            pants: Rgb::new(45, 45, 55),
-            pose: ArmPose::Down,
-        };
-        assert_eq!(finger_lengths(&down), (8, 0));
-        let peace = PersonSpec {
-            pose: ArmPose::PeaceRight,
-            ..down.clone()
-        };
-        // Left hand open (4) + right hand peace (2 ext + 2 stub).
-        // Thumb capsules are thicker and excluded by the length check.
-        assert_eq!(finger_lengths(&peace), (6, 2));
-        // The peace hand rides raised, like a wave.
-        let plan = BodyPlan::canon();
-        let (_, r_hand) = arm_endpoints(Vec3::new(0.0, 0.0, 0.0), 1.0, &peace, &plan, 1.0);
-        let (_, d_hand) = arm_endpoints(Vec3::new(0.0, 0.0, 0.0), 1.0, &down, &plan, 1.0);
-        assert!(r_hand.y > d_hand.y + 0.3, "peace hand raised");
-    }
+    // REMOVED with the canon bodies: study_anatomy measured renders
+    // of procedural figures (self-consistency). Real validation —
+    // measuring researched plates against the canon — is future work,
+    // with the measurement machinery (render_labels) kept for it.
 
     #[test]
     fn bouquet_meets_the_hand() {
-        let plan = BodyPlan::canon();
-        let spec = PersonSpec {
-            skin: Rgb::new(200, 150, 115),
-            hair: Rgb::new(60, 38, 24),
-            shirt: Rgb::new(70, 120, 190),
-            pants: Rgb::new(45, 45, 55),
-            pose: ArmPose::Down,
-        };
-        let base = Vec3::new(0.0, 0.0, 0.0);
-        let (_, hand) = arm_endpoints(base, 1.0, &spec, &plan, 1.0);
+        // Hand position is explicit now (no arm builder to ask).
+        let hand = Vec3::new(0.3, 0.9, 0.1);
         let flowers = bouquet(hand, 1.0, &[Rgb::new(200, 40, 60)]);
         // Blooms above the hand, stems through it, leaves present.
         let blooms = flowers
@@ -1627,12 +873,5 @@ mod tests {
                 .unwrap_or(0);
             assert!(count > 5, "{} missing: {:?}", name, receipt);
         }
-    }
-
-    fn unique_test_id() -> u128 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("time")
-            .as_nanos()
     }
 }

@@ -426,3 +426,208 @@ mod tests {
         assert!(near.iter().any(|n| n == "hand"), "{:?}", near);
     }
 }
+
+/// How a joint moves: hinge (one axis) or ball (two axes), with range
+/// of motion in degrees. Ranges follow standard goniometry
+/// (AAOS): shoulder flexion 0–180, elbow 0–145, wrist 0–70/80,
+/// hip 0–120, knee 0–135, neck rotation ±80. Sources cited per
+/// joint; the validator below is only as honest as these numbers.
+#[derive(Debug, Clone)]
+pub struct JointMotion {
+    pub joint: String,
+    pub kind: String,
+    /// (min, max) degrees per axis, primary axis first.
+    pub rom: Vec<(f64, f64)>,
+    pub source: String,
+}
+
+/// Range-of-motion table: the executable half of "how the body
+/// moves". Poses validate against it instead of imagination.
+pub fn joint_table() -> Vec<JointMotion> {
+    let src = "AAOS goniometry via https://en.wikipedia.org/wiki/Range_of_motion";
+    vec![
+        JointMotion {
+            joint: "shoulder".to_string(),
+            kind: "ball".to_string(),
+            rom: vec![(0.0, 180.0), (-90.0, 90.0)],
+            source: src.to_string(),
+        },
+        JointMotion {
+            joint: "elbow".to_string(),
+            kind: "hinge".to_string(),
+            rom: vec![(0.0, 145.0)],
+            source: src.to_string(),
+        },
+        JointMotion {
+            joint: "wrist".to_string(),
+            kind: "ellipsoid".to_string(),
+            rom: vec![(0.0, 70.0), (0.0, 80.0)],
+            source: src.to_string(),
+        },
+        JointMotion {
+            joint: "hip".to_string(),
+            kind: "ball".to_string(),
+            rom: vec![(0.0, 120.0), (-45.0, 45.0)],
+            source: src.to_string(),
+        },
+        JointMotion {
+            joint: "knee".to_string(),
+            kind: "hinge".to_string(),
+            rom: vec![(0.0, 135.0)],
+            source: src.to_string(),
+        },
+        JointMotion {
+            joint: "ankle".to_string(),
+            kind: "hinge".to_string(),
+            rom: vec![(-20.0, 50.0)],
+            source: src.to_string(),
+        },
+        JointMotion {
+            joint: "neck".to_string(),
+            kind: "pivot".to_string(),
+            rom: vec![(-80.0, 80.0), (-45.0, 45.0)],
+            source: src.to_string(),
+        },
+        JointMotion {
+            joint: "finger-mcp".to_string(),
+            kind: "hinge".to_string(),
+            rom: vec![(0.0, 90.0)],
+            source: src.to_string(),
+        },
+        JointMotion {
+            joint: "finger-pip".to_string(),
+            kind: "hinge".to_string(),
+            rom: vec![(0.0, 100.0)],
+            source: src.to_string(),
+        },
+    ]
+}
+
+/// Is this joint angle anatomically possible? Unknown joints refuse
+/// (no data is not a yes); out-of-range refuses with the range.
+/// Pure, total, tested.
+pub fn validate_pose(joint: &str, angles: &[f64]) -> Result<(), String> {
+    let table = joint_table();
+    let entry = table
+        .iter()
+        .find(|j| j.joint == joint)
+        .ok_or_else(|| format!("{:?}: no range data — refusing, not guessing", joint))?;
+    if angles.len() != entry.rom.len() {
+        return Err(format!(
+            "{:?}: expects {} axes, got {}",
+            joint,
+            entry.rom.len(),
+            angles.len()
+        ));
+    }
+    for ((lo, hi), a) in entry.rom.iter().zip(angles.iter()) {
+        if *a < *lo || *a > *hi {
+            return Err(format!(
+                "{:?}: {:.1}° outside [{:.0}, {:.0}] — impossible pose",
+                joint, a, lo, hi
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// How hair behaves: length classes with fall direction under
+/// gravity and shoulder interaction. Qualitative, sourced, and
+/// stated as such — v1 records what references say, not physics
+/// simulation. Source: hairstyling/anatomy references via
+/// https://en.wikipedia.org/wiki/Human_hair.
+#[derive(Debug, Clone)]
+pub struct HairNote {
+    pub length: String,
+    pub falls: String,
+    pub moves: String,
+}
+
+pub fn hair_notes() -> Vec<HairNote> {
+    vec![
+        HairNote {
+            length: "short (above jaw)".to_string(),
+            falls: "outward from the scalp, clears the shoulders".to_string(),
+            moves: "swings as one mass with head turns".to_string(),
+        },
+        HairNote {
+            length: "medium (jaw to shoulder)".to_string(),
+            falls: "down past the jaw, tips brush the shoulders".to_string(),
+            moves: "tips catch and slide on shoulder tops".to_string(),
+        },
+        HairNote {
+            length: "long (past shoulder)".to_string(),
+            falls: "down the back and chest, parts around the neck".to_string(),
+            moves: "lags head motion, swings with momentum".to_string(),
+        },
+    ]
+}
+
+/// Physique variation, kept to sourced neutral anthropometry: adult
+/// stature ranges and the note that the 7.5-heads canon is an
+/// artistic idealization, with real bodies varying around it.
+/// Source: https://en.wikipedia.org/wiki/Human_body
+/// and https://en.wikipedia.org/wiki/Body_proportions.
+#[derive(Debug, Clone)]
+pub struct PhysiqueNote {
+    pub topic: String,
+    pub note: String,
+    pub source: String,
+}
+
+pub fn physique_notes() -> Vec<PhysiqueNote> {
+    vec![
+        PhysiqueNote {
+            topic: "stature".to_string(),
+            note: "adult stature varies widely by population; the canon scales to the individual, never the reverse".to_string(),
+            source: "https://en.wikipedia.org/wiki/Human_body".to_string(),
+        },
+        PhysiqueNote {
+            topic: "canon limits".to_string(),
+            note: "the 7.5-heads canon is an artistic idealization; measured bodies vary joint by joint".to_string(),
+            source: "https://en.wikipedia.org/wiki/Body_proportions".to_string(),
+        },
+        PhysiqueNote {
+            topic: "bilateral symmetry".to_string(),
+            note: "paired structures mirror within small natural asymmetry; large asymmetry flags pathology or pose".to_string(),
+            source: "Gray's Anatomy (Bartleby public-domain edition)".to_string(),
+        },
+    ]
+}
+
+#[cfg(test)]
+mod movement_tests {
+    use super::*;
+
+    #[test]
+    fn rom_accepts_possible_rejects_impossible() {
+        assert!(validate_pose("elbow", &[90.0]).is_ok());
+        assert!(validate_pose("elbow", &[0.0]).is_ok());
+        assert!(validate_pose("elbow", &[145.0]).is_ok());
+        assert!(validate_pose("elbow", &[200.0]).is_err());
+        assert!(validate_pose("elbow", &[-10.0]).is_err());
+        // Wrong axis count refuses (elbow is single-hinge).
+        assert!(validate_pose("elbow", &[90.0, 10.0]).is_err());
+        // Unknown joints refuse — no data is not a yes.
+        assert!(validate_pose("tentacle", &[10.0]).is_err());
+        // Ball joints take two axes.
+        assert!(validate_pose("shoulder", &[170.0, 20.0]).is_ok());
+        assert!(validate_pose("shoulder", &[190.0, 0.0]).is_err());
+        // Fingers: peace sign needs ~0° at MCP, full curl ~90°.
+        assert!(validate_pose("finger-mcp", &[5.0]).is_ok());
+        assert!(validate_pose("finger-mcp", &[90.0]).is_ok());
+    }
+
+    #[test]
+    fn joints_cover_both_sides_of_the_body() {
+        // Symmetric limbs share entries: one table, both sides.
+        let table = joint_table();
+        for want in ["shoulder", "elbow", "wrist", "hip", "knee", "ankle", "neck"] {
+            assert!(table.iter().any(|j| j.joint == want), "missing {}", want);
+        }
+        // Every entry carries its source.
+        assert!(table.iter().all(|j| !j.source.is_empty()));
+        assert_eq!(hair_notes().len(), 3);
+        assert!(physique_notes().iter().all(|p| !p.source.is_empty()));
+    }
+}

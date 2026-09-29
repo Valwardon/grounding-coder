@@ -33,7 +33,8 @@ enum Commands {
     },
     /// Show recipes in the error-correction log
     Recipes,
-    /// Render the demo scene (person, tower, ground, sky) to a BMP photo
+    /// Render the demo scene (tower, ground, sky) to a BMP photo.
+    /// People come from researched photographs, never from meshes.
     Render {
         /// Output file path
         #[arg(short, long, default_value = "photo.bmp")]
@@ -44,12 +45,6 @@ enum Commands {
         /// Frame height in pixels
         #[arg(long, default_value_t = 240)]
         height: u32,
-        /// Portrait framing: camera in close on the person
-        #[arg(long)]
-        closeup: bool,
-        /// Group framing: three studied individuals, three-point light
-        #[arg(long)]
-        group: bool,
     },
     /// Source photographic plates: search Commons, require complete
     /// provenance, fetch and decode. Refusals print with reasons.
@@ -62,7 +57,8 @@ enum Commands {
         /// Directory for BMP files plus a provenance manifest
         #[arg(short, long, default_value = "plates")]
         out: String,
-        /// Where to search: commons (curated metadata) or web (image search)
+        /// Where to search: commons (curated metadata), web (image
+        /// search), or openimages (CC people boxes, adult-filtered)
         #[arg(long, default_value = "commons")]
         source: String,
         /// Downscale longer edge past this many pixels (repo stays lean)
@@ -178,31 +174,11 @@ fn main() {
                     println!("  {}", recipe);
                 }
             }
-            Commands::Render {
-                out,
-                width,
-                height,
-                closeup,
-                group,
-            } => {
+            Commands::Render { out, width, height } => {
                 use grounding_coder::engine::{scene, vision::Image};
                 let width = width.clamp(16, 1920);
                 let height = height.clamp(16, 1920);
-                let people = closeup || group;
-                let (mut img, receipt) = scene::render(&if group {
-                    scene::group_scene(width, height)
-                } else if closeup {
-                    scene::portrait_scene(width, height)
-                } else {
-                    scene::demo_scene(width, height)
-                });
-                // Photo finish on people: grade, vignette, seeded grain.
-                // Deterministic — same flags twice, byte-identical file.
-                if people {
-                    img.grade(1.12, 6.0);
-                    img.vignette(0.30);
-                    img.grain(0xC10C, 5);
-                }
+                let (img, receipt) = scene::render(&scene::demo_scene(width, height));
                 let path = std::path::Path::new(&out);
                 match img.save_bmp(path) {
                     Ok(()) => {
@@ -242,6 +218,82 @@ fn main() {
                 if std::fs::create_dir_all(dir).is_err() {
                     eprintln!("PLATE FAILED: cannot create {}", out);
                     std::process::exit(1);
+                }
+                if source == "openimages" {
+                    use grounding_coder::engine::plates::openimages;
+                    let cache = dir.join(".oicache");
+                    let (found, refused) =
+                        openimages::search_openimages(&cache, &query, limit).await;
+                    for r in &refused {
+                        println!("refused: {}", r);
+                    }
+                    let mut manifest = Vec::new();
+                    for (i, hit) in found.iter().enumerate() {
+                        let file = format!("plate-{:02}.bmp", i);
+                        let path = dir.join(&file);
+                        // Same max_dim discipline as the other sources:
+                        // full-res originals bloat the repo for no gain.
+                        let img = {
+                            let longest = hit.plate.image.width.max(hit.plate.image.height);
+                            if longest > max_dim.max(16) {
+                                let cap = max_dim.max(16);
+                                if hit.plate.image.width >= hit.plate.image.height {
+                                    hit.plate.image.resize_smooth(
+                                        cap,
+                                        hit.plate.image.height * cap / hit.plate.image.width,
+                                    )
+                                } else {
+                                    hit.plate.image.resize_smooth(
+                                        hit.plate.image.width * cap / hit.plate.image.height,
+                                        cap,
+                                    )
+                                }
+                            } else {
+                                hit.plate.image.clone()
+                            }
+                        };
+                        match img.save_bmp(&path) {
+                            Ok(()) => {
+                                println!(
+                                    "plate: {} ({}x{}, box {:?}, {}, {})",
+                                    file,
+                                    img.width,
+                                    img.height,
+                                    hit.bbox,
+                                    hit.plate.provenance.author,
+                                    hit.plate.provenance.license
+                                );
+                                manifest.push(serde_json::json!({
+                                    "file": file,
+                                    "source_url": hit.plate.provenance.source_url,
+                                    "page_url": hit.plate.provenance.page_url,
+                                    "author": hit.plate.provenance.author,
+                                    "license": hit.plate.provenance.license,
+                                    "basis": hit.plate.basis,
+                                    "bbox": hit.bbox,
+                                    "label": hit.label,
+                                }));
+                            }
+                            Err(e) => println!("refused: {}: {}", file, e),
+                        }
+                    }
+                    let manifest_path = dir.join("provenance.json");
+                    if std::fs::write(
+                        &manifest_path,
+                        serde_json::to_string_pretty(&manifest).unwrap_or_default(),
+                    )
+                    .is_err()
+                    {
+                        eprintln!("PLATE FAILED: cannot write manifest");
+                        std::process::exit(1);
+                    }
+                    println!(
+                        "plates: {} ingested, {} refused — manifest at {}",
+                        manifest.len(),
+                        refused.len(),
+                        manifest_path.display()
+                    );
+                    return;
                 }
                 let (sourced, refused) = if source == "web" {
                     plates::source_plates_web(&query, limit).await
@@ -360,16 +412,26 @@ fn main() {
                 height,
             } => {
                 use grounding_coder::engine::imagine;
-                let (img, log) =
-                    imagine::imagine(&prompt, width.clamp(16, 1920), height.clamp(16, 1920)).await;
-                for line in &log {
-                    println!("imagine: {}", line);
-                }
-                match img.save_bmp(std::path::Path::new(&out)) {
-                    Ok(()) => println!("imagined {} ({}x{})", out, img.width, img.height),
-                    Err(e) => {
-                        eprintln!("IMAGINE FAILED: {}", e);
-                        std::process::exit(1);
+                match imagine::imagine(&prompt, width.clamp(16, 1920), height.clamp(16, 1920)).await
+                {
+                    Ok((img, log)) => {
+                        for line in &log {
+                            println!("imagine: {}", line);
+                        }
+                        match img.save_bmp(std::path::Path::new(&out)) {
+                            Ok(()) => println!("imagined {} ({}x{})", out, img.width, img.height),
+                            Err(e) => {
+                                eprintln!("IMAGINE FAILED: {}", e);
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                    Err(log) => {
+                        for line in &log {
+                            println!("imagine: {}", line);
+                        }
+                        eprintln!("IMAGINE REFUSED: no complete photographic subject");
+                        std::process::exit(2);
                     }
                 }
             }
