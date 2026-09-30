@@ -249,7 +249,7 @@ Oracle verify (compiler / tests / parser per language)
 
 ## Proof, Not Promises
 
-267 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
+283 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
 `fmt --check` clean:
 
 | Suite | Tests | What it proves |
@@ -259,6 +259,7 @@ Oracle verify (compiler / tests / parser per language)
 | `messy_intent` | 10 | kind synonyms (webpage→page), plurals, typo'd kinds with verbatim names, verb inflections, visual verbs (imagine→create), material relations (macaroni-hat research plan), glossary, destructive-still-blocks |
 | `photo_gate` | 6 | visual-prose routing (imagine/render/draw→create Ask), genome-waver human pixels, demo-world receipt + sky/ground pixel samples, byte-identical re-renders; photos commit under `samples/` |
 | `scene_intent` | 11 | scene-requirements IR (subjects/actions/objects/materials/unresolved/confidence), per-requirement research queries, honest capability verdicts (pose/cloth missing, procedural humans deleted); macaroni binds as material, bare waving stays ambiguous |
+| `phase1_human` | 12 | articulated skeleton (spec tree, FK, ROM-validated standing/sitting/walking/salute/wave/point/raise, impossible refusal), coarse measurement aggregation with 20-example gate, fine-joints honestly unavailable; measurement diagram commits under `samples/` |
 | `knowledge_loop` | 3 | budget-bounded offline dreaming with persistence, sleep when nothing open, failures deprioritize without deleting |
 | `learning_experiment` | 2 | dreaming arm rediscovers family patterns (rate 0.55) vs amnesiac baseline (0.00); both arms solve every task |
 | `build` | 6 | C/Java/Rust real builds + artifacts run; unknown targets block; dx-output APK discovery |

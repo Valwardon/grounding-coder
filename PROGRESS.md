@@ -1,5 +1,29 @@
 # Grounding Coder — Progress
 
+## v0.25.4 — Phase 1 human: articulated skeleton + honest measurements (2026-10-01)
+
+- `engine/skeleton.rs`: the spec's joint tree (pelvis→spine→chest→
+  neck→head, arms, legs) with independent per-joint rotation and
+  forward kinematics. Named poses — standing, sitting, walking
+  (phased gait), salute, wave, point, raise — validate every angle
+  against the anatomy ROM table; out-of-range refuses with the range
+  (two gait bugs caught live: negative swings the table rejects).
+  Bone lengths are canon fractions (labeled); feet land on the
+  ground, head tops within 2% of stature, fingertips mid-thigh —
+  all asserted. Rendering means annotated measurement diagrams
+  (`skeleton-measurement-*`), never portraits.
+- `engine/body_measure.rs`: coarse classical measurement from
+  person boxes (thirds-band skin fractions, centroid, median tone).
+  Aggregates to ranges with a 20-example gate — below it the model
+  is `Insufficient`, never verified. Fine joints are unextractable
+  classically: `fine_joints_available()` returns false, pinned by
+  test.
+- `tests/phase1_human.rs`: 12 cases (spec tree, symmetry/stature,
+  man/woman, sitting thighs, gait opposition, salute/wave/point/
+  raise reach, impossible refusal, measurement gate, diagram photo).
+- 283 tests green (171 lib + 112 integration), `cargo check
+  --all-features`, clippy zero warnings, fmt clean.
+
 ## v0.25.3 — Scene-intent IR: research intent, not NLU (2026-09-30)
 
 - `engine/scene_intent.rs`: intent-to-research IR — controlled
