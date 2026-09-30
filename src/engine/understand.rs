@@ -28,23 +28,62 @@ const VERBS: &[(&str, FrameAction)] = &[
     ("make", FrameAction::Build),
     ("compile", FrameAction::Build),
     ("assemble", FrameAction::Build),
+    ("building", FrameAction::Build),
+    ("built", FrameAction::Build),
+    ("made", FrameAction::Build),
+    ("makes", FrameAction::Build),
+    ("making", FrameAction::Build),
     ("create", FrameAction::Create),
     ("add", FrameAction::Create),
     ("new", FrameAction::Create),
     ("generate", FrameAction::Create),
     ("write", FrameAction::Create),
+    ("creating", FrameAction::Create),
+    ("created", FrameAction::Create),
+    ("creates", FrameAction::Create),
+    ("adding", FrameAction::Create),
+    ("added", FrameAction::Create),
+    ("generating", FrameAction::Create),
+    ("generated", FrameAction::Create),
+    ("writing", FrameAction::Create),
+    ("wrote", FrameAction::Create),
+    ("written", FrameAction::Create),
+    ("imagine", FrameAction::Create),
+    ("render", FrameAction::Create),
+    ("compose", FrameAction::Create),
+    ("draw", FrameAction::Create),
+    ("paint", FrameAction::Create),
+    ("show", FrameAction::Create),
     ("fix", FrameAction::Fix),
     ("repair", FrameAction::Fix),
     ("mend", FrameAction::Fix),
     ("correct", FrameAction::Fix),
+    ("fixing", FrameAction::Fix),
+    ("fixed", FrameAction::Fix),
+    ("fixes", FrameAction::Fix),
+    ("repairing", FrameAction::Fix),
+    ("repaired", FrameAction::Fix),
     ("publish", FrameAction::Publish),
     ("upload", FrameAction::Publish),
     ("release", FrameAction::Publish),
     ("share", FrameAction::Publish),
+    ("publishing", FrameAction::Publish),
+    ("published", FrameAction::Publish),
+    ("uploading", FrameAction::Publish),
+    ("uploaded", FrameAction::Publish),
     ("test", FrameAction::Verify),
     ("check", FrameAction::Verify),
     ("verify", FrameAction::Verify),
     ("run", FrameAction::Verify),
+    ("testing", FrameAction::Verify),
+    ("tested", FrameAction::Verify),
+    ("tests", FrameAction::Verify),
+    ("checking", FrameAction::Verify),
+    ("checked", FrameAction::Verify),
+    ("verifying", FrameAction::Verify),
+    ("verified", FrameAction::Verify),
+    ("running", FrameAction::Verify),
+    ("runs", FrameAction::Verify),
 ];
 
 /// Kinds the bot can actually define (structs, pages, configs,
@@ -59,20 +98,40 @@ const DEFINABLE: &[&str] = &[
     "function",
 ];
 
-/// Kind lexicon: surface forms → definition kind.
+/// Kind lexicon: surface forms → definition kind. Hand-curated noun
+/// layer (the deterministic stand-in for a WordNet synset table):
+/// everyday spellings map to the canonical kind the engine can build.
+/// WordNet / Wikidata / Wikipedia stay external research sources —
+/// nothing here claims to be those databases, only auditable rows.
 const KINDS: &[(&str, &str)] = &[
     ("page", "page"),
     ("screen", "page"),
+    ("webpage", "page"),
+    ("website", "page"),
+    ("homepage", "page"),
+    ("site", "page"),
     ("struct", "struct"),
     ("class", "struct"),
+    ("record", "struct"),
+    ("model", "struct"),
     ("config", "config"),
     ("settings", "config"),
+    ("options", "config"),
+    ("preferences", "config"),
     ("component", "component"),
     ("widget", "component"),
+    ("control", "component"),
+    ("element", "component"),
     ("statemachine", "statemachine"),
     ("machine", "statemachine"),
+    ("workflow", "statemachine"),
+    ("fsm", "statemachine"),
     ("function", "function"),
     ("fn", "function"),
+    ("func", "function"),
+    ("method", "function"),
+    ("routine", "function"),
+    ("procedure", "function"),
     ("test", "test"),
     ("repo", "repo"),
     ("repository", "repo"),
@@ -257,7 +316,7 @@ pub fn disposition(confidence: f64, frame: &str, prose: &str) -> Disposition {
             && !STOPWORDS.contains(&w.as_str())
             && fuzzy_verb(w).is_none()
             && !VERBS.iter().any(|(v, _)| v == w)
-            && !KINDS.iter().any(|(k, _)| k == w)
+            && exact_kind(w).is_none()
     });
     if content {
         Disposition::Ask
@@ -462,6 +521,110 @@ fn fuzzy_verb(word: &str) -> Option<FrameAction> {
     best.map(|(_, a)| a)
 }
 
+/// Canonical kind for a surface word: exact match, then a single
+/// trailing-`s` plural strip (`pages` → `page`, `structs` → `struct`).
+/// Deterministic; names never consult this (only kind-slot search).
+fn exact_kind(word: &str) -> Option<&'static str> {
+    if let Some((_, k)) = KINDS.iter().find(|(s, _)| *s == word) {
+        return Some(*k);
+    }
+    if word.len() > 3 && word.ends_with('s') && !word.ends_with("ss") {
+        let singular = &word[..word.len() - 1];
+        if let Some((_, k)) = KINDS.iter().find(|(s, _)| *s == singular) {
+            return Some(*k);
+        }
+    }
+    None
+}
+
+/// Nearest kind within typo tolerance (≤1 for short words, ≤2 above),
+/// returning the canonical kind. Consulted only after exact + plural
+/// matching miss — spelling paths keep priority, and names never
+/// consult kinds (a meaning match is not spelling evidence for a name).
+fn fuzzy_kind(word: &str) -> Option<&'static str> {
+    if exact_kind(word).is_some() {
+        return exact_kind(word);
+    }
+    let max_dist = if word.len() <= 4 { 1 } else { 2 };
+    let mut best: Option<(usize, &'static str)> = None;
+    for (surface, canon) in KINDS {
+        let d = edit_distance(word, surface);
+        if d <= max_dist && best.map(|(bd, _)| d < bd).unwrap_or(true) {
+            best = Some((d, *canon));
+        }
+    }
+    best.map(|(_, k)| k)
+}
+
+/// Seed concept glossary: the deterministic stand-in for lexical +
+/// encyclopedic expansion (WordNet synsets, Wikidata relations,
+/// Wikipedia summaries). Each row is hand-curated and auditable:
+/// word → (broader concept, one-line gloss). Nothing here claims to
+/// be those databases — they stay external research sources consulted
+/// by `ResearchOracle::research_word`, while these rows let the parser
+/// name what it knows and ask precisely about the rest.
+const CONCEPTS: &[(&str, &str, &str)] = &[
+    ("hat", "headwear", "covering for the head"),
+    ("macaroni", "pasta", "tubular wheat food"),
+    ("pasta", "food", "wheat-based food"),
+    ("portrait", "photograph", "likeness of a person"),
+    ("photograph", "image", "light-recorded image"),
+    ("photo", "image", "light-recorded image"),
+    ("tower", "structure", "tall narrow structure"),
+];
+
+/// Broader concept + gloss for a known seed word, if any.
+pub fn expand_concept(word: &str) -> Option<(&'static str, &'static str)> {
+    CONCEPTS
+        .iter()
+        .find(|(w, _, _)| *w == word)
+        .map(|(_, broader, gloss)| (*broader, *gloss))
+}
+
+/// Material-relation grammar (the deterministic stand-in for a
+/// Wikidata `material-used` edge): `made of X`, `made out of X`,
+/// `made from X`, `out of X`, `built from X`, `built of X`.
+/// Returns (base object, material), both lowercase. Base is the last
+/// content word before the marker; material is the first content word
+/// after it. Articles are skipped, nothing is invented.
+pub fn extract_material(prose: &str) -> Option<(String, String)> {
+    let ws = words(prose);
+    let articles = ["a", "an", "the", "some", "any"];
+    // Marker patterns, longest first so `made out of` wins over `out of`.
+    const MARKERS: &[&[&str]] = &[
+        &["made", "out", "of"],
+        &["built", "out", "of"],
+        &["made", "of"],
+        &["made", "from"],
+        &["built", "from"],
+        &["built", "of"],
+        &["constructed", "from"],
+        &["constructed", "of"],
+        &["out", "of"],
+    ];
+    for marker in MARKERS {
+        if let Some(pos) = ws
+            .windows(marker.len())
+            .position(|w| w.iter().zip(marker.iter()).all(|(a, b)| a == *b))
+        {
+            let after = ws
+                .iter()
+                .skip(pos + marker.len())
+                .find(|w| !articles.contains(&w.as_str()) && !STOPWORDS.contains(&w.as_str()));
+            let before = ws[..pos]
+                .iter()
+                .rev()
+                .find(|w| !articles.contains(&w.as_str()) && !STOPWORDS.contains(&w.as_str()));
+            if let (Some(b), Some(m)) = (before, after) {
+                return Some(((*b).clone(), (*m).clone()));
+            } else if let Some(m) = after {
+                return Some((String::new(), (*m).clone()));
+            }
+        }
+    }
+    None
+}
+
 /// PrimitiveVector: meaning as 5 numbers (mass, velocity, spatial,
 /// valence, temporal), after grounded's PrimitiveMatrix. Synonyms
 /// join by coordinates — auditable numbers, not bare table rows.
@@ -484,31 +647,70 @@ pub fn cosine(a: &PrimitiveVector, b: &PrimitiveVector) -> f64 {
 /// the same order. Families cluster by construction intent.
 const VERB_VECTORS: &[PrimitiveVector] = &[
     // build family
-    [0.8, 0.4, 0.4, 0.5, 0.5], // build
-    [0.7, 0.4, 0.3, 0.5, 0.4], // make
-    [0.6, 0.5, 0.2, 0.4, 0.6], // compile
-    [0.7, 0.5, 0.5, 0.5, 0.5], // assemble
+    [0.8, 0.4, 0.4, 0.5, 0.5],      // build
+    [0.7, 0.4, 0.3, 0.5, 0.4],      // make
+    [0.6, 0.5, 0.2, 0.4, 0.6],      // compile
+    [0.7, 0.5, 0.5, 0.5, 0.5],      // assemble
+    [0.75, 0.45, 0.40, 0.45, 0.55], // building
+    [0.70, 0.45, 0.35, 0.45, 0.60], // built
+    [0.68, 0.42, 0.32, 0.48, 0.45], // made
+    [0.69, 0.41, 0.31, 0.49, 0.42], // makes
+    [0.71, 0.43, 0.33, 0.47, 0.48], // making
     // create family
-    [0.9, 0.2, 0.3, 0.6, 0.3], // create
-    [0.7, 0.2, 0.2, 0.5, 0.2], // add
-    [0.8, 0.1, 0.2, 0.5, 0.1], // new
-    [0.9, 0.3, 0.2, 0.6, 0.4], // generate
-    [0.6, 0.4, 0.2, 0.5, 0.4], // write
+    [0.9, 0.2, 0.3, 0.6, 0.3],      // create
+    [0.7, 0.2, 0.2, 0.5, 0.2],      // add
+    [0.8, 0.1, 0.2, 0.5, 0.1],      // new
+    [0.9, 0.3, 0.2, 0.6, 0.4],      // generate
+    [0.6, 0.4, 0.2, 0.5, 0.4],      // write
+    [0.88, 0.22, 0.28, 0.58, 0.32], // creating
+    [0.86, 0.21, 0.27, 0.57, 0.33], // created
+    [0.87, 0.23, 0.26, 0.56, 0.31], // creates
+    [0.72, 0.21, 0.21, 0.51, 0.22], // adding
+    [0.71, 0.20, 0.20, 0.50, 0.23], // added
+    [0.89, 0.29, 0.21, 0.59, 0.39], // generating
+    [0.88, 0.28, 0.20, 0.58, 0.40], // generated
+    [0.62, 0.39, 0.21, 0.51, 0.39], // writing
+    [0.61, 0.38, 0.20, 0.50, 0.38], // wrote
+    [0.60, 0.37, 0.20, 0.49, 0.39], // written
+    [0.82, 0.28, 0.28, 0.56, 0.34], // imagine
+    [0.78, 0.32, 0.34, 0.54, 0.42], // render
+    [0.76, 0.34, 0.32, 0.53, 0.40], // compose
+    [0.74, 0.30, 0.28, 0.55, 0.36], // draw
+    [0.73, 0.29, 0.27, 0.54, 0.35], // paint
+    [0.70, 0.32, 0.30, 0.52, 0.33], // show
     // fix family
-    [0.3, 0.3, 0.2, 0.4, 0.6], // fix
-    [0.3, 0.3, 0.2, 0.5, 0.6], // repair
-    [0.3, 0.2, 0.2, 0.4, 0.5], // mend
-    [0.2, 0.3, 0.1, 0.4, 0.6], // correct
+    [0.3, 0.3, 0.2, 0.4, 0.6],      // fix
+    [0.3, 0.3, 0.2, 0.5, 0.6],      // repair
+    [0.3, 0.2, 0.2, 0.4, 0.5],      // mend
+    [0.2, 0.3, 0.1, 0.4, 0.6],      // correct
+    [0.29, 0.29, 0.19, 0.41, 0.59], // fixing
+    [0.28, 0.28, 0.18, 0.40, 0.60], // fixed
+    [0.29, 0.30, 0.19, 0.42, 0.58], // fixes
+    [0.30, 0.29, 0.19, 0.49, 0.59], // repairing
+    [0.29, 0.28, 0.18, 0.48, 0.60], // repaired
     // publish family
-    [0.2, 0.7, 0.8, 0.3, 0.4], // publish
-    [0.2, 0.8, 0.9, 0.3, 0.4], // upload
-    [0.3, 0.7, 0.8, 0.4, 0.4], // release
-    [0.2, 0.6, 0.8, 0.5, 0.3], // share
+    [0.2, 0.7, 0.8, 0.3, 0.4],      // publish
+    [0.2, 0.8, 0.9, 0.3, 0.4],      // upload
+    [0.3, 0.7, 0.8, 0.4, 0.4],      // release
+    [0.2, 0.6, 0.8, 0.5, 0.3],      // share
+    [0.21, 0.69, 0.79, 0.31, 0.39], // publishing
+    [0.20, 0.68, 0.78, 0.30, 0.40], // published
+    [0.21, 0.79, 0.89, 0.31, 0.39], // uploading
+    [0.20, 0.78, 0.88, 0.30, 0.40], // uploaded
     // verify family
-    [0.1, 0.5, 0.1, 0.0, 0.5], // test
-    [0.1, 0.4, 0.1, 0.0, 0.5], // check
-    [0.1, 0.4, 0.1, 0.1, 0.5], // verify
-    [0.2, 0.6, 0.3, 0.1, 0.5], // run
+    [0.1, 0.5, 0.1, 0.0, 0.5],      // test
+    [0.1, 0.4, 0.1, 0.0, 0.5],      // check
+    [0.1, 0.4, 0.1, 0.1, 0.5],      // verify
+    [0.2, 0.6, 0.3, 0.1, 0.5],      // run
+    [0.11, 0.49, 0.11, 0.01, 0.51], // testing
+    [0.10, 0.48, 0.10, 0.00, 0.50], // tested
+    [0.11, 0.50, 0.11, 0.01, 0.49], // tests
+    [0.10, 0.41, 0.10, 0.01, 0.51], // checking
+    [0.09, 0.40, 0.09, 0.00, 0.50], // checked
+    [0.10, 0.41, 0.10, 0.10, 0.51], // verifying
+    [0.09, 0.40, 0.09, 0.09, 0.50], // verified
+    [0.19, 0.59, 0.29, 0.10, 0.51], // running
+    [0.20, 0.60, 0.30, 0.11, 0.50], // runs
 ];
 
 /// Unlisted synonyms placed by meaning. Held-out probes for the
@@ -605,9 +807,8 @@ fn quoted(prose: &str) -> Vec<String> {
 /// positional slot-filling (articles skipped, first letter capitalized
 /// for Rust convention) — visible in the output, never silent.
 fn adjacent_name(words: &[String], kind: &str) -> Option<String> {
-    let pos = words
-        .iter()
-        .position(|w| KINDS.iter().any(|(k, v)| *v == kind && k == w))?;
+    let kind_of = |w: &str| -> Option<&'static str> { exact_kind(w).or_else(|| fuzzy_kind(w)) };
+    let pos = words.iter().position(|w| kind_of(w) == Some(kind))?;
     let articles = [
         "a", "an", "the", "my", "this", "that", "some", "any", "each", "every",
     ];
@@ -833,11 +1034,14 @@ pub fn understand(prose: &str, project_dir: Option<&std::path::Path>) -> Underst
     // breath ("make a counter page") is creation, not compilation.
     // "make the thing work faster" (no kind, no name) stays a build.
     // Head-noun rule: the LAST kind word governs ("settings page" is a
-    // page about settings, not a config). Single pass, deterministic.
+    // page about settings, not a config). Exact + plural forms win
+    // first; typo'd kinds (`stuct`) forgive second. Single pass each,
+    // deterministic.
     let kind = ws
         .iter()
         .rev()
-        .find_map(|w| KINDS.iter().find(|(k, _)| k == w).map(|(_, k)| *k));
+        .find_map(|w| exact_kind(w))
+        .or_else(|| ws.iter().rev().find_map(|w| fuzzy_kind(w)));
     // Constraint words ride along as intent constraints.
     let constraints: Vec<String> = CONSTRAINTS
         .iter()
@@ -1020,6 +1224,51 @@ pub fn understand(prose: &str, project_dir: Option<&std::path::Path>) -> Underst
         }
     }
 
+    // Material relation (deterministic Wikidata-`material-used` analogue):
+    // `X made of Y` names a construction requirement, not a typo. The
+    // parser banks it as a constraint + references + research questions
+    // so the research planner can chase silhouettes, geometry, and
+    // placement rules instead of dropping the words as noise.
+    if let Some((base, material)) = extract_material(prose)
+        && !material.is_empty()
+    {
+        let tag = format!("material:{}", material);
+        if !intent.constraints.iter().any(|c| c == &tag) {
+            intent.constraints.push(tag);
+        }
+        for r in [&base, &material] {
+            if !r.is_empty() && !intent.references.iter().any(|x| x == r) {
+                intent.references.push(r.clone());
+            }
+        }
+        // Seed glosses (WordNet-synset analogue): what we know, stated.
+        for w in [&base, &material] {
+            if !w.is_empty()
+                && let Some((broader, gloss)) = expand_concept(w)
+            {
+                let note = format!("{}: {} ({})", w, broader, gloss);
+                if !intent.unknown_requirements.iter().any(|x| x == &note) {
+                    intent.unknown_requirements.push(note);
+                }
+            }
+        }
+        // Research plan (Step C/D of the macaroni-hat walkthrough):
+        // shape of the base, geometry of the material, placement rules.
+        let mut plan = Vec::new();
+        if !base.is_empty() {
+            plan.push(format!("research {} shape and dimensions", base));
+        }
+        plan.push(format!("research {} geometry and appearance", material));
+        if !base.is_empty() {
+            plan.push(format!("research placement of {} over {}", material, base));
+        }
+        for p in plan {
+            if !intent.unknown_requirements.iter().any(|x| x == &p) {
+                intent.unknown_requirements.push(p);
+            }
+        }
+    }
+
     // Confidence is slot satisfaction, derived from the frame schema
     // — the content gate still caps parsable-but-unbuildable parses.
     let (mut confidence, _missing) = evaluate_frame(&frame, &slots);
@@ -1199,10 +1448,20 @@ mod tests {
 
     #[test]
     fn curiosity_suggests_nearest_lexicon() {
+        // Grown lexicon: `flibber` now sits within distance 4 of the
+        // fix-family inflections, so it demonstrates neighbor search;
+        // `zxqxjv` is the far-from-everything probe for the empty case.
         let cs = curiosities("please flibber the widget", None);
         assert!(!cs.is_empty());
         assert_eq!(cs[0].unknown, "flibber");
-        // Nothing within distance 4 of "flibber" in the lexicon.
+        assert!(
+            cs[0].suggestions.iter().any(|s| s.contains("fix")),
+            "expected a fix-family neighbor, got {:?}",
+            cs[0].suggestions
+        );
+        let cs = curiosities("please zxqxjv the widget", None);
+        assert!(!cs.is_empty());
+        assert_eq!(cs[0].unknown, "zxqxjv");
         assert!(cs[0].suggestions.is_empty());
         let cs = curiosities("buld it now", None);
         let all: Vec<&str> = cs.iter().map(|c| c.unknown.as_str()).collect();

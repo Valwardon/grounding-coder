@@ -249,13 +249,14 @@ Oracle verify (compiler / tests / parser per language)
 
 ## Proof, Not Promises
 
-237 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
+249 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
 `fmt --check` clean:
 
 | Suite | Tests | What it proves |
 |---|---|---|
-| lib (unit) | 166 | recipes, ranker (importance-weighted), catalog, pathfind, parsers, manifests, guards, families, understander (slot satisfaction, vector synonyms), disposition, web research, knowledge lifecycle (consolidation, evidence tiers), compiler probes, deterministic vision (pixels, film finish, masks, compositing, collages, roses, shadows, photo-first, ground-truth boxes, inpainting, restoration), plate sourcing + provenance (Commons, web search, Open Images), backend affordances, imagine trajectory, movement knowledge, genome humans (mesh, morphs, evidence, figures, type schemas) |
+| lib (unit) | 166 | recipes, ranker (importance-weighted), catalog, pathfind, parsers, manifests, guards, families, understander (slot satisfaction, vector synonyms, kind synonyms, material relations), disposition, web research, knowledge lifecycle (consolidation, evidence tiers), compiler probes, deterministic vision (pixels, film finish, masks, compositing, collages, roses, shadows, photo-first, ground-truth boxes, inpainting, restoration), plate sourcing + provenance (Commons, web search, Open Images), backend affordances, imagine trajectory, movement knowledge, genome humans (mesh, morphs, evidence, figures, type schemas) |
 | `intent_benchmark` | 13 | happy path, typo tolerance, head-noun kind rule, typo-verbs-never-names, vague/ambiguous refusal, destructive block (even fully specified), contradiction ask, multi-intent split, unknown-concept curiosity |
+| `messy_intent` | 10 | kind synonyms (webpage→page), plurals, typo'd kinds with verbatim names, verb inflections, visual verbs (imagine→create), material relations (macaroni-hat research plan), glossary, destructive-still-blocks |
 | `knowledge_loop` | 3 | budget-bounded offline dreaming with persistence, sleep when nothing open, failures deprioritize without deleting |
 | `learning_experiment` | 2 | dreaming arm rediscovers family patterns (rate 0.55) vs amnesiac baseline (0.00); both arms solve every task |
 | `build` | 6 | C/Java/Rust real builds + artifacts run; unknown targets block; dx-output APK discovery |
@@ -368,6 +369,17 @@ Prose reaches the engine through `src/engine/understand.rs` — a
 hand-built verb/kind lexicon, typo tolerance on verbs only (names pass
 through verbatim), grammar frames (build/create/fix/publish/verify),
 and slot filling from quotes, titled names, and adjacent nouns.
+Kinds forgive too: everyday synonyms (`webpage`→`page`,
+`options`→`config`, `func`→`function`), plurals, and near-miss
+spellings (`stuct`→`struct`), while names still pass through verbatim.
+Material relations parse as construction requirements — "a hat made of
+macaroni" banks `material:macaroni`, references both concepts, states
+seed glosses (hat: headwear; macaroni: pasta), and files a 3-question
+research plan (base shape, material geometry, placement) instead of
+dropping the words. WordNet / Wikidata / Wikipedia stay external
+research sources (`ResearchOracle::research_word`); the built-in tables
+are auditable seeds, never copies. Sample receipts live in
+`samples/intent/`, battery in `tests/messy_intent.rs`.
 Every parse carries a confidence receipt (quoted slots solid, inferred
 slots soft); below 0.75 the system states what's missing instead of
 acting. Verified translations accumulate per project and serve as

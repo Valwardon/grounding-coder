@@ -1,5 +1,25 @@
 # Grounding Coder — Progress
 
+## v0.25.1 — Messy-intent hardening: synonyms, typo'd kinds, material relations (2026-09-30)
+
+- `engine/understand.rs`: verb lexicon grows inflections + visual verbs
+  (`building`, `made`, `created`, `imagine`, `render`, `compose`… —
+  vectors extended per family, coherence-tested), kind lexicon grows
+  everyday synonyms (`webpage`/`homepage`→`page`, `options`→`config`,
+  `func`/`method`→`function`, `workflow`→`statemachine`), plural
+  stripping, and typo-tolerant kinds (`stuct`→`struct`, names still
+  verbatim). Material grammar (`made of` / `made out of` / `out of` /
+  `built from`…) banks `material:X` + references + seed glosses
+  (hat: headwear; macaroni: pasta) + a 3-question research plan (base
+  shape, material geometry, placement) — the macaroni-hat walkthrough
+  as pure deterministic parsing, disposition Ask with curiosity.
+- `tests/messy_intent.rs`: 10-case battery (synonyms, plurals, typo'd
+  kinds, inflections, visual verbs, both material variants, glossary,
+  destructive-still-blocks). `samples/intent/` carries two live
+  `--understand` receipts.
+- 249 tests green (166 lib + 83 integration), `cargo check
+  --all-features`, clippy zero warnings, fmt clean.
+
 ## v0.25.0 — Genome humans: generated, not composited (2026-09-30)
 
 - `engine/mesh.rs`: parametric head (UV-sphere + radial feature
