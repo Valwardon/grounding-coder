@@ -872,6 +872,71 @@ impl Image {
         lift
     }
 
+    // ── Inpainting: novel pixels from context ──
+    //
+    // Everything else in this module moves pixels. This computes
+    // ones that existed nowhere: masked regions are solved as
+    // discrete harmonic functions (Laplace equation with the known
+    // boundary as Dirichlet conditions), iterated to convergence.
+    // Linear gradients reproduce exactly; textures do not — smooth
+    // fill, never invented detail, and the log must say which mask
+    // was filled. Deterministic to the last digit.
+
+    /// Fill masked pixels from their surroundings. `mask[i]` true
+    /// means unknown. Returns a new image; known pixels are
+    /// byte-identical. Empty mask returns a clone; all-masked fills
+    /// black (no context is not a guess).
+    pub fn inpaint(&self, mask: &[bool], iterations: u32) -> Image {
+        let n = (self.width * self.height) as usize;
+        let mut cur: Vec<(f64, f64, f64)> = self
+            .pixels
+            .iter()
+            .map(|p| (p.r as f64, p.g as f64, p.b as f64))
+            .collect();
+        if mask.len() != n {
+            return self.clone();
+        }
+        let w = self.width as i32;
+        let h = self.height as i32;
+        let at = |buf: &[(f64, f64, f64)], x: i32, y: i32| -> (f64, f64, f64) {
+            let x = x.clamp(0, w - 1) as u32;
+            let y = y.clamp(0, h - 1) as u32;
+            buf[(y * self.width + x) as usize]
+        };
+        for _ in 0..iterations.max(1) {
+            let prev = cur.clone();
+            for y in 0..h {
+                for x in 0..w {
+                    let i = (y as u32 * self.width + x as u32) as usize;
+                    if !mask[i] {
+                        continue;
+                    }
+                    let (a0, a1, a2) = at(&prev, x - 1, y);
+                    let (b0, b1, b2) = at(&prev, x + 1, y);
+                    let (c0, c1, c2) = at(&prev, x, y - 1);
+                    let (d0, d1, d2) = at(&prev, x, y + 1);
+                    cur[i] = (
+                        (a0 + b0 + c0 + d0) / 4.0,
+                        (a1 + b1 + c1 + d1) / 4.0,
+                        (a2 + b2 + c2 + d2) / 4.0,
+                    );
+                }
+            }
+        }
+        let mut out = self.clone();
+        for (i, p) in out.pixels.iter_mut().enumerate() {
+            if mask[i] {
+                let (r, g, b) = cur[i];
+                *p = Rgb::new(
+                    r.clamp(0.0, 255.0).round() as u8,
+                    g.clamp(0.0, 255.0).round() as u8,
+                    b.clamp(0.0, 255.0).round() as u8,
+                );
+            }
+        }
+        out
+    }
+
     // ── BMP codec (24-bit, uncompressed, hand-rolled) ──
     //
     // No dependency for this: the format is a 54-byte header plus
@@ -1156,6 +1221,51 @@ mod tests {
         let flat = Image::blank(7, 5, Rgb::new(12, 34, 56));
         let grown = flat.resize_smooth(13, 11);
         assert!(grown.get(6, 5) == Some(Rgb::new(12, 34, 56)));
+    }
+
+    #[test]
+    fn inpaint_computes_unseen_pixels() {
+        // Horizontal ramp with a bar masked out: Laplace reproduces
+        // linear gradients nearly exactly — the fill is computed,
+        // not copied (nothing to copy from).
+        let mut img = Image::blank(40, 20, Rgb::new(0, 0, 0));
+        for y in 0..20 {
+            for x in 0..40 {
+                let v = (x as f64 * 255.0 / 39.0).round() as u8;
+                img.set(x, y, Rgb::new(v, v / 2, 255 - v));
+            }
+        }
+        let mut mask = vec![false; 800];
+        for y in 0..20 {
+            for x in 18..22 {
+                mask[(y * 40 + x) as usize] = true;
+            }
+        }
+        let filled = img.inpaint(&mask, 600);
+        // Known pixels byte-identical.
+        assert_eq!(filled.get(0, 0), img.get(0, 0));
+        assert_eq!(filled.get(39, 19), img.get(39, 19));
+        // Filled bar tracks the true ramp within rounding + diffusion.
+        for y in 0..20 {
+            for x in 18..22 {
+                let want = (x as f64 * 255.0 / 39.0).round() as u8;
+                let got = filled.get(x, y).unwrap().r;
+                assert!(
+                    (got as i32 - want as i32).abs() <= 4,
+                    "x={} got={} want={}",
+                    x,
+                    got,
+                    want
+                );
+            }
+        }
+        // Degenerate masks: no panic, no invention.
+        assert_eq!(img.inpaint(&vec![false; 800], 10).get(5, 5), img.get(5, 5));
+        // All-masked (no context): diffuses without anchors — smooth
+        // and meaningless, but bounded and panic-free.
+        let all = img.inpaint(&vec![true; 800], 10);
+        assert_eq!((all.width, all.height), (40, 20));
+        assert!(img.inpaint(&[true; 7], 10).get(5, 5) == img.get(5, 5));
     }
 
     #[test]

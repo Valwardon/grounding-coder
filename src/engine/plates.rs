@@ -83,9 +83,16 @@ pub fn require_provenance(
             .collect::<String>()
     };
     let license_norm = norm(&license);
-    let listed = LICENSE_ALLOWLIST
-        .iter()
-        .any(|allow| norm(allow) == license_norm)
+    // Any CC-BY / CC-BY-SA version qualifies (1.0 through 4.0 and
+    // beyond — the grant is the family, not the version number).
+    // NonCommercial and NoDerivatives variants never qualify.
+    let cc_free = license_norm.starts_with("ccby")
+        && !license_norm.contains("nc")
+        && !license_norm.contains("nd");
+    let listed = cc_free
+        || LICENSE_ALLOWLIST
+            .iter()
+            .any(|allow| norm(allow) == license_norm)
         || SITE_LICENSES
             .iter()
             .any(|(_, name)| norm(name) == license_norm);
@@ -991,6 +998,14 @@ mod tests {
         assert_eq!(p.author, "Jane");
         // Case-insensitive license match.
         assert!(require_provenance("F", "P", "http://x/y.jpg", "A. Uthor", "cc-by-4.0").is_ok());
+        // Any CC-BY/SA version qualifies; NC/ND never do.
+        assert!(require_provenance("F", "P", "http://x/y.jpg", "A. Uthor", "CC BY-SA 2.5").is_ok());
+        assert!(
+            require_provenance("F", "P", "http://x/y.jpg", "A. Uthor", "CC BY-NC 2.0").is_err()
+        );
+        assert!(
+            require_provenance("F", "P", "http://x/y.jpg", "A. Uthor", "CC BY-ND 4.0").is_err()
+        );
     }
 
     #[test]

@@ -1,5 +1,18 @@
 # Grounding Coder — Progress
 
+## v0.24.0 — Family restoration, verbose mode, city plates (2026-09-29)
+
+- `engine/restore.rs` + `gc restore`: dust specks (median-outlier
+  test) and scratches (extreme-luma runs) detected classically,
+  inpainted, reported with bbox. Clean photos report zero and stay
+  untouched. Family photos edit with no refusal path anywhere.
+- `--verbose`: debug logging plus per-command wall time. License
+  check generalized to any CC-BY/SA version (2.5 was refused
+  before); NC/ND still refuse.
+- Cityscape backdrop plates sourced (CC BY-SA, full provenance).
+- 228 tests green (157 lib + 71 integration), clippy `-D warnings`
+  clean, fmt clean.
+
 ## v0.23.0 — Canon bodies deleted; Open Images people; movement knowledge (2026-09-29)
 
 - Deleted, permanently: procedural humanoid meshes (`person`,

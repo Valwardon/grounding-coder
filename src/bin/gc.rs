@@ -4,6 +4,9 @@ use grounding_coder::{CodeBot, config};
 #[derive(Parser)]
 #[command(name = "gc", about = "Grounding Coder — deterministic coding agent")]
 struct Cli {
+    /// Verbose: debug logging plus per-command wall time on stderr.
+    #[arg(long, global = true)]
+    verbose: bool,
     #[command(subcommand)]
     cmd: Commands,
 }
@@ -97,6 +100,18 @@ enum Commands {
         #[arg(long, default_value_t = 800)]
         height: u32,
     },
+    /// Restore a family photo: detect dust specks and scratches,
+    /// inpaint them, report every defect. Clean photos report zero.
+    Restore {
+        /// Source plate BMP
+        plate: String,
+        /// Output BMP path
+        #[arg(short, long, default_value = "restored.bmp")]
+        out: String,
+        /// Outlier threshold vs neighborhood median (luma units)
+        #[arg(long, default_value_t = 40.0)]
+        thresh: f64,
+    },
     /// Dream: run the idle learning loop — investigate open questions
     /// and promote only what verifies. Bounded by budget, then sleeps.
     Dream {
@@ -114,8 +129,16 @@ enum Commands {
 }
 
 fn main() {
-    env_logger::init();
     let cli = Cli::parse();
+    if cli.verbose {
+        env_logger::Builder::from_default_env()
+            .filter_level(log::LevelFilter::Debug)
+            .init();
+    } else {
+        env_logger::init();
+    }
+    let start = std::time::Instant::now();
+    let verbose = cli.verbose;
     let rt = tokio::runtime::Runtime::new().expect("runtime");
     rt.block_on(async move {
         match cli.cmd {
@@ -435,6 +458,32 @@ fn main() {
                     }
                 }
             }
+            Commands::Restore { plate, out, thresh } => {
+                use grounding_coder::engine::{restore, vision::Image};
+                let plate_img = match Image::load_bmp(std::path::Path::new(&plate)) {
+                    Ok(img) => img,
+                    Err(e) => {
+                        eprintln!("RESTORE FAILED: cannot load plate: {}", e);
+                        std::process::exit(1);
+                    }
+                };
+                let (img, report) = restore::restore_plate(&plate_img, thresh, 12);
+                println!(
+                    "restore: {} specks, {} scratch pixels, {} iterations",
+                    report.specks, report.scratch_pixels, report.iterations
+                );
+                match &report.bbox {
+                    Some(b) => println!("restore: defect bbox {:?}", b),
+                    None => println!("restore: no defects — photo untouched"),
+                }
+                match img.save_bmp(std::path::Path::new(&out)) {
+                    Ok(()) => println!("restored {} ({}x{})", out, img.width, img.height),
+                    Err(e) => {
+                        eprintln!("RESTORE FAILED: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
             Commands::Dream {
                 project,
                 budget,
@@ -467,4 +516,7 @@ fn main() {
             }
         }
     });
+    if verbose {
+        eprintln!("[verbose] wall time: {:.2}s", start.elapsed().as_secs_f64());
+    }
 }
