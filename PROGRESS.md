@@ -1,5 +1,19 @@
 # Grounding Coder — Progress
 
+## v0.25.2 — Photo gate: every build proves pixels (2026-09-30)
+
+- `tests/photo_gate.rs`: standing 6-case gate answering three
+  questions offline — visual prose routes (`imagine`/`render`/`draw`
+  → create-frame Ask, never vacuous Block), the genome waver renders
+  human pixels (skin/flag/noodle receipt thresholds), the demo world
+  renders sky/tower/ground (receipt + sky-up-top/ground-below pixel
+  samples), plus byte-identical re-render determinism.
+- `samples/photo-gate-figure-320x240.bmp` (+ receipt JSON) and
+  `samples/photo-gate-scene-320x240.bmp` (+ receipt JSON) commit as
+  the test output itself — the photo IS the proof.
+- 255 tests green (166 lib + 89 integration), `cargo check
+  --all-features`, clippy zero warnings, fmt clean.
+
 ## v0.25.1 — Messy-intent hardening: synonyms, typo'd kinds, material relations (2026-09-30)
 
 - `engine/understand.rs`: verb lexicon grows inflections + visual verbs
