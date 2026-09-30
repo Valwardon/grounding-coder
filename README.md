@@ -249,15 +249,16 @@ Oracle verify (compiler / tests / parser per language)
 
 ## Proof, Not Promises
 
-255 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
+267 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
 `fmt --check` clean:
 
 | Suite | Tests | What it proves |
 |---|---|---|
-| lib (unit) | 166 | recipes, ranker (importance-weighted), catalog, pathfind, parsers, manifests, guards, families, understander (slot satisfaction, vector synonyms, kind synonyms, material relations), disposition, web research, knowledge lifecycle (consolidation, evidence tiers), compiler probes, deterministic vision (pixels, film finish, masks, compositing, collages, roses, shadows, photo-first, ground-truth boxes, inpainting, restoration), plate sourcing + provenance (Commons, web search, Open Images), backend affordances, imagine trajectory, movement knowledge, genome humans (mesh, morphs, evidence, figures, type schemas) |
+| lib (unit) | 166 | recipes, ranker (importance-weighted), catalog, pathfind, parsers, manifests, guards, families, understander (slot satisfaction, vector synonyms, kind synonyms, material relations), scene-intent IR (lexicon, spec, planner, capabilities), disposition, web research, knowledge lifecycle (consolidation, evidence tiers), compiler probes, deterministic vision (pixels, film finish, masks, compositing, collages, roses, shadows, photo-first, ground-truth boxes, inpainting, restoration), plate sourcing + provenance (Commons, web search, Open Images), backend affordances, imagine trajectory, movement knowledge, genome humans (mesh, morphs, evidence, figures, type schemas) |
 | `intent_benchmark` | 13 | happy path, typo tolerance, head-noun kind rule, typo-verbs-never-names, vague/ambiguous refusal, destructive block (even fully specified), contradiction ask, multi-intent split, unknown-concept curiosity |
 | `messy_intent` | 10 | kind synonyms (webpage→page), plurals, typo'd kinds with verbatim names, verb inflections, visual verbs (imagine→create), material relations (macaroni-hat research plan), glossary, destructive-still-blocks |
 | `photo_gate` | 6 | visual-prose routing (imagine/render/draw→create Ask), genome-waver human pixels, demo-world receipt + sky/ground pixel samples, byte-identical re-renders; photos commit under `samples/` |
+| `scene_intent` | 11 | scene-requirements IR (subjects/actions/objects/materials/unresolved/confidence), per-requirement research queries, honest capability verdicts (pose/cloth missing, procedural humans deleted); macaroni binds as material, bare waving stays ambiguous |
 | `knowledge_loop` | 3 | budget-bounded offline dreaming with persistence, sleep when nothing open, failures deprioritize without deleting |
 | `learning_experiment` | 2 | dreaming arm rediscovers family patterns (rate 0.55) vs amnesiac baseline (0.00); both arms solve every task |
 | `build` | 6 | C/Java/Rust real builds + artifacts run; unknown targets block; dx-output APK discovery |

@@ -21,6 +21,7 @@ pub mod recipes;
 pub mod research;
 pub mod restore;
 pub mod scene;
+pub mod scene_intent;
 pub mod symbols;
 pub mod synthesize;
 pub mod tasks;

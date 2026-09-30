@@ -1,5 +1,28 @@
 # Grounding Coder — Progress
 
+## v0.25.3 — Scene-intent IR: research intent, not NLU (2026-09-30)
+
+- `engine/scene_intent.rs`: intent-to-research IR — controlled
+  vocabulary (surface→concept, morphology included), phrase folding
+  ("american flag", "peace sign"), ontology (Human/Action/Wearable/
+  Fabric/Place/Material + needs), `SceneSpec` (subjects, actions with
+  actor/target/object, objects with worn_by/material, unresolved,
+  confidence), research planner (per-requirement queries + capability
+  tags), capability registry + matcher (photographic paths supported;
+  articulated-pose, cloth, and procedural-human-geometry honestly
+  missing — the missing name IS the work order, never a block-figure
+  substitution). "Hat made of macaroni" binds macaroni as material,
+  never an object; bare "waving" stays ambiguous (hand or flag).
+- `tests/scene_intent.rs`: 11-case prompt suite with known expected
+  interpretations (mountain, peace sign, macaroni-hat, flag wave,
+  ambiguity, salute gap, synonyms, wearing, open place, gibberish,
+  JSON shape).
+- Staged next (per plan): evidence store, then Phase 1 human —
+  research many examples → measurements → visual model → articulated
+  skeleton → new geometry. No pixel creation in this change.
+- 267 tests green (167 lib + 100 integration), `cargo check
+  --all-features`, clippy zero warnings, fmt clean.
+
 ## v0.25.2 — Photo gate: every build proves pixels (2026-09-30)
 
 - `tests/photo_gate.rs`: standing 6-case gate answering three
