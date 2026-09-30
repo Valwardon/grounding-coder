@@ -63,6 +63,8 @@ ndarray = "0.15"
 # Pure-Rust decoders, no platform codecs. Narrow features keep the
 # closure small; the crate is already in the lock file via dioxus.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+# Engine-level type descriptions for generated humans.
+grounding-macros = { path = "grounding-macros" }
 
 # dioxus UI — only compiled with "ui" feature (Android/iOS mobile targets)
 dioxus = { version = "0.7", features = ["mobile"], optional = true }
@@ -80,3 +82,6 @@ lto = "fat"
 codegen-units = 1
 opt-level = "z"
 strip = "debuginfo"
+
+[workspace]
+members = [".", "grounding-macros"]

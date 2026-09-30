@@ -163,6 +163,11 @@ Oracle verify (compiler / tests / parser per language)
   classical operators, Laplacian inpainting, full defect reports.
   Your photos edit with no refusal path anywhere.
   (`src/engine/restore.rs`, `gc restore`)
+- **Genome humans** — synthetic adults from validated parameters,
+  never likenesses: parametric head meshes, smile blendshapes,
+  evidence per property, `#[derive(GroundingType)]` schemas, ray-
+  traced with skin wrap. (`src/engine/{mesh,human,figure}.rs`,
+  `grounding-macros`, `gc figure`)
 - **Generalized Build op** — `TaskKind::Build` ("build …" actions) runs
   the language backend's build oracle: C/`gcc`, Rust/`cargo` (native,
   release, explicit triples), Kotlin/`kotlinc` jars, Java/`javac`,
@@ -244,12 +249,12 @@ Oracle verify (compiler / tests / parser per language)
 
 ## Proof, Not Promises
 
-228 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
+237 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
 `fmt --check` clean:
 
 | Suite | Tests | What it proves |
 |---|---|---|
-| lib (unit) | 157 | recipes, ranker (importance-weighted), catalog, pathfind, parsers, manifests, guards, families, understander (slot satisfaction, vector synonyms), disposition, web research, knowledge lifecycle (consolidation, evidence tiers), compiler probes, deterministic vision (pixels, film finish, masks, compositing, collages, roses, shadows, photo-first, ground-truth boxes, inpainting, restoration), plate sourcing + provenance (Commons, web search, Open Images), backend affordances, imagine trajectory, movement knowledge |
+| lib (unit) | 166 | recipes, ranker (importance-weighted), catalog, pathfind, parsers, manifests, guards, families, understander (slot satisfaction, vector synonyms), disposition, web research, knowledge lifecycle (consolidation, evidence tiers), compiler probes, deterministic vision (pixels, film finish, masks, compositing, collages, roses, shadows, photo-first, ground-truth boxes, inpainting, restoration), plate sourcing + provenance (Commons, web search, Open Images), backend affordances, imagine trajectory, movement knowledge, genome humans (mesh, morphs, evidence, figures, type schemas) |
 | `intent_benchmark` | 13 | happy path, typo tolerance, head-noun kind rule, typo-verbs-never-names, vague/ambiguous refusal, destructive block (even fully specified), contradiction ask, multi-intent split, unknown-concept curiosity |
 | `knowledge_loop` | 3 | budget-bounded offline dreaming with persistence, sleep when nothing open, failures deprioritize without deleting |
 | `learning_experiment` | 2 | dreaming arm rediscovers family patterns (rate 0.55) vs amnesiac baseline (0.00); both arms solve every task |

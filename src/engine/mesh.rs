@@ -215,6 +215,114 @@ impl Mesh {
         }
     }
 
+    /// Flat grid in the XY plane, centered origin: (nu+1)×(nv+1)
+    /// verts, outward +z normals. Callers displace then recompute.
+    pub fn plane_grid(w: f64, h: f64, nu: u32, nv: u32) -> Self {
+        let nu = nu.max(1);
+        let nv = nv.max(1);
+        let mut verts = Vec::new();
+        for j in 0..=nv {
+            for i in 0..=nu {
+                verts.push([
+                    -w / 2.0 + w * i as f64 / nu as f64,
+                    -h / 2.0 + h * j as f64 / nv as f64,
+                    0.0,
+                ]);
+            }
+        }
+        let mut faces = Vec::new();
+        let row = nu + 1;
+        for j in 0..nv {
+            for i in 0..nu {
+                let a = j * row + i;
+                faces.push([a, a + 1, a + row]);
+                faces.push([a + 1, a + row + 1, a + row]);
+            }
+        }
+        let mut mesh = Mesh {
+            verts,
+            faces,
+            normals: Vec::new(),
+        };
+        mesh.compute_normals();
+        mesh
+    }
+
+    /// Upper hemisphere shell (pole at +y): bowls, helmets, hats.
+    /// `r` radius, `squash` vertical scale.
+    pub fn hemisphere(nu: u32, nv: u32, r: f64, squash: f64) -> Self {
+        let nu = nu.max(8);
+        let nv = nv.max(3);
+        let mut verts = Vec::new();
+        for j in 0..=nv {
+            // Polar from 0 (pole) to ~100° (just past equator).
+            let v = j as f64 * 1.75 / nv as f64;
+            for i in 0..=nu {
+                let u = i as f64 * TAU / nu as f64;
+                verts.push([
+                    r * v.sin() * u.sin(),
+                    r * v.cos() * squash,
+                    r * v.sin() * u.cos(),
+                ]);
+            }
+        }
+        let mut faces = Vec::new();
+        let row = nu + 1;
+        for j in 0..nv {
+            for i in 0..nu {
+                let a = j * row + i;
+                faces.push([a, a + row, a + 1]);
+                faces.push([a + 1, a + row, a + row + 1]);
+            }
+        }
+        let mut mesh = Mesh {
+            verts,
+            faces,
+            normals: Vec::new(),
+        };
+        mesh.compute_normals();
+        mesh
+    }
+
+    /// Fan triangulation of a star-shaped polygon (centroid sees all
+    /// verts): maple leaves and other flat emblems. Points in XY.
+    pub fn fan_polygon(points: &[[f64; 2]]) -> Self {
+        let n = points.len();
+        let mut c = [0.0, 0.0];
+        for p in points {
+            c[0] += p[0];
+            c[1] += p[1];
+        }
+        c[0] /= n.max(1) as f64;
+        c[1] /= n.max(1) as f64;
+        let mut verts = vec![[c[0], c[1], 0.0]];
+        for p in points {
+            verts.push([p[0], p[1], 0.0]);
+        }
+        let mut faces = Vec::new();
+        for i in 0..n as u32 {
+            let b = 1 + i;
+            let c = 1 + (i + 1) % n as u32;
+            faces.push([0, b, c]);
+        }
+        let mut mesh = Mesh {
+            verts,
+            faces,
+            normals: Vec::new(),
+        };
+        mesh.compute_normals();
+        mesh
+    }
+
+    /// Displace every vert by `f`, then recompute normals. Cloth
+    /// waves, dents, and fitting live here.
+    pub fn displace(&mut self, f: impl Fn([f64; 3]) -> [f64; 3]) {
+        for v in self.verts.iter_mut() {
+            *v = f(*v);
+        }
+        self.compute_normals();
+    }
+
     /// Bounding sphere (centroid + max radius): the renderer's
     /// precheck before touching triangles.
     pub fn bounding_sphere(&self) -> ([f64; 3], f64) {
@@ -309,6 +417,32 @@ mod tests {
         // Weight zero is the identity.
         let same = m.blendshape(&deltas, 0.0);
         assert_eq!(same.verts, m.verts);
+    }
+
+    #[test]
+    fn grids_hemispheres_and_fans_build() {
+        let g = Mesh::plane_grid(2.0, 1.0, 8, 4);
+        assert_eq!(g.verts.len(), 9 * 5);
+        assert_eq!(g.faces.len(), 8 * 4 * 2);
+        // Flat grid normals face +z.
+        assert!(g.normals.iter().all(|n| n[2] > 0.99));
+        let h = Mesh::hemisphere(16, 6, 1.0, 0.8);
+        assert!(h.verts.iter().all(|v| v[1] > -0.2));
+        // Hemisphere normals point outward (away from center axis).
+        for (v, n) in h.verts.iter().zip(h.normals.iter()) {
+            let radial = (v[0] * n[0] + v[2] * n[2]).signum();
+            if v[1].abs() + v[0].abs() + v[2].abs() > 0.3 {
+                assert!(radial > 0.0, "inward normal at {:?} {:?}", v, n);
+            }
+        }
+        // Fan of a diamond: 4 triangles, area sanity via bbox.
+        let d = Mesh::fan_polygon(&[[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0], [0.0, -1.0]]);
+        assert_eq!(d.faces.len(), 4);
+        // Displacement moves verts and refreshes normals.
+        let mut w = Mesh::plane_grid(2.0, 2.0, 4, 4);
+        w.displace(|v| [v[0], v[1], v[2] + (v[0] * 3.0).sin() * 0.2]);
+        assert!(w.verts.iter().any(|v| v[2].abs() > 0.01));
+        assert_eq!(w.normals.len(), w.verts.len());
     }
 
     #[test]

@@ -112,6 +112,20 @@ enum Commands {
         #[arg(long, default_value_t = 40.0)]
         thresh: f64,
     },
+    /// Render a genome figure: laughing man, big nose, noodle hat,
+    /// waving Canadian flag. Every pixel procedural — the creation
+    /// test, runnable.
+    Figure {
+        /// Output BMP path
+        #[arg(short, long, default_value = "figure.bmp")]
+        out: String,
+        /// Output width
+        #[arg(long, default_value_t = 640)]
+        width: u32,
+        /// Output height
+        #[arg(long, default_value_t = 480)]
+        height: u32,
+    },
     /// Dream: run the idle learning loop — investigate open questions
     /// and promote only what verifies. Bounded by budget, then sleeps.
     Dream {
@@ -480,6 +494,32 @@ fn main() {
                     Ok(()) => println!("restored {} ({}x{})", out, img.width, img.height),
                     Err(e) => {
                         eprintln!("RESTORE FAILED: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            Commands::Figure { out, width, height } => {
+                use grounding_coder::engine::{figure, human};
+                let genome = human::HumanGenome::with_params(
+                    35, 0.5, 0.55, 0.5, 0.95, 0.8, 0.5, 0.6, 0.5, 1.0,
+                )
+                .expect("test genome validates");
+                for line in genome.describe() {
+                    println!("genome: {}", line);
+                }
+                let (mut img, receipt) = grounding_coder::engine::scene::render(
+                    &figure::waver_scene(width.clamp(16, 1920), height.clamp(16, 1920), &genome),
+                );
+                for (name, count) in &receipt {
+                    println!("  {:16} {} px", name, count);
+                }
+                img.grade(1.08, 4.0);
+                img.vignette(0.25);
+                img.grain(0xF16E, 4);
+                match img.save_bmp(std::path::Path::new(&out)) {
+                    Ok(()) => println!("figured {} ({}x{})", out, img.width, img.height),
+                    Err(e) => {
+                        eprintln!("FIGURE FAILED: {}", e);
                         std::process::exit(1);
                     }
                 }

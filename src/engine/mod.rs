@@ -6,6 +6,8 @@ pub mod compose;
 pub mod corrector;
 pub mod error;
 pub mod experiment;
+pub mod figure;
+pub mod human;
 pub mod imagine;
 pub mod knowledge;
 pub mod lang;

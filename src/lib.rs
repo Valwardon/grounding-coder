@@ -1,7 +1,12 @@
+// Lets derive-generated `::grounding_coder::...` paths resolve
+// inside this crate itself (standard self-import trick).
+extern crate self as grounding_coder;
+
 pub mod android;
 pub mod config;
 pub mod engine;
 pub mod github;
+pub mod grounding;
 pub mod http;
 pub mod knowledge;
 pub mod oracle;

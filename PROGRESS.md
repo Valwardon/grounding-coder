@@ -1,5 +1,27 @@
 # Grounding Coder — Progress
 
+## v0.25.0 — Genome humans: generated, not composited (2026-09-30)
+
+- `engine/mesh.rs`: parametric head (UV-sphere + radial feature
+  functions for cranium/jaw/cheeks/brow/nose/lips/sockets/chin),
+  rule-selected smile blendshapes, smooth normals, bounding
+  spheres. Same params twice → byte-identical verts.
+- `engine/human.rs`: validated genome — adult-only age floor,
+  0..1 morphs, evidence (researched vs stylistic) per property,
+  inspectable via describe().
+- `engine/figure.rs`: the creation test as code — laughing big-nose
+  genome man, noodle-bowl hat with helical strands, raised arm
+  waving a rippling Canadian flag (fan-triangulated maple leaf).
+  Rendered acceptance asserts skin/flag/leaf/noodle pixels.
+- Renderer: `Shape::Mesh` with Möller–Trumbore + smooth normals,
+  skin wrap lighting. `grounding-macros` proc-macro crate +
+  `#[derive(GroundingType)]` with `#[morph]` flags and doc capture.
+- Proved live: `gc figure` renders the full figure with receipt.
+- Stated limits: bald, no body below the bust, single wrap light
+  model, brute-force triangles (bounding-sphere precheck only).
+- 237 tests green (166 lib + 71 integration), clippy `-D warnings`
+  clean, fmt clean.
+
 ## v0.24.0 — Family restoration, verbose mode, city plates (2026-09-29)
 
 - `engine/restore.rs` + `gc restore`: dust specks (median-outlier

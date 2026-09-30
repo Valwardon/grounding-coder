@@ -2028,6 +2028,7 @@ dependencies = [
  "dirs 5.0.1",
  "env_logger",
  "futures-util",
+ "grounding-macros",
  "http-body-util",
  "hyper",
  "hyper-rustls",
@@ -2048,6 +2049,15 @@ dependencies = [
  "syn 2.0.119",
  "tokio",
  "walkdir",
+]
+
+[[package]]
+name = "grounding-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]

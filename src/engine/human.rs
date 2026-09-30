@@ -32,7 +32,10 @@ pub struct GenomeParam {
 /// A synthetic adult: face morphs, body measures, appearance. All
 /// morphs 0..1; age 18+. Invalid genomes refuse at construction —
 /// the engine never renders what it cannot validate.
-#[derive(Debug, Clone)]
+///
+/// Inspected via `grounding_schema()` (derive-generated field
+/// inventory), never via struct internals.
+#[derive(Debug, Clone, grounding_macros::GroundingType)]
 pub struct HumanGenome {
     pub age_years: u8,
     pub skin_tone: Rgb,
@@ -87,9 +90,8 @@ impl HumanGenome {
             return Err(format!("smile out of range [0,1]: {}", smile));
         }
         let graph = PropertyEvidence::Researched("anatomy graph + Gray's canon".to_string());
-        let style = |what: &str| {
-            PropertyEvidence::Stylistic(format!("renderer default for {}", what))
-        };
+        let style =
+            |what: &str| PropertyEvidence::Stylistic(format!("renderer default for {}", what));
         Ok(HumanGenome {
             age_years: age,
             skin_tone: Rgb::new(200, 150, 115),
@@ -132,7 +134,10 @@ impl HumanGenome {
     /// through struct internals.
     pub fn describe(&self) -> Vec<String> {
         let mut out = vec![
-            format!("age: {} (adult {}-{})", self.age_years, ADULT_AGE_MIN, ADULT_AGE_MAX),
+            format!(
+                "age: {} (adult {}-{})",
+                self.age_years, ADULT_AGE_MIN, ADULT_AGE_MAX
+            ),
             format!("skin_tone: {:?}", self.skin_tone),
             format!("hair_color: {:?}", self.hair_color),
         ];
@@ -179,9 +184,53 @@ mod tests {
             HumanGenome::with_params(30, 0.5, 0.9, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.0).unwrap();
         let (mn, mw) = (narrow.head_mesh(), wide.head_mesh());
         let width = |m: &Mesh| -> f64 {
-            m.verts.iter().filter(|v| v[1] < -0.25).map(|v| v[0].abs()).fold(0.0f64, f64::max) * 2.0
+            m.verts
+                .iter()
+                .filter(|v| v[1] < -0.25)
+                .map(|v| v[0].abs())
+                .fold(0.0f64, f64::max)
+                * 2.0
         };
         assert!(width(&mw) > width(&mn) + 0.03);
+    }
+
+    #[test]
+    fn schema_lists_every_field() {
+        let schema = HumanGenome::grounding_schema();
+        assert_eq!(schema.type_name, "HumanGenome");
+        let names: Vec<&str> = schema.fields.iter().map(|f| f.name).collect();
+        for want in ["age_years", "skin_tone", "cranial_width", "smile"] {
+            assert!(names.contains(&want), "{:?}", names);
+        }
+        let age = schema
+            .fields
+            .iter()
+            .find(|f| f.name == "age_years")
+            .unwrap();
+        assert_eq!(age.ty, "u8");
+    }
+
+    #[test]
+    fn morph_flags_survive_the_macro() {
+        use grounding_macros::GroundingType;
+        #[derive(GroundingType)]
+        struct DemoFace {
+            /// Jaw width.
+            #[morph]
+            jaw: f32,
+            /// Label.
+            name: String,
+        }
+        let demo = DemoFace {
+            jaw: 0.7,
+            name: "test".to_string(),
+        };
+        assert_eq!(demo.jaw, 0.7);
+        assert_eq!(demo.name, "test");
+        let schema = DemoFace::grounding_schema();
+        assert_eq!(schema.morphs().len(), 1);
+        assert_eq!(schema.morphs()[0].name, "jaw");
+        assert!(schema.morphs()[0].doc.contains("Jaw"));
     }
 
     #[test]

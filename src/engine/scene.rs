@@ -14,6 +14,7 @@
 //! Modification is the whole point: add/remove a node, re-render,
 //! and the receipt (per-material pixel counts) proves what changed
 //! and what didn't. The oracle is arithmetic on the buffer.
+use super::mesh::Mesh;
 use super::vision::{Image, Rgb};
 
 #[derive(Debug, Clone, Copy)]
@@ -68,6 +69,9 @@ impl Vec3 {
 pub struct Material {
     pub name: String,
     pub color: Rgb,
+    /// Wrap lighting 0..1: diffuse term clamps at -wrap instead of 0,
+    /// faking subsurface scatter on skin. Matte surfaces keep 0.
+    pub wrap: f64,
 }
 
 impl Material {
@@ -75,6 +79,15 @@ impl Material {
         Material {
             name: name.to_string(),
             color,
+            wrap: 0.0,
+        }
+    }
+
+    pub fn skin(name: &str, color: Rgb) -> Self {
+        Material {
+            name: name.to_string(),
+            color,
+            wrap: 0.35,
         }
     }
 }
@@ -98,6 +111,10 @@ pub enum Shape {
         radius: f64,
         mat: Material,
     },
+    /// Triangle mesh: generated heads, flags, props. Ray-triangle
+    /// intersection with smooth normals and a bounding-sphere
+    /// precheck; nearest hit wins (front surface on closed meshes).
+    Mesh { mesh: Mesh, mat: Material },
 }
 
 struct Hit {
@@ -105,6 +122,61 @@ struct Hit {
     point: Vec3,
     normal: Vec3,
     mat: Material,
+}
+
+/// Möller–Trumbore ray-triangle with smooth-normal interpolation.
+/// Backfaces culled (closed meshes only). Returns distance and the
+/// interpolated unit normal.
+#[allow(clippy::too_many_arguments)]
+fn ray_triangle(
+    origin: Vec3,
+    dir: Vec3,
+    a: Vec3,
+    b: Vec3,
+    c: Vec3,
+    na: [f64; 3],
+    nb: [f64; 3],
+    nc: [f64; 3],
+) -> Option<(f64, Vec3)> {
+    let e1 = b.sub(a);
+    let e2 = c.sub(a);
+    let p = Vec3::new(
+        dir.y * e2.z - dir.z * e2.y,
+        dir.z * e2.x - dir.x * e2.z,
+        dir.x * e2.y - dir.y * e2.x,
+    );
+    let det = e1.dot(p);
+    if det.abs() < 1e-12 {
+        return None; // parallel
+    }
+    // No backface cull: nearest-t wins, which on closed meshes is
+    // the front surface by construction. Simpler than winding proofs.
+    let inv = 1.0 / det;
+    let tvec = origin.sub(a);
+    let u = tvec.dot(p) * inv;
+    if !(0.0..=1.0).contains(&u) {
+        return None;
+    }
+    let q = Vec3::new(
+        tvec.y * e1.z - tvec.z * e1.y,
+        tvec.z * e1.x - tvec.x * e1.z,
+        tvec.x * e1.y - tvec.y * e1.x,
+    );
+    let v = dir.dot(q) * inv;
+    if v < 0.0 || u + v > 1.0 {
+        return None;
+    }
+    let t = e2.dot(q) * inv;
+    if t <= 1e-6 {
+        return None;
+    }
+    let w = 1.0 - u - v;
+    let n = Vec3::new(
+        w * na[0] + u * nb[0] + v * nc[0],
+        w * na[1] + u * nb[1] + v * nc[1],
+        w * na[2] + u * nb[2] + v * nc[2],
+    );
+    Some((t, n.norm()))
 }
 
 fn intersect(shape: &Shape, origin: Vec3, dir: Vec3) -> Option<Hit> {
@@ -268,6 +340,48 @@ fn intersect(shape: &Shape, origin: Vec3, dir: Vec3) -> Option<Hit> {
             }
             if let Some(h) = cap(*b) {
                 consider(h, &mut best);
+            }
+            best
+        }
+        Shape::Mesh { mesh, mat } => {
+            // Bounding-sphere precheck: most rays miss most meshes.
+            let (center, radius) = mesh.bounding_sphere();
+            let cc = Vec3::new(center[0], center[1], center[2]);
+            let oc = origin.sub(cc);
+            let b = oc.dot(dir);
+            let c = oc.dot(oc) - radius * radius;
+            if b * b - c < 0.0 {
+                return None;
+            }
+            let mut best: Option<Hit> = None;
+            for f in &mesh.faces {
+                let a = mesh.verts[f[0] as usize];
+                let b = mesh.verts[f[1] as usize];
+                let c = mesh.verts[f[2] as usize];
+                let va = Vec3::new(a[0], a[1], a[2]);
+                let vb = Vec3::new(b[0], b[1], b[2]);
+                let vc = Vec3::new(c[0], c[1], c[2]);
+                if let Some((t, n)) = ray_triangle(
+                    origin,
+                    dir,
+                    va,
+                    vb,
+                    vc,
+                    mesh.normals[f[0] as usize],
+                    mesh.normals[f[1] as usize],
+                    mesh.normals[f[2] as usize],
+                ) {
+                    let point = origin.add(dir.scale(t));
+                    let hit = Hit {
+                        dist: t,
+                        point,
+                        normal: n,
+                        mat: mat.clone(),
+                    };
+                    if best.as_ref().is_none_or(|h: &Hit| t < h.dist) {
+                        best = Some(hit);
+                    }
+                }
             }
             best
         }
@@ -514,7 +628,8 @@ impl Scene {
             Shape::Sphere { mat, .. }
             | Shape::Plane { mat, .. }
             | Shape::Box { mat, .. }
-            | Shape::Capsule { mat, .. } => !mat.name.starts_with(prefix),
+            | Shape::Capsule { mat, .. }
+            | Shape::Mesh { mat, .. } => !mat.name.starts_with(prefix),
         });
         before - self.shapes.len()
     }
@@ -626,7 +741,10 @@ fn render_core(scene: &Scene) -> (Image, Vec<usize>, Vec<String>) {
                                 .any(|s| intersect(s, shadow_origin, light.dir).is_some())
                         };
                         if lit {
-                            diffuse += light.intensity * h.normal.dot(light.dir).max(0.0);
+                            // Wrap: skin clamps at -wrap, faking
+                            // subsurface scatter into shadowed slopes.
+                            let wrap = h.mat.wrap.clamp(0.0, 1.0);
+                            diffuse += light.intensity * h.normal.dot(light.dir).max(-wrap);
                         }
                     }
                     img.set(
