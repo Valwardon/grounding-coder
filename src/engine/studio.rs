@@ -175,6 +175,38 @@ fn build_figure(
         super::body_oracle::pose_body(&body, &rig, props, pose).expect("learned poses validate");
     let min_y = posed.iter().map(|v| v[1]).fold(f64::INFINITY, f64::min);
     let verts: Vec<[f64; 3]> = posed.iter().map(|v| [v[0], v[1] - min_y, v[2]]).collect();
+    // Lips: blush the skin toward red around the posed mouth center.
+    // The center comes from posed mouth verts — measured, not placed.
+    let mouth_c = {
+        let n = help.mouth.len().max(1) as f64;
+        let mut c = [0.0; 3];
+        for i in &help.mouth {
+            let v = verts[*i];
+            c[0] += v[0];
+            c[1] += v[1];
+            c[2] += v[2];
+        }
+        [c[0] / n, c[1] / n, c[2] / n]
+    };
+    let mut skin_here = skin.clone();
+    if !help.mouth.is_empty() {
+        skin_here.blush = Some((mouth_c, Rgb::new(150, 82, 68), 0.028 * s));
+    }
+    // Nose tip: front-most skin vert above the mouth; nostrils sit
+    // just under and beside it. Geometry-measured per render.
+    let nose_tip = verts
+        .iter()
+        .filter(|v| v[1] > mouth_c[1] + 0.015 && v[1] < mouth_c[1] + 0.075 && v[0].abs() < 0.03)
+        .max_by(|a, b| a[2].partial_cmp(&b[2]).unwrap_or(std::cmp::Ordering::Equal))
+        .copied();
+    let nostril_mat = Material::named("nostril", Rgb::new(28, 16, 13));
+    let mats = [
+        skin_here,
+        Material::named("eye", Rgb::new(22, 13, 9)),
+        Material::named("mouth", Rgb::new(88, 28, 22)),
+        Material::named("hair", Rgb::new(48, 30, 17)),
+        Material::named("shorts", Rgb::new(38, 38, 44)),
+    ];
     // Face classes by vert membership (helpers never share verts
     // with the body — disconnected by construction, asserted).
     let in_set = |f: &[u32; 3], set: &[usize]| f.iter().any(|i| set.contains(&(*i as usize)));
@@ -194,13 +226,6 @@ fn build_figure(
             0
         }
     };
-    let mats = [
-        skin.clone(),
-        Material::named("eye", Rgb::new(22, 13, 9)),
-        Material::named("mouth", Rgb::new(88, 28, 22)),
-        Material::named("hair", Rgb::new(48, 30, 17)),
-        Material::named("shorts", Rgb::new(38, 38, 44)),
-    ];
     for class in 0u8..=4u8 {
         let mut remap: HashMap<usize, u32> = HashMap::new();
         let mut vout: Vec<[f64; 3]> = Vec::new();
@@ -273,6 +298,21 @@ fn build_figure(
             mesh: glint,
             mat: Material::named("glint", Rgb::new(245, 245, 248)),
         });
+    }
+    // Nostrils: millimeter dark dots flanking under the nose tip.
+    // Placement measured from geometry; symmetry asserted by test.
+    if let Some(tip) = nose_tip {
+        for side in [-1.0, 1.0] {
+            let dot = Mesh::sphere(6, 4, 0.0018 * s).translated(
+                tip[0] + side * 0.008,
+                tip[1] - 0.006,
+                tip[2] - 0.003,
+            );
+            shapes.push(Shape::Mesh {
+                mesh: dot,
+                mat: nostril_mat.clone(),
+            });
+        }
     }
 }
 

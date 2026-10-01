@@ -72,6 +72,12 @@ pub struct Material {
     /// Wrap lighting 0..1: diffuse term clamps at -wrap instead of 0,
     /// faking subsurface scatter on skin. Matte surfaces keep 0.
     pub wrap: f64,
+    /// Procedural mottling: ±5% tonal noise by world position.
+    /// Skin only — everything else stays flat.
+    pub mottled: bool,
+    /// Blush: blend toward a target color near a world-space center
+    /// (lips). (center, target, radius_m). None = uniform.
+    pub blush: Option<([f64; 3], Rgb, f64)>,
 }
 
 impl Material {
@@ -80,6 +86,8 @@ impl Material {
             name: name.to_string(),
             color,
             wrap: 0.0,
+            mottled: false,
+            blush: None,
         }
     }
 
@@ -88,8 +96,46 @@ impl Material {
             name: name.to_string(),
             color,
             wrap: 0.35,
+            mottled: true,
+            blush: None,
         }
     }
+}
+
+/// Deterministic tonal noise for skin: two sin-hash octaves in
+/// [0.93, 1.0]. Same point twice → same factor, on any run.
+fn mottle(p: Vec3) -> f64 {
+    fn hash(v: Vec3) -> f64 {
+        let d = v.x * 12.9898 + v.y * 78.233 + v.z * 37.719;
+        (d.sin() * 43758.5453).fract().abs()
+    }
+    0.93 + 0.05 * hash(p.scale(9.0)) + 0.02 * hash(p.scale(23.0))
+}
+
+/// Base color with material finish applied (mottling, then blush).
+/// Pure function of material + world point.
+pub fn finished_base(mat: &Material, p: Vec3) -> Rgb {
+    let (mut r, mut g, mut b) = (mat.color.r as f64, mat.color.g as f64, mat.color.b as f64);
+    if mat.mottled {
+        let n = mottle(p);
+        r *= n;
+        g *= n;
+        b *= n;
+    }
+    if let Some((c, target, rad)) = &mat.blush {
+        let d = ((p.x - c[0]).powi(2) + (p.y - c[1]).powi(2) + (p.z - c[2]).powi(2)).sqrt();
+        // Full blend at center, gone by the radius.
+        let f = ((rad - d) / rad).clamp(0.0, 1.0);
+        let f = f * f * (3.0 - 2.0 * f);
+        r += (target.r as f64 - r) * f;
+        g += (target.g as f64 - g) * f;
+        b += (target.b as f64 - b) * f;
+    }
+    Rgb::new(
+        r.clamp(0.0, 255.0).round() as u8,
+        g.clamp(0.0, 255.0).round() as u8,
+        b.clamp(0.0, 255.0).round() as u8,
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -787,7 +833,7 @@ fn render_core(scene: &Scene) -> (Image, Vec<usize>, Vec<String>) {
                         x,
                         y,
                         shade(
-                            h.mat.color,
+                            finished_base(&h.mat, h.point),
                             scene.ambient + (1.0 - scene.ambient) * diffuse.min(1.0),
                         ),
                     );

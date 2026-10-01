@@ -32,6 +32,28 @@ fn walkthrough_creates_receipted_maquette() {
     assert!(hair > 200, "hair must read, got {}", hair);
     let shorts = c.image.count_near(Rgb::new(38, 38, 44), 2000);
     assert!(shorts > 200, "garment must read, got {}", shorts);
+    // Nostrils render on both sides of the nose (symmetric dots).
+    let (mut nl, mut nr) = (0u32, 0u32);
+    for y in 0..c.image.height {
+        for x in 0..c.image.width {
+            if let Some(p) = c.image.get(x, y) {
+                let d = (p.r as i32 - 28).abs() + (p.g as i32 - 16).abs() + (p.b as i32 - 13).abs();
+                if d < 60 {
+                    if x < c.image.width / 2 {
+                        nl += 1;
+                    } else {
+                        nr += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        nl > 0 && nr > 0,
+        "nostrils must read both sides: {} {}",
+        nl,
+        nr
+    );
     // Receipt: subject rides the researched measured rig; everything
     // else is still defaulted.
     assert!(!c.receipt.is_empty());
