@@ -1,0 +1,31 @@
+{
+  "kind": "constructed-studio-maquette, not a photograph",
+  "prompt": "A man saluting, waving an American flag, wearing a straw hat.",
+  "requirements": [
+    {
+      "note": "no researched model yet — canon/default construction",
+      "requirement": "subject:man",
+      "researched": false
+    },
+    {
+      "note": "no researched model yet — canon/default construction",
+      "requirement": "action:salute",
+      "researched": false
+    },
+    {
+      "note": "no researched model yet — canon/default construction",
+      "requirement": "action:wave",
+      "researched": false
+    },
+    {
+      "note": "no researched model yet — canon/default construction",
+      "requirement": "object:american_flag",
+      "researched": false
+    },
+    {
+      "note": "no researched model yet — canon/default construction",
+      "requirement": "object:hat_2",
+      "researched": false
+    }
+  ]
+}

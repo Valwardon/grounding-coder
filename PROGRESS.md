@@ -1,5 +1,32 @@
 # Grounding Coder — Progress
 
+## v0.25.10 — Phases 6+7: deformation + studio person (2026-10-01)
+
+- Phase 6 (`engine/deform.rs` + `Mesh::tube`): cloth wave operator
+  (amplitude/wavelength/phase/pole-taper, normals recomputed,
+  zero-is-identity, peak and area bounded by test). Wave parameters
+  are stated procedural defaults — derivation from cloth examples
+  is staged. Tapered tubes verified outward-wound analytically.
+- Phase 7 (`engine/studio.rs`): `create_image(prompt)` — scene
+  requirements → learned representative pose (largest cluster,
+  salute claims right arm) → canon proportions → tapered-body
+  figure with parametric smiling head → assembly-bound straw hat
+  (hemisphere crown + brim) and waving gray cloth + pole → studio
+  sweep, key + fill, film finish. Every requirement receipted
+  researched-or-defaulted (all defaulted today — stated, not
+  hidden). `create_image_strict` refuses listing missing evidence
+  (§12 path, tested). Non-humans and action-less prompts refuse.
+- End product: `samples/studio-person-640x480.bmp` (+ receipt) —
+  the best construction with current knowledge: learned pose,
+  canon body, parametric head, bound hat and cloth. Labeled
+  constructed maquette, never a photograph. True photorealism
+  needs researched models (the receipt names them) — no
+  generative model, no copied person, no block figure.
+- `tests/studio_person.rs`: 5 cases (receipted maquette, strict
+  refusal, non-human + poseless refusal, sample commit).
+- 336 tests green (187 lib + 149 integration), `cargo check
+  --all-features`, clippy zero warnings, fmt clean.
+
 ## v0.25.9 — Phase 5 relationships: assembly placements (2026-10-01)
 
 - `engine/assembly.rs`: relationships become coordinates — worn

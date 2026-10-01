@@ -215,6 +215,69 @@ impl Mesh {
         }
     }
 
+    /// Tapered tube from `from` (radius r0) to `to` (radius r1):
+    /// limbs, torsos, poles. `n` radial steps, open ends (callers
+    /// overlap segments into joints). Plane-grid winding verified
+    /// outward analytically; smooth normals via compute_normals.
+    pub fn tube(from: [f64; 3], to: [f64; 3], r0: f64, r1: f64, n: u32) -> Self {
+        let n = n.max(6);
+        let ax = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+        let len = (ax[0] * ax[0] + ax[1] * ax[1] + ax[2] * ax[2])
+            .sqrt()
+            .max(1e-9);
+        let a = [ax[0] / len, ax[1] / len, ax[2] / len];
+        let up = if a[1].abs() < 0.9 {
+            [0.0, 1.0, 0.0]
+        } else {
+            [1.0, 0.0, 0.0]
+        };
+        let mut u = [
+            a[1] * up[2] - a[2] * up[1],
+            a[2] * up[0] - a[0] * up[2],
+            a[0] * up[1] - a[1] * up[0],
+        ];
+        let ul = (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]).sqrt().max(1e-9);
+        u = [u[0] / ul, u[1] / ul, u[2] / ul];
+        let v = [
+            a[1] * u[2] - a[2] * u[1],
+            a[2] * u[0] - a[0] * u[2],
+            a[0] * u[1] - a[1] * u[0],
+        ];
+        let mut verts = Vec::new();
+        for j in 0..=1 {
+            let t = j as f64;
+            let r = r0 + (r1 - r0) * t;
+            let c = [
+                from[0] + ax[0] * t,
+                from[1] + ax[1] * t,
+                from[2] + ax[2] * t,
+            ];
+            for i in 0..=n {
+                let th = i as f64 * TAU / n as f64;
+                let (ct, st) = (th.cos(), th.sin());
+                verts.push([
+                    c[0] + r * (u[0] * ct + v[0] * st),
+                    c[1] + r * (u[1] * ct + v[1] * st),
+                    c[2] + r * (u[2] * ct + v[2] * st),
+                ]);
+            }
+        }
+        let mut faces = Vec::new();
+        let row = n + 1;
+        for i in 0..n {
+            let a0 = i;
+            faces.push([a0, a0 + 1, a0 + row]);
+            faces.push([a0 + 1, a0 + row + 1, a0 + row]);
+        }
+        let mut mesh = Mesh {
+            verts,
+            faces,
+            normals: Vec::new(),
+        };
+        mesh.compute_normals();
+        mesh
+    }
+
     /// Flat grid in the XY plane, centered origin: (nu+1)×(nv+1)
     /// verts, outward +z normals. Callers displace then recompute.
     pub fn plane_grid(w: f64, h: f64, nu: u32, nv: u32) -> Self {
