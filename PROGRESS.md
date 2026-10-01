@@ -1,5 +1,53 @@
 # Grounding Coder — Progress
 
+## v0.25.12 — Premade body oracle, chat owns pictures (2026-10-01)
+
+- Premade oracle, not hand anatomy: MakeHuman hm08 base mesh +
+  adult macro morphs (CC0, pinned `a8bc2d5`, SHA-verified,
+  `assets/oracle/` + PROVENANCE.md). `engine/body_oracle.rs` only
+  parses (OBJ + sparse targets), morphs, measures, and rigid-binds
+  parts to FK — rest pose is bit-exact identity. Deleted in its
+  wake: bespoke torso equation, tube body, sculpted fingers, pecs.
+- `engine/accel.rs`: uniform-grid ray march, pixel-equal to brute
+  force by construction (same math) and by test — 37k-tri oracle
+  bodies render in seconds.
+- `engine/picture.rs`: picture requests route INSIDE chat. The bot
+  picks sources itself (adult-filtered OpenImages for people,
+  Commons for the rest), collects with all gates, constructs with
+  researched models where sufficient. Code prompts unchanged.
+- Safety review on all Commons/web paths: minors/nudity titles
+  refuse before fetch (proved live). Titles travel into evidence.
+- Proved as the messy human, chat-only, twice: mountain + full
+  walkthrough — parse, source choice, collection, refusals,
+  construction, receipt, all by the bot.
+- 346 tests green (197 lib + 149 integration), `cargo check
+  --all-features`, clippy zero warnings, fmt clean.
+
+## v0.25.11 — Chat owns the picture loop (2026-10-01)
+
+- `engine/picture.rs`: picture requests route INSIDE chat —
+  human subject + poseable action goes to scene-parse → research
+  (bot picks adult-filtered OpenImages for people, Commons for
+  the rest; the user never names a source) → evidence → construct
+  with researched models where sufficient, defaults receipted
+  otherwise. Code prompts route exactly as before.
+- Safety review (`plates::review_title`, all Commons/web paths):
+  minors/nudity/sexual titles refuse BEFORE fetch. Proved live
+  against real search results ("naked", "young boy" hits refused
+  with reasons). Titles now travel into evidence records, so every
+  banked plate stays auditable.
+- Torso as mathematics (`Mesh::parametric_torso` + `TorsoParams`):
+  elliptical cross-sections through hip/waist/chest/neck stations
+  from body parameters — no modeled torso anywhere. Fuller body:
+  muscle-profiled limbs, joint spheres, fingered hands, heeled
+  feet, pecs.
+- Proved as the messy human, twice, chat-only: "a man standing
+  on a mountain" and the full walkthrough — parse, source
+  choice, collection, refusals, construction, receipt, all by the
+  bot. Downscale discipline on chat plates (9MB vs 100MB+).
+- 340 tests green (191 lib + 149 integration), `cargo check
+  --all-features`, clippy zero warnings, fmt clean.
+
 ## v0.25.10 — Phases 6+7: deformation + studio person (2026-10-01)
 
 - Phase 6 (`engine/deform.rs` + `Mesh::tube`): cloth wave operator

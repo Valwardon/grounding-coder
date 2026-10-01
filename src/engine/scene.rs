@@ -128,7 +128,9 @@ struct Hit {
 /// Backfaces culled (closed meshes only). Returns distance and the
 /// interpolated unit normal.
 #[allow(clippy::too_many_arguments)]
-fn ray_triangle(
+/// Möller–Trumbore ray-triangle with smooth-normal interpolation.
+/// Shared with the grid accelerator so both paths run identical math.
+pub(crate) fn ray_triangle(
     origin: Vec3,
     dir: Vec3,
     a: Vec3,
@@ -698,6 +700,21 @@ fn render_core(scene: &Scene) -> (Image, Vec<usize>, Vec<String>) {
     };
     let mut labels = vec![0usize; (cam.width * cam.height) as usize];
 
+    // Grid over mesh triangles: identical pixels to brute force
+    // (same ray_triangle math, equality-tested), a fraction of the
+    // rays-per-tri cost on dense oracle meshes. Analytic shapes keep
+    // the existing path; empty grid = old behavior exactly.
+    let mesh_list: Vec<(&crate::engine::mesh::Mesh, Material)> = scene
+        .shapes
+        .iter()
+        .filter_map(|s| match s {
+            Shape::Mesh { mesh, mat } => Some((mesh, mat.clone())),
+            _ => None,
+        })
+        .collect();
+    let mut grid = crate::engine::accel::TriGrid::build(&mesh_list);
+    let grid_on = !grid.is_empty();
+
     for y in 0..cam.height {
         let py = 1.0 - 2.0 * (y as f64 + 0.5) / cam.height as f64;
         for x in 0..cam.width {
@@ -708,9 +725,25 @@ fn render_core(scene: &Scene) -> (Image, Vec<usize>, Vec<String>) {
                 .norm();
             let mut best: Option<Hit> = None;
             for s in &scene.shapes {
+                // Meshes ride the grid now (same tris, same math).
+                if grid_on && matches!(s, Shape::Mesh { .. }) {
+                    continue;
+                }
                 if let Some(h) = intersect(s, cam.pos, dir)
                     && best.as_ref().is_none_or(|b: &Hit| h.dist < b.dist)
                 {
+                    best = Some(h);
+                }
+            }
+            if grid_on && let Some((t, n, mi)) = grid.intersect(cam.pos, dir) {
+                let point = cam.pos.add(dir.scale(t));
+                let h = Hit {
+                    dist: t,
+                    point,
+                    normal: n,
+                    mat: grid.mats[mi].clone(),
+                };
+                if best.as_ref().is_none_or(|b: &Hit| h.dist < b.dist) {
                     best = Some(h);
                 }
             }
@@ -735,10 +768,13 @@ fn render_core(scene: &Scene) -> (Image, Vec<usize>, Vec<String>) {
                         let lit = if !light.casts_shadow {
                             true
                         } else {
-                            !scene
-                                .shapes
-                                .iter()
-                                .any(|s| intersect(s, shadow_origin, light.dir).is_some())
+                            // Grid first (same tris), analytics after —
+                            // identical verdicts, early exit preserved.
+                            !(grid_on && grid.occluded(shadow_origin, light.dir))
+                                && !scene.shapes.iter().any(|s| {
+                                    (!grid_on || !matches!(s, Shape::Mesh { .. }))
+                                        && intersect(s, shadow_origin, light.dir).is_some()
+                                })
                         };
                         if lit {
                             // Wrap: skin clamps at -wrap, faking

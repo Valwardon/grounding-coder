@@ -49,6 +49,56 @@ pub struct SourcedPlate {
     /// How the license was determined ("Commons file metadata",
     /// "page states cc0"). Auditable evidence, not a bare claim.
     pub basis: String,
+    /// Source title (Commons file title / page title). Travels into
+    /// evidence records so every banked plate stays auditable.
+    pub title: String,
+}
+
+/// Age/safety review: title words that refuse a candidate BEFORE
+/// fetch. No minors, no nudity, no sexual content — in ANY source
+/// path, without exception. Keyword matching is crude by design:
+/// over-refusal is the safe direction, and every refusal names its
+/// reason.
+const UNSAFE_TITLE_WORDS: &[&str] = &[
+    "naked",
+    "nude",
+    "nudity",
+    "boy",
+    "girl",
+    "child",
+    "children",
+    "kid",
+    "kids",
+    "teen",
+    "teenager",
+    "baby",
+    "infant",
+    "toddler",
+    "minor",
+    "schoolboy",
+    "schoolgirl",
+    "erotic",
+    "porn",
+    "sexual",
+    "sexy",
+    "fetish",
+    "bdsm",
+];
+
+/// Refuse unsafe titles with the reason. Pure function of the title.
+pub fn review_title(title: &str) -> Result<(), String> {
+    let lower = title.to_lowercase();
+    let words: Vec<&str> = lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    if let Some(hit) = UNSAFE_TITLE_WORDS.iter().find(|w| words.contains(w)) {
+        return Err(format!(
+            "{:?}: refused by age/safety review ({})",
+            title, hit
+        ));
+    }
+    Ok(())
 }
 
 /// Check one Commons `imageinfo` record. Returns provenance on
@@ -250,6 +300,10 @@ pub async fn source_plates(query: &str, limit: u32) -> (Vec<SourcedPlate>, Vec<S
         if plates.len() >= limit as usize {
             break;
         }
+        if let Err(e) = review_title(&title) {
+            refused.push(e);
+            continue;
+        }
         let provenance = match require_provenance(&title, &page_url, &file_url, &author, &license) {
             Ok(p) => p,
             Err(e) => {
@@ -275,6 +329,7 @@ pub async fn source_plates(query: &str, limit: u32) -> (Vec<SourcedPlate>, Vec<S
                 image,
                 provenance,
                 basis: "Commons file metadata (LicenseShortName)".to_string(),
+                title: title.clone(),
             }),
             Err(e) => refused.push(format!("{:?}: {}", title, e)),
         }
@@ -543,6 +598,10 @@ pub async fn source_plates_web(query: &str, limit: u32) -> (Vec<SourcedPlate>, V
         } else {
             hit.title.clone()
         };
+        if let Err(e) = review_title(&label) {
+            refused.push(e);
+            continue;
+        }
         let html = match crate::http::get_text(&hit.page_url).await {
             Ok((st, body)) if (200..300).contains(&st) => body,
             _ => {
@@ -598,6 +657,7 @@ pub async fn source_plates_web(query: &str, limit: u32) -> (Vec<SourcedPlate>, V
                 image,
                 provenance,
                 basis: ev.basis.clone(),
+                title: label.clone(),
             }),
             None => refused.push(format!("{:?}: undecodable: {}", label, fetch_err)),
         }
@@ -888,6 +948,7 @@ pub mod openimages {
                         image,
                         provenance,
                         basis: format!("Open Images V4 box {} by {}", row.label, meta.author),
+                        title: id.clone(),
                     },
                     bbox: (row.x0, row.y0, row.x1, row.y1),
                     label: row.label.clone(),
@@ -1006,6 +1067,25 @@ mod tests {
         assert!(
             require_provenance("F", "P", "http://x/y.jpg", "A. Uthor", "CC BY-ND 4.0").is_err()
         );
+    }
+
+    #[test]
+    fn safety_review_refuses_minors_and_nudity() {
+        assert!(review_title("File:Man standing on a mountain.jpg").is_ok());
+        assert!(review_title("File:Portrait of a woman.jpg").is_ok());
+        // Whole-word matching: "childhood" is not the word "child"
+        // (titles can still hide what words don't say — the review
+        // is one gate, not a guarantee).
+        assert!(review_title("File:Childhood street games.jpg").is_ok());
+        for bad in [
+            "File:A man posing naked.jpg",
+            "File:Young boy smiling.jpg",
+            "File:Girl with a flag.jpg",
+            "File:Teenager portrait.jpg",
+            "File:Erotic sculpture detail.jpg",
+        ] {
+            assert!(review_title(bad).is_err(), "must refuse {}", bad);
+        }
     }
 
     #[test]

@@ -17,6 +17,8 @@ fn synth_fetch(query: &str, need: usize) -> (Vec<VisualExample>, Vec<String>) {
     for i in 0..need.min(2) {
         out.push(VisualExample {
             source: format!("synthetic:{}:{}", query, i),
+            title: format!("synthetic {} {}", query, i),
+            page_url: "synthetic".to_string(),
             license: "synthetic".to_string(),
             basis: "test".to_string(),
             bbox: [0, 0, 100, 150],
@@ -80,6 +82,8 @@ fn budgets_gate_collection() {
         });
     let mk = || VisualExample {
         source: "synthetic".to_string(),
+        title: "synthetic".to_string(),
+        page_url: "synthetic".to_string(),
         license: "synthetic".to_string(),
         basis: "test".to_string(),
         bbox: [0, 0, 10, 10],
@@ -134,7 +138,14 @@ fn features_come_from_classifiers() {
     assert!(f.contains_key("aspect"));
     assert!(f.contains_key("brightness"));
     assert!(f.contains_key("tone_r"));
-    let ex = example_from_plate("synthetic", "synthetic", "test", &img);
+    let ex = example_from_plate(
+        "synthetic",
+        "synthetic",
+        "synthetic",
+        "synthetic",
+        "test",
+        &img,
+    );
     assert_eq!(ex.bbox, [0, 0, 100, 150]);
     assert!(ex.segmentation.is_some());
     assert!(ex.keypoints.is_some_and(|k| k.contains("unavailable")));

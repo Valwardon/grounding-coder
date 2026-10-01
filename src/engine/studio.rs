@@ -13,7 +13,7 @@
 //! `create_image_strict` refuses until researched models land,
 //! listing exactly what is missing.
 
-use super::mesh::{HeadShape, Mesh};
+use super::mesh::Mesh;
 use super::scene::{Camera, Light, Material, Scene, Shape, Vec3};
 use super::skeleton::{BodyProportions, Joint, Pose, V3};
 use super::vision::{Image, Rgb};
@@ -74,19 +74,6 @@ fn skin_mat() -> Material {
     )
 }
 
-fn arr(p: V3) -> [f64; 3] {
-    [p.x, p.y, p.z]
-}
-
-/// Tapered limb segment between posed joints, extended 12% past
-/// both ends so open tube ends bury inside neighboring segments.
-fn bone(a: [f64; 3], b: [f64; 3], r0: f64, r1: f64) -> Mesh {
-    let d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-    let a2 = [a[0] - d[0] * 0.12, a[1] - d[1] * 0.12, a[2] - d[2] * 0.12];
-    let b2 = [b[0] + d[0] * 0.12, b[1] + d[1] * 0.12, b[2] + d[2] * 0.12];
-    Mesh::tube(a2, b2, r0, r1, 10)
-}
-
 /// Learned representative pose for an action: largest normalized
 /// cluster wins (deterministic). Unknown actions yield nothing.
 fn learned_pose(action: &str) -> Option<Pose> {
@@ -120,76 +107,91 @@ fn set_arm(pose: &mut Pose, right: bool, src: &Pose) {
     pose.set(wr, src.get(wr));
 }
 
-/// Build the posed figure meshes: tapered tubes on FK bones,
-/// parametric head with a mild smile, all skin maquette finish.
-fn build_figure(props: &BodyProportions, pos: &HashMap<Joint, V3>, shapes: &mut Vec<Shape>) {
+/// Vendored oracle bytes: base mesh + adult macro morphs (CC0,
+/// pinned — see assets/oracle/PROVENANCE.md). Baked into the binary
+/// so the app never fetches bodies at runtime.
+const ORACLE_BASE_OBJ: &[u8] = include_bytes!("../../assets/oracle/base.obj");
+
+fn oracle_text(name: &str) -> &'static str {
+    match name {
+        "male" => include_str!("../../assets/oracle/male-young.target"),
+        _ => include_str!("../../assets/oracle/female-young.target"),
+    }
+}
+
+use std::sync::OnceLock;
+
+fn oracle_base() -> &'static super::body_oracle::OracleBody {
+    static BASE: OnceLock<super::body_oracle::OracleBody> = OnceLock::new();
+    BASE.get_or_init(|| {
+        let text = std::str::from_utf8(ORACLE_BASE_OBJ).expect("vendored obj is utf8");
+        super::body_oracle::parse_obj(text).expect("vendored base parses")
+    })
+}
+
+fn oracle_deltas(sex: &str) -> Vec<super::body_oracle::MorphDelta> {
+    super::body_oracle::parse_target(oracle_text(sex)).expect("vendored morph parses")
+}
+
+/// Build the posed figure from the premade oracle: morphed base
+/// mesh, rigid-bound to FK parts, joint spheres over the seams.
+/// No tubes, no parametric torso, no sculpted hands or head —
+/// research provides the body; the engine only poses it. The
+/// `female` flag selects the macro morph; ground contact holds the
+/// lowest vert at y=0.
+fn build_figure(
+    props: &BodyProportions,
+    pos: &HashMap<Joint, V3>,
+    pose: &Pose,
+    female: bool,
+    skin: &Material,
+    shapes: &mut Vec<Shape>,
+) {
     let s = props.stature_m;
-    let skin = skin_mat();
-    let seg = |a: Joint, b: Joint, r0: f64, r1: f64| -> Mesh {
-        bone(arr(pos[&a]), arr(pos[&b]), r0 * s, r1 * s)
-    };
-    let mut push = |m: Mesh| {
-        shapes.push(Shape::Mesh {
-            mesh: m,
-            mat: skin.clone(),
-        })
-    };
-    // Torso: pelvis→chest barrel, shoulder + hip bars.
-    push(seg(Joint::Pelvis, Joint::Chest, 0.095, 0.105));
-    push(seg(Joint::Chest, Joint::Neck, 0.060, 0.048));
-    push(seg(Joint::ShoulderL, Joint::ShoulderR, 0.048, 0.048));
-    push(seg(Joint::HipL, Joint::HipR, 0.062, 0.062));
-    // Arms (hands extended past the wrist joint).
-    for (sh, el, wr, ha) in [
-        (Joint::ShoulderL, Joint::ElbowL, Joint::WristL, Joint::HandL),
-        (Joint::ShoulderR, Joint::ElbowR, Joint::WristR, Joint::HandR),
-    ] {
-        push(seg(sh, el, 0.042, 0.034));
-        push(seg(el, wr, 0.034, 0.026));
-        let w = pos[&wr];
-        let h = pos[&ha];
-        let d = V3::new(h.x - w.x, h.y - w.y, h.z - w.z);
-        let l = (d.x * d.x + d.y * d.y + d.z * d.z).sqrt().max(1e-9);
-        let tip = V3::new(
-            h.x + d.x / l * 0.06 * s,
-            h.y + d.y / l * 0.06 * s,
-            h.z + d.z / l * 0.06 * s,
-        );
-        push(bone(arr(w), arr(tip), 0.026 * s, 0.018 * s));
+    let mut body = oracle_base().clone();
+    let deltas = oracle_deltas(if female { "female" } else { "male" });
+    super::body_oracle::apply_morph(&mut body, &deltas, 1.0).expect("vendored morph fits");
+    // Scale to target stature about the feet, then bind + pose.
+    let m = super::body_oracle::measure_body(&body);
+    let k = s / m.stature_m;
+    for v in &mut body.verts {
+        v[0] *= k;
+        v[1] *= k;
+        v[2] *= k;
     }
-    // Legs (toes extended past the foot joint).
-    for (hip, knee, ank, foot) in [
-        (Joint::HipL, Joint::KneeL, Joint::AnkleL, Joint::FootL),
-        (Joint::HipR, Joint::KneeR, Joint::AnkleR, Joint::FootR),
-    ] {
-        push(seg(hip, knee, 0.075, 0.056));
-        push(seg(knee, ank, 0.056, 0.040));
-        let a = pos[&ank];
-        let f = pos[&foot];
-        let d = V3::new(f.x - a.x, f.y - a.y, f.z - a.z);
-        let l = (d.x * d.x + d.y * d.y + d.z * d.z).sqrt().max(1e-9);
-        let tip = V3::new(
-            f.x + d.x / l * 0.05 * s,
-            f.y + d.y / l * 0.05 * s,
-            f.z + d.z / l * 0.05 * s,
-        );
-        push(bone(arr(a), arr(tip), 0.040 * s, 0.030 * s));
-    }
-    // Head: parametric, scaled to canon head height, mild smile.
-    let head_h = s / 7.5;
-    let hp = pos[&Joint::Head];
-    let mut head = Mesh::parametric_head(24, 18, &HeadShape::default());
-    let deltas = head.smile_deltas();
-    head = head.blendshape(&deltas, 0.3);
-    let center = [hp.x, hp.y + head_h * 0.42, hp.z];
-    head.displace(|v| {
-        [
-            center[0] + v[0] * head_h,
-            center[1] + v[1] * head_h,
-            center[2] + v[2] * head_h,
-        ]
+    let parts = super::body_oracle::bind_parts(&body, props);
+    let posed =
+        super::body_oracle::pose_body(&body, &parts, props, pose).expect("learned poses validate");
+    let min_y = posed.iter().map(|v| v[1]).fold(f64::INFINITY, f64::min);
+    let verts: Vec<[f64; 3]> = posed.iter().map(|v| [v[0], v[1] - min_y, v[2]]).collect();
+    let mut mesh = Mesh {
+        verts,
+        faces: body.faces.clone(),
+        normals: Vec::new(),
+    };
+    mesh.compute_normals();
+    shapes.push(Shape::Mesh {
+        mesh,
+        mat: skin.clone(),
     });
-    push(head);
+    // Seam spheres over bent joints (rigid-part covers, stated).
+    for (j, r) in [
+        (Joint::ShoulderL, 0.058),
+        (Joint::ShoulderR, 0.058),
+        (Joint::ElbowL, 0.040),
+        (Joint::ElbowR, 0.040),
+        (Joint::KneeL, 0.062),
+        (Joint::KneeR, 0.062),
+        (Joint::AnkleL, 0.044),
+        (Joint::AnkleR, 0.044),
+    ] {
+        let q = pos[&j];
+        let ball = Mesh::sphere(10, 6, r * s).translated(q.x, q.y - min_y, q.z);
+        shapes.push(Shape::Mesh {
+            mesh: ball,
+            mat: skin.clone(),
+        });
+    }
 }
 
 /// Straw hat at an assembly anchor: hemisphere crown + brim disc.
@@ -260,10 +262,18 @@ fn build_cloth(anchor: V3, s: f64, shapes: &mut Vec<Shape>) {
 }
 
 /// Full pipeline: prompt → requirements → learned pose → figure →
-/// bound objects → studio render. On success the receipt marks every
-/// requirement researched-or-defaulted; nothing researched exists
-/// yet, so every status is honestly `false` with its reason.
+/// bound objects → studio render. See `create_image_with` for the
+/// researched-skin variant; this one constructs with stated defaults.
 pub fn create_image(prompt: &str) -> Result<Creation, CreationError> {
+    create_image_with(prompt, None)
+}
+
+/// Full pipeline with an optional researched skin palette
+/// (color + provenance note). Receipted as researched when present.
+pub fn create_image_with(
+    prompt: &str,
+    skin: Option<(Rgb, String)>,
+) -> Result<Creation, CreationError> {
     let spec = super::scene_intent::parse_scene(prompt);
     let human = spec
         .subjects
@@ -305,8 +315,12 @@ pub fn create_image(prompt: &str) -> Result<Creation, CreationError> {
     let pos = super::skeleton::forward_kinematics(&props, &pose).expect("learned poses validate");
     let asm = super::assembly::assemble(&spec, &pos, &props);
 
+    let skin_mat_built = match &skin {
+        Some((c, _)) => Material::skin("skin", *c),
+        None => skin_mat(),
+    };
     let mut shapes: Vec<Shape> = Vec::new();
-    build_figure(&props, &pos, &mut shapes);
+    build_figure(&props, &pos, &pose, female, &skin_mat_built, &mut shapes);
     for a in &asm.attachments {
         if a.object_id.contains("hat") {
             build_hat(a.anchor, props.stature_m, &mut shapes);
@@ -352,10 +366,17 @@ pub fn create_image(prompt: &str) -> Result<Creation, CreationError> {
     let mut receipt: Vec<ReqStatus> = store
         .requirements
         .iter()
-        .map(|r| ReqStatus {
-            requirement: r.id.clone(),
-            researched: false,
-            note: "no researched model yet — canon/default construction".to_string(),
+        .map(|r| {
+            let palette = skin
+                .as_ref()
+                .filter(|_| r.category == super::evidence::Category::Subject);
+            ReqStatus {
+                requirement: r.id.clone(),
+                researched: palette.is_some(),
+                note: palette.map(|(_, src)| src.clone()).unwrap_or_else(|| {
+                    "no researched model yet — canon/default construction".to_string()
+                }),
+            }
         })
         .collect();
     for u in &asm.unresolved {

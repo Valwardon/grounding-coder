@@ -1,7 +1,9 @@
+pub mod accel;
 pub mod anatomy;
 pub mod arena;
 pub mod assembly;
 pub mod body_measure;
+pub mod body_oracle;
 pub mod budget;
 pub mod catalog;
 pub mod compose;
@@ -19,6 +21,7 @@ pub mod material;
 pub mod mesh;
 pub mod object_model;
 pub mod pathfind;
+pub mod picture;
 pub mod plan;
 pub mod plates;
 pub mod pose_learn;

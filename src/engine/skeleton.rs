@@ -78,7 +78,7 @@ impl Joint {
     }
 
     /// Left joints mirror abduction; knees flex backward.
-    fn mirror(self) -> f64 {
+    pub(crate) fn mirror(self) -> f64 {
         use Joint::*;
         match self {
             ShoulderL | ElbowL | WristL | HipL | KneeL | AnkleL => -1.0,
@@ -86,7 +86,7 @@ impl Joint {
         }
     }
 
-    fn flex_sign(self) -> f64 {
+    pub(crate) fn flex_sign(self) -> f64 {
         use Joint::*;
         match self {
             KneeL | KneeR => -1.0,
@@ -116,13 +116,14 @@ impl Joint {
 /// Body proportions as stature fractions. Defaults are canon-derived
 /// (7.5-heads + Dreyfuss-style segment ratios) — inspectable, and
 /// overridden by `body_measure` ranges once plates clear the gate.
+/// Joint positions only: body surfaces come from the oracle mesh.
 #[derive(Debug, Clone)]
 pub struct BodyProportions {
     /// Total height in meters.
     pub stature_m: f64,
-    /// Half shoulder width / stature.
+    /// Half shoulder width / stature (joint positions).
     pub shoulder_hw: f64,
-    /// Half hip width / stature.
+    /// Half hip width / stature (joint positions).
     pub hip_hw: f64,
     /// Where the numbers came from.
     pub source: String,

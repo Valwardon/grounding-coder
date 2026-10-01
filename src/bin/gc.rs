@@ -80,6 +80,9 @@ enum Commands {
         /// Directory for plates plus evidence.jsonl
         #[arg(short, long, default_value = "evidence")]
         out: String,
+        /// Downscale longer edge past this many pixels (lean evidence)
+        #[arg(long, default_value_t = 640)]
+        max_dim: u32,
     },
     /// Compose a photographic portrait from a sourced plate: segment
     /// the subject, frame them on a studio backdrop, finish the photo.
@@ -174,6 +177,29 @@ fn main() {
                 project,
                 budget,
             } => {
+                // Picture requests go to the picture pipeline: the bot
+                // researches, models, and constructs by itself from the
+                // chat text. Everything else stays on the code path.
+                if grounding_coder::engine::picture::is_picture_request(&prompt) {
+                    use grounding_coder::engine::picture::picture_from_prompt;
+                    let stamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let out = std::path::PathBuf::from(format!("picture-{}", stamp));
+                    match picture_from_prompt(&prompt, &out, 5).await {
+                        Ok(outcome) => {
+                            for line in &outcome.reply {
+                                println!("{}", line);
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("PICTURE FAILED: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                    return;
+                }
                 // No model anywhere in this path: the deterministic
                 // understander parses, the disposition engine routes,
                 // the engine proves. Anything but Execute refuses with
@@ -413,7 +439,12 @@ fn main() {
                     manifest_path.display()
                 );
             }
-            Commands::Research { prompt, limit, out } => {
+            Commands::Research {
+                prompt,
+                limit,
+                out,
+                max_dim,
+            } => {
                 use grounding_coder::engine::{evidence, plates, scene_intent};
                 let spec = scene_intent::parse_scene(&prompt);
                 let plan = scene_intent::plan_research(&spec);
@@ -450,15 +481,36 @@ fn main() {
                             let file = format!("plate-{:02}.bmp", n);
                             n += 1;
                             let path = dir.join(&file);
-                            if plate.image.save_bmp(&path).is_err() {
+                            let img = {
+                                let longest = plate.image.width.max(plate.image.height);
+                                if longest > max_dim.max(16) {
+                                    let cap = max_dim.max(16);
+                                    if plate.image.width >= plate.image.height {
+                                        plate.image.resize(
+                                            cap,
+                                            plate.image.height * cap / plate.image.width,
+                                        )
+                                    } else {
+                                        plate.image.resize(
+                                            plate.image.width * cap / plate.image.height,
+                                            cap,
+                                        )
+                                    }
+                                } else {
+                                    plate.image.clone()
+                                }
+                            };
+                            if img.save_bmp(&path).is_err() {
                                 println!("refused: {}: cannot save {}", id, file);
                                 continue;
                             }
                             let ex = evidence::example_from_plate(
                                 &path.to_string_lossy(),
+                                &plate.title,
+                                &plate.provenance.page_url,
                                 &plate.provenance.license,
                                 &plate.basis,
-                                &plate.image,
+                                &img,
                             );
                             if store.add_example(id, ex).is_err() {
                                 break;

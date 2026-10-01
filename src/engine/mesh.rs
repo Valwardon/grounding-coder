@@ -220,7 +220,21 @@ impl Mesh {
     /// overlap segments into joints). Plane-grid winding verified
     /// outward analytically; smooth normals via compute_normals.
     pub fn tube(from: [f64; 3], to: [f64; 3], r0: f64, r1: f64, n: u32) -> Self {
+        Self::tube_profile(from, to, &|t| r0 + (r1 - r0) * t, 1, n)
+    }
+
+    /// Profiled tube: radius follows `r(t)` over `segs` length
+    /// segments — muscle bellies, calves, waists. Same winding and
+    /// normals as `tube`.
+    pub fn tube_profile(
+        from: [f64; 3],
+        to: [f64; 3],
+        r: &dyn Fn(f64) -> f64,
+        segs: u32,
+        n: u32,
+    ) -> Self {
         let n = n.max(6);
+        let segs = segs.max(1);
         let ax = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
         let len = (ax[0] * ax[0] + ax[1] * ax[1] + ax[2] * ax[2])
             .sqrt()
@@ -244,9 +258,9 @@ impl Mesh {
             a[0] * u[1] - a[1] * u[0],
         ];
         let mut verts = Vec::new();
-        for j in 0..=1 {
-            let t = j as f64;
-            let r = r0 + (r1 - r0) * t;
+        for j in 0..=segs {
+            let t = j as f64 / segs as f64;
+            let rr = r(t).max(1e-6);
             let c = [
                 from[0] + ax[0] * t,
                 from[1] + ax[1] * t,
@@ -256,18 +270,50 @@ impl Mesh {
                 let th = i as f64 * TAU / n as f64;
                 let (ct, st) = (th.cos(), th.sin());
                 verts.push([
-                    c[0] + r * (u[0] * ct + v[0] * st),
-                    c[1] + r * (u[1] * ct + v[1] * st),
-                    c[2] + r * (u[2] * ct + v[2] * st),
+                    c[0] + rr * (u[0] * ct + v[0] * st),
+                    c[1] + rr * (u[1] * ct + v[1] * st),
+                    c[2] + rr * (u[2] * ct + v[2] * st),
                 ]);
             }
         }
         let mut faces = Vec::new();
         let row = n + 1;
-        for i in 0..n {
-            let a0 = i;
-            faces.push([a0, a0 + 1, a0 + row]);
-            faces.push([a0 + 1, a0 + row + 1, a0 + row]);
+        for j in 0..segs {
+            for i in 0..n {
+                let a0 = j * row + i;
+                faces.push([a0, a0 + 1, a0 + row]);
+                faces.push([a0 + 1, a0 + row + 1, a0 + row]);
+            }
+        }
+        let mut mesh = Mesh {
+            verts,
+            faces,
+            normals: Vec::new(),
+        };
+        mesh.compute_normals();
+        mesh
+    }
+
+    /// Full sphere shell centered origin: joints, hands, feet.
+    pub fn sphere(nu: u32, nv: u32, r: f64) -> Self {
+        let nu = nu.max(8);
+        let nv = nv.max(4);
+        let mut verts = Vec::new();
+        for j in 0..=nv {
+            let v = j as f64 * std::f64::consts::PI / nv as f64;
+            for i in 0..=nu {
+                let u = i as f64 * TAU / nu as f64;
+                verts.push([r * v.sin() * u.sin(), r * v.cos(), r * v.sin() * u.cos()]);
+            }
+        }
+        let mut faces = Vec::new();
+        let row = nu + 1;
+        for j in 0..nv {
+            for i in 0..nu {
+                let a = j * row + i;
+                faces.push([a, a + row, a + 1]);
+                faces.push([a + 1, a + row, a + row + 1]);
+            }
         }
         let mut mesh = Mesh {
             verts,
