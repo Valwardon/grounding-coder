@@ -955,14 +955,13 @@ impl CodeWriter {
                 // a compiler span + known recipe via EditPlan.
                 // For now, only import-shaped suggestions are allowed.
                 if let Fix::ApplySuggestion { file, suggestion } = fix {
-                    let s = suggestion.trim();
-                    if s.starts_with("use ") || s.starts_with("import ") {
-                        let clean = s
-                            .trim_start_matches("use ")
-                            .trim_start_matches("import ")
-                            .trim_end_matches(';')
-                            .trim();
-                        return self.apply_fix(&Fix::AddImport(clean.to_string()));
+                    // The suggestion bundles the compiler's message with
+                    // its insertion span ("consider importing this struct
+                    // | suggested: use std::collections::HashMap;") —
+                    // extract the exact `use` bytes, don't prefix-match
+                    // the envelope.
+                    if let Some(path) = extract_use_span(suggestion) {
+                        return self.apply_fix(&Fix::AddImport(path));
                     }
                     let _ = file;
                 }
@@ -4208,5 +4207,57 @@ mod migration_if_tests {
         let path = Path::new("t.rs");
         // `let y` is line 3 and the block is plain Rust: must refuse.
         assert!(migrate_rsx_let(path, PLAIN_IF, 3).is_none());
+    }
+}
+
+/// Extract an import path from a compiler suggestion envelope.
+/// rustc bundles message + insertion span ("consider importing this
+/// struct | suggested: use std::collections::HashMap;") — only the
+/// exact `use`/`import` bytes may pass the gate, never the prose.
+fn extract_use_span(suggestion: &str) -> Option<String> {
+    for kw in ["use ", "import "] {
+        let mut rest = suggestion;
+        while let Some(pos) = rest.find(kw) {
+            let after = &rest[pos + kw.len()..];
+            let path: String = after
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == ':')
+                .collect();
+            if !path.is_empty() {
+                return Some(path);
+            }
+            rest = &rest[pos + kw.len()..];
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod extract_use_span_tests {
+    use super::extract_use_span;
+
+    #[test]
+    fn finds_use_inside_envelope() {
+        assert_eq!(
+            extract_use_span(
+                "consider importing this struct | suggested: use std::collections::HashMap;"
+            ),
+            Some("std::collections::HashMap".to_string())
+        );
+    }
+
+    #[test]
+    fn bare_use_still_passes() {
+        assert_eq!(
+            extract_use_span("use std::collections::HashMap;"),
+            Some("std::collections::HashMap".to_string())
+        );
+    }
+
+    #[test]
+    fn prose_without_use_refuses() {
+        assert_eq!(extract_use_span("consider importing this struct"), None);
+        assert_eq!(extract_use_span(""), None);
     }
 }
