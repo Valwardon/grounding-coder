@@ -53,8 +53,12 @@ pub struct VisualRequirement {
 /// record is what the model builders read.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VisualExample {
-    /// Where it came from (plate file path or source URL).
+    /// Local plate file the measurements came from.
     pub source: String,
+    /// Source title (Commons file title / page title) — audit trail.
+    pub title: String,
+    /// Human-readable description page.
+    pub page_url: String,
     /// License short name — provenance travels with the data.
     pub license: String,
     /// How the license was determined.
@@ -300,6 +304,8 @@ pub fn features_from_plate(img: &super::vision::Image) -> HashMap<String, f64> {
 /// are None with the reason: fine joints are still unextractable.
 pub fn example_from_plate(
     source: &str,
+    title: &str,
+    page_url: &str,
     license: &str,
     basis: &str,
     img: &super::vision::Image,
@@ -310,6 +316,8 @@ pub fn example_from_plate(
         + features.get("skin_legs").copied().unwrap_or(0.0);
     VisualExample {
         source: source.to_string(),
+        title: title.to_string(),
+        page_url: page_url.to_string(),
         license: license.to_string(),
         basis: basis.to_string(),
         bbox: [0, 0, img.width, img.height],

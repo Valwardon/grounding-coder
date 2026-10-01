@@ -486,6 +486,7 @@ mod tests {
                 license: "test".to_string(),
             },
             basis: "test".to_string(),
+            title: "test".to_string(),
         }
     }
 
@@ -543,6 +544,7 @@ mod tests {
                 license: "t".to_string(),
             },
             basis: "t".to_string(),
+            title: "t".to_string(),
         };
         let brief = parse_brief("person standing");
         let (img, log) =
@@ -576,6 +578,7 @@ mod tests {
                 license: "t".to_string(),
             },
             basis: "t".to_string(),
+            title: "t".to_string(),
         };
         let plates = vec![
             mk(Image::blank(120, 160, Rgb::new(60, 80, 120))),
