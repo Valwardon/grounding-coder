@@ -128,8 +128,43 @@ fn macaroni_is_material_never_object() {
     // Photographic assets exist: everything here is supported.
     assert!(
         match_capabilities(&plan).iter().all(|v| v.supported),
-        "macaroni-hat requirements should all be supported"
+        "material requirements should all be supported"
     );
+}
+
+#[test]
+fn any_material_binds_generically() {
+    // Straw, glass, steel: identical treatment, no special cases.
+    for (prose, material) in [
+        ("A hat made of straw.", "straw"),
+        ("A tower out of glass.", "glass"),
+        ("A bowl made from steel.", "steel"),
+    ] {
+        let spec = parse_scene(prose);
+        assert!(
+            spec.objects.iter().all(|o| o.otype != material),
+            "{}: {:?}",
+            prose,
+            spec.objects
+        );
+        let obj = spec.objects.first().expect("base object");
+        assert_eq!(obj.material.as_deref(), Some(material), "{}", prose);
+        let plan = plan_research(&spec);
+        assert!(
+            plan.iter().any(|q| q
+                .queries
+                .iter()
+                .any(|s| s.contains(material) && s.contains("geometry"))),
+            "{}: no material query",
+            prose
+        );
+        assert!(
+            (spec.confidence - 1.0).abs() < 1e-9,
+            "{}: conf {}",
+            prose,
+            spec.confidence
+        );
+    }
 }
 
 #[test]

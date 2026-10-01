@@ -556,31 +556,6 @@ fn fuzzy_kind(word: &str) -> Option<&'static str> {
     best.map(|(_, k)| k)
 }
 
-/// Seed concept glossary: the deterministic stand-in for lexical +
-/// encyclopedic expansion (WordNet synsets, Wikidata relations,
-/// Wikipedia summaries). Each row is hand-curated and auditable:
-/// word → (broader concept, one-line gloss). Nothing here claims to
-/// be those databases — they stay external research sources consulted
-/// by `ResearchOracle::research_word`, while these rows let the parser
-/// name what it knows and ask precisely about the rest.
-const CONCEPTS: &[(&str, &str, &str)] = &[
-    ("hat", "headwear", "covering for the head"),
-    ("macaroni", "pasta", "tubular wheat food"),
-    ("pasta", "food", "wheat-based food"),
-    ("portrait", "photograph", "likeness of a person"),
-    ("photograph", "image", "light-recorded image"),
-    ("photo", "image", "light-recorded image"),
-    ("tower", "structure", "tall narrow structure"),
-];
-
-/// Broader concept + gloss for a known seed word, if any.
-pub fn expand_concept(word: &str) -> Option<(&'static str, &'static str)> {
-    CONCEPTS
-        .iter()
-        .find(|(w, _, _)| *w == word)
-        .map(|(_, broader, gloss)| (*broader, *gloss))
-}
-
 /// Material-relation grammar (the deterministic stand-in for a
 /// Wikidata `material-used` edge): `made of X`, `made out of X`,
 /// `made from X`, `out of X`, `built from X`, `built of X`.
@@ -1241,18 +1216,8 @@ pub fn understand(prose: &str, project_dir: Option<&std::path::Path>) -> Underst
                 intent.references.push(r.clone());
             }
         }
-        // Seed glosses (WordNet-synset analogue): what we know, stated.
-        for w in [&base, &material] {
-            if !w.is_empty()
-                && let Some((broader, gloss)) = expand_concept(w)
-            {
-                let note = format!("{}: {} ({})", w, broader, gloss);
-                if !intent.unknown_requirements.iter().any(|x| x == &note) {
-                    intent.unknown_requirements.push(note);
-                }
-            }
-        }
-        // Research plan (Step C/D of the macaroni-hat walkthrough):
+        // Research plan, fully generic over base and material (any
+        // material works the same — straw, glass, steel, pasta):
         // shape of the base, geometry of the material, placement rules.
         let mut plan = Vec::new();
         if !base.is_empty() {

@@ -1,5 +1,28 @@
 # Grounding Coder — Progress
 
+## v0.25.6 — Generic materials + research phase (2026-10-01)
+
+- No hardcoded materials: the CONCEPTS gloss table is deleted from
+  the understander and the material ontology rows from scene-intent.
+  ANY base/material words work through grammar alone (hat/straw,
+  tower/glass, bowl/steel proven by test); unknown bases become
+  generic objects with silhouette queries. Macaroni remains one
+  test example among many — the engine treats it identically.
+- `engine/evidence.rs`: VisualRequirement (id, category, concept,
+  attributes, relationships, queries, examples, model) +
+  VisualExample (source, license, bbox, segmentation summary,
+  keypoints-unavailable-with-reason, dimensions, features) +
+  EvidenceStore with 20/100/500 budgets (Insufficient/Collecting/
+  Sufficient) and a query-walking collector with refusal trails.
+- `gc research "<prompt>"`: parse → requirements → per-requirement
+  Commons collection with provenance gates → plates +
+  evidence.jsonl. Proved live: "a hat made of straw" banked 4 real
+  plates (Public domain / CC BY-SA 4.0, 2 refusals for missing
+  authors) and honestly reported INSUFFICIENT (2/20) per
+  requirement.
+- 303 tests green (175 lib + 128 integration), `cargo check
+  --all-features`, clippy zero warnings, fmt clean.
+
 ## v0.25.5 — Phase 2 pose: learn from validated examples (2026-10-01)
 
 - `engine/pose_learn.rs`: examples (ROM-gated ingestion with cited

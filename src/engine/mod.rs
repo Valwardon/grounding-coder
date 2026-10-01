@@ -6,6 +6,7 @@ pub mod catalog;
 pub mod compose;
 pub mod corrector;
 pub mod error;
+pub mod evidence;
 pub mod experiment;
 pub mod figure;
 pub mod human;

@@ -68,6 +68,19 @@ enum Commands {
         #[arg(long, default_value_t = 1920)]
         max_dim: u32,
     },
+    /// Research a picture prompt: parse scene requirements, collect
+    /// visual examples per requirement into an evidence store.
+    /// Below-minimum collections report INSUFFICIENT, never a model.
+    Research {
+        /// What to picture ("a man standing on a mountain")
+        prompt: String,
+        /// Max examples per requirement
+        #[arg(short, long, default_value_t = 3)]
+        limit: u32,
+        /// Directory for plates plus evidence.jsonl
+        #[arg(short, long, default_value = "evidence")]
+        out: String,
+    },
     /// Compose a photographic portrait from a sourced plate: segment
     /// the subject, frame them on a studio backdrop, finish the photo.
     /// The op log prints; refusals (no subject) exit nonzero.
@@ -399,6 +412,84 @@ fn main() {
                     refused.len(),
                     manifest_path.display()
                 );
+            }
+            Commands::Research { prompt, limit, out } => {
+                use grounding_coder::engine::{evidence, plates, scene_intent};
+                let spec = scene_intent::parse_scene(&prompt);
+                let plan = scene_intent::plan_research(&spec);
+                let mut store = evidence::EvidenceStore::new();
+                store.require_from_spec(&spec, &plan);
+                println!("requirements: {}", store.requirements.len());
+                for r in &store.requirements {
+                    println!("  {} [{} queries]", r.id, r.research_queries.len());
+                }
+                let dir = std::path::Path::new(&out);
+                if std::fs::create_dir_all(dir).is_err() {
+                    eprintln!("RESEARCH FAILED: cannot create {}", out);
+                    std::process::exit(1);
+                }
+                let per = limit.clamp(1, 20) as usize;
+                let mut n = 0u32;
+                let ids: Vec<String> = store.requirements.iter().map(|r| r.id.clone()).collect();
+                for id in &ids {
+                    let queries = store
+                        .get(id)
+                        .map(|r| r.research_queries.clone())
+                        .unwrap_or_default();
+                    for q in &queries {
+                        let have = store.get(id).map(|r| r.examples.len()).unwrap_or(0);
+                        if have >= per {
+                            break;
+                        }
+                        let (sourced, refused) =
+                            plates::source_plates(q, (per - have) as u32).await;
+                        for r in &refused {
+                            println!("refused: {}: {}", id, r);
+                        }
+                        for plate in sourced {
+                            let file = format!("plate-{:02}.bmp", n);
+                            n += 1;
+                            let path = dir.join(&file);
+                            if plate.image.save_bmp(&path).is_err() {
+                                println!("refused: {}: cannot save {}", id, file);
+                                continue;
+                            }
+                            let ex = evidence::example_from_plate(
+                                &path.to_string_lossy(),
+                                &plate.provenance.license,
+                                &plate.basis,
+                                &plate.image,
+                            );
+                            if store.add_example(id, ex).is_err() {
+                                break;
+                            }
+                            println!("example: {} <- {} ({})", id, file, plate.provenance.license);
+                        }
+                    }
+                    match store.sufficiency(id) {
+                        Ok(evidence::Sufficiency::Insufficient { n, need }) => {
+                            println!("{}: INSUFFICIENT ({}/{})", id, n, need)
+                        }
+                        Ok(evidence::Sufficiency::Collecting { n }) => {
+                            println!("{}: collecting ({})", id, n)
+                        }
+                        Ok(evidence::Sufficiency::Sufficient { n }) => {
+                            println!("{}: SUFFICIENT ({})", id, n)
+                        }
+                        Err(e) => println!("{}: {}", id, e),
+                    }
+                }
+                match evidence::save_jsonl(&store, &dir.join("evidence.jsonl")) {
+                    Ok(()) => println!(
+                        "evidence: {} requirements at {}/evidence.jsonl",
+                        store.requirements.len(),
+                        out
+                    ),
+                    Err(e) => {
+                        eprintln!("RESEARCH FAILED: {}", e);
+                        std::process::exit(1);
+                    }
+                }
             }
             Commands::Compose {
                 plate,

@@ -98,8 +98,9 @@ fn visual_verb_creates_with_receipt() {
 
 #[test]
 fn material_relation_banks_research_plan() {
-    // The macaroni-hat walkthrough: Steps A+B parse the material edge,
-    // Steps C+D become explicit research questions.
+    // The walkthrough example: Steps A+B parse the material edge,
+    // Steps C+D become explicit research questions. Macaroni here is
+    // one material among many — the machinery is fully generic.
     let u = understand::understand("A hat made of macaroni.", None);
     assert!(
         u.intent
@@ -118,15 +119,6 @@ fn material_relation_banks_research_plan() {
         u.intent.references.iter().any(|r| r == "macaroni"),
         "references {:?}",
         u.intent.references
-    );
-    // Seed glosses state what the parser knows.
-    assert!(
-        u.intent
-            .unknown_requirements
-            .iter()
-            .any(|q| q.contains("hat") && q.contains("headwear")),
-        "gloss missing {:?}",
-        u.intent.unknown_requirements
     );
     // Research plan: base shape, material geometry, placement rules.
     assert!(
@@ -168,16 +160,33 @@ fn material_out_of_variant() {
 }
 
 #[test]
-fn concept_glossary_expands() {
-    assert_eq!(
-        understand::expand_concept("hat"),
-        Some(("headwear", "covering for the head"))
-    );
-    assert_eq!(
-        understand::expand_concept("macaroni"),
-        Some(("pasta", "tubular wheat food"))
-    );
-    assert_eq!(understand::expand_concept("flux"), None);
+fn any_material_parses_identically() {
+    // No material is special: straw, steel, glass all bank the same
+    // constraint/reference/plan shape as the walkthrough example.
+    for (prose, tag) in [
+        ("A hat made of straw.", "material:straw"),
+        ("A hat made of steel.", "material:steel"),
+        ("A bowl made from wood.", "material:wood"),
+    ] {
+        let u = understand::understand(prose, None);
+        assert!(
+            u.intent.constraints.iter().any(|c| c == tag),
+            "{}: {:?}",
+            prose,
+            u.intent.constraints
+        );
+        assert!(
+            u.intent
+                .unknown_requirements
+                .iter()
+                .any(|q| q.contains("geometry")),
+            "{}: {:?}",
+            prose,
+            u.intent.unknown_requirements
+        );
+        let (_, d, _) = disp(prose);
+        assert_eq!(d, Disposition::Ask, "{}", prose);
+    }
 }
 
 #[test]

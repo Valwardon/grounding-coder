@@ -77,8 +77,6 @@ const LEXICON: &[(&str, &str)] = &[
     ("hats", "hat"),
     ("flag", "flag"),
     ("flags", "flag"),
-    ("macaroni", "macaroni"),
-    ("pasta", "pasta"),
     ("mountain", "mountain"),
     ("mountains", "mountain"),
     ("american_flag", "american_flag"),
@@ -103,7 +101,6 @@ pub enum ConceptKind {
     Wearable,
     Fabric,
     Place,
-    Material,
 }
 
 /// Ontology: concept → (kind, what it needs). The "needs" are
@@ -125,8 +122,6 @@ const ONTOLOGY: &[(&str, ConceptKind, &[&str])] = &[
     ("flag", ConceptKind::Fabric, &["design", "cloth"]),
     ("american_flag", ConceptKind::Fabric, &["design", "cloth"]),
     ("mountain", ConceptKind::Place, &["photograph"]),
-    ("macaroni", ConceptKind::Material, &["geometry", "texture"]),
-    ("pasta", ConceptKind::Material, &["geometry", "texture"]),
 ];
 
 fn kind_of(concept: &str) -> Option<ConceptKind> {
@@ -170,8 +165,9 @@ pub struct SceneObject {
     pub attributes: Vec<String>,
     pub state: Vec<String>,
     pub worn_by: Option<String>,
-    /// Construction material ("macaroni" lives HERE for a macaroni
-    /// hat — never as an unrelated object in the scene).
+    /// Construction material: ANY material word bound by the edge
+    /// grammar lives here (straw, glass, steel — e.g. pasta), never
+    /// as an unrelated object in the scene.
     pub material: Option<String>,
 }
 
@@ -255,8 +251,8 @@ pub fn parse_scene(prose: &str) -> SceneSpec {
         .unwrap_or_else(|| "subject".to_string());
 
     // Material edge FIRST (Wikidata `material-used` analogue): "X made
-    // of Y" binds Y to X's material slot via the understander's
-    // deterministic grammar — macaroni never becomes a scene object.
+    // of Y" binds ANY Y to X's material slot via the understander's
+    // deterministic grammar — no material is ever a scene object.
     let material_edge = super::understand::extract_material(prose);
 
     // Objects: wearable / fabric / place concepts in prose order.
@@ -288,7 +284,10 @@ pub fn parse_scene(prose: &str) -> SceneSpec {
         }
     }
 
-    // Bind the material edge onto the matching object.
+    // Bind the material edge onto the matching object — or onto a
+    // generic object named by the base word itself. ANY base works
+    // (tower, bowl, statue): no object noun is special-cased, and no
+    // material ever becomes a scene object.
     let mut unresolved = Vec::new();
     if let Some((base, material)) = &material_edge {
         if let Some(obj) = objects
@@ -297,10 +296,14 @@ pub fn parse_scene(prose: &str) -> SceneSpec {
         {
             obj.material = Some(material.clone());
         } else if !base.is_empty() {
-            unresolved.push(format!(
-                "material base '{}' names no scene object — needs evidence",
-                base
-            ));
+            objects.push(SceneObject {
+                id: format!("{}_{}", base, objects.len() + 1),
+                otype: base.clone(),
+                attributes: Vec::new(),
+                state: Vec::new(),
+                worn_by: None,
+                material: Some(material.clone()),
+            });
         }
     }
 
@@ -384,10 +387,19 @@ pub fn parse_scene(prose: &str) -> SceneSpec {
     }
 
     // Confidence: ontology-mapped content tokens over content tokens.
-    // The light verb "give" ("giving a sign") is forgiven; material
-    // markers (made/out/from/…) count when the edge actually fires.
+    // The light verb "give" ("giving a sign") is forgiven; words bound
+    // by the material edge count as consumed — ANY material, since the
+    // edge (not a word list) recognized them.
     let edge_markers = ["made", "out", "from", "built", "constructed"];
     let edge_fired = material_edge.is_some();
+    let edge_material = material_edge
+        .as_ref()
+        .map(|(_, m)| m.clone())
+        .unwrap_or_default();
+    let edge_base = material_edge
+        .as_ref()
+        .map(|(b, _)| b.clone())
+        .unwrap_or_default();
     let content: Vec<&String> = folded
         .iter()
         .filter(|w| !STOPWORDS.contains(&w.as_str()))
@@ -400,7 +412,12 @@ pub fn parse_scene(prose: &str) -> SceneSpec {
     let mapped = content
         .iter()
         .filter(|w| match concept_of(w) {
-            Some("give") | None => edge_fired && edge_markers.contains(&w.as_str()),
+            Some("give") | None => {
+                edge_fired
+                    && (edge_markers.contains(&w.as_str())
+                        || w.as_str() == edge_material
+                        || w.as_str() == edge_base)
+            }
             // A wear verb that actually bound a wearer is consumed.
             Some("wear") => wears,
             Some(c) => kind_of(c).is_some(),
@@ -495,16 +512,6 @@ pub fn plan_research(spec: &SceneSpec) -> Vec<ResearchQuery> {
                     queries: vec!["hat silhouette reference".to_string()],
                     capability: "photo-asset",
                 });
-                if let Some(m) = &o.material {
-                    out.push(ResearchQuery {
-                        requirement: format!("material: {} on {}", m, o.id),
-                        queries: vec![
-                            format!("{} geometry texture reference", m),
-                            format!("{} pasta shape reference", m),
-                        ],
-                        capability: "photo-asset",
-                    });
-                }
             }
             "flag" | "american_flag" => {
                 if !spec
@@ -524,7 +531,27 @@ pub fn plan_research(spec: &SceneSpec) -> Vec<ResearchQuery> {
                 queries: vec!["mountain landscape photograph".to_string()],
                 capability: "photographic-place",
             }),
-            _ => {}
+            // Generic object (any base noun): silhouette + reference.
+            other => out.push(ResearchQuery {
+                requirement: format!("object: {}", o.id),
+                queries: vec![
+                    format!("{} silhouette reference", other),
+                    format!("{} reference", other),
+                ],
+                capability: "photo-asset",
+            }),
+        }
+        // Material queries attach to whatever object carries them —
+        // generic over both object and material.
+        if let Some(m) = &o.material {
+            out.push(ResearchQuery {
+                requirement: format!("material: {} on {}", m, o.id),
+                queries: vec![
+                    format!("{} geometry texture reference", m),
+                    format!("{} material reference", m),
+                ],
+                capability: "photo-asset",
+            });
         }
     }
     out

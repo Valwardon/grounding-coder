@@ -6,10 +6,11 @@ Generated live, model-free, via:
   cargo run --example build_page -- /tmp/gc-sample-probe --understand "<prompt>"
 
 1. samples/intent/macaroni-hat.json
-   Prompt: "A hat made of macaroni."
+   Prompt: "A hat made of macaroni." (one material among many —
+   straw, glass, steel parse identically; see tests/messy_intent.rs.)
    Material relation banks `material:macaroni`, references hat+macaroni,
-   seed glosses (hat: headwear; macaroni: pasta) and a 3-question research
-   plan (base shape, material geometry, placement). Disposition: Ask.
+   and a 3-question research plan (base shape, material geometry,
+   placement). Disposition: Ask.
 
 2. samples/intent/webpage-synonym.json
    Prompt: "Create a webpage called Home with \"welcome back\"."
