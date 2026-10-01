@@ -1,5 +1,24 @@
 # Grounding Coder — Progress
 
+## v0.25.7 — Phase 3 objects: flag measure → model → construct (2026-10-01)
+
+- `engine/object_model.rs`: first simple object end to end.
+  Classical measurement only — stripe runs from row color bands,
+  emblem blobs from connected bright components in the canton,
+  pole side from edge darkness runs, aspect from the example bbox.
+  The model is statistics (aspect range, stripe mode + agreement,
+  emblem range, pole consensus, per-stripe median palette) behind
+  the 20-example gate. Construction draws from the model and
+  re-measures to its own inputs (round trip asserted). Unknown
+  objects (hat, statue) refuse naming part-segmentation as the
+  staged gap — never silently boxed.
+- `tests/phase3_objects.rs`: 5 cases (model statistics, round-trip
+  construction, sample photo commit, disagreement in agreement,
+  hat gap). `samples/flag-constructed-320x198.bmp` (+ receipt)
+  commits the constructed object, labeled as such.
+- 312 tests green (179 lib + 133 integration), `cargo check
+  --all-features`, clippy zero warnings, fmt clean.
+
 ## v0.25.6 — Generic materials + research phase (2026-10-01)
 
 - No hardcoded materials: the CONCEPTS gloss table is deleted from

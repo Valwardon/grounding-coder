@@ -14,6 +14,7 @@ pub mod imagine;
 pub mod knowledge;
 pub mod lang;
 pub mod mesh;
+pub mod object_model;
 pub mod pathfind;
 pub mod plan;
 pub mod plates;
