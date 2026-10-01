@@ -1,5 +1,6 @@
 pub mod anatomy;
 pub mod arena;
+pub mod assembly;
 pub mod body_measure;
 pub mod budget;
 pub mod catalog;

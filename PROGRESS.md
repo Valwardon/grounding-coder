@@ -1,5 +1,22 @@
 # Grounding Coder — Progress
 
+## v0.25.9 — Phase 5 relationships: assembly placements (2026-10-01)
+
+- `engine/assembly.rs`: relationships become coordinates — worn
+  hats anchor above the head joint, waved fabric goes to the hand
+  not saluting (salute takes right by stated convention, else
+  right with a note), salute hands verify against the head.
+  Unplaceable stays open with its reason (unworn hats, unknown
+  objects, missed poses).
+- `tests/phase5_assembly.rs`: 6 cases on the full walkthrough
+  scene (hat anchor, free-hand flag, right default, unworn open,
+  missed-pose report, assembly diagram). Sample
+  `samples/assembly-salute-flag-hat-320x240.bmp` (+ receipt)
+  commits the diagram, labeled as such.
+- 327 tests green (183 lib + 144 integration), `cargo check
+  --all-features`, clippy zero warnings, fmt clean.
+- STAGED NEXT: deformation (Phase 6), full composition (Phase 7).
+
 ## v0.25.8 — Phase 4 materials: appearance from examples (2026-10-01)
 
 - `engine/material.rs`: quantized color histograms with coverage
