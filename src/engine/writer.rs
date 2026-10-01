@@ -933,7 +933,7 @@ impl CodeWriter {
     ///   it is a pure import insertion. No heuristic string replace.
     pub fn apply_fix(&self, fix: &Fix) -> Vec<String> {
         match fix {
-            Fix::AddImport(import) => {
+            Fix::AddImport { import, file } => {
                 let clean = import
                     .trim()
                     .trim_start_matches("use ")
@@ -948,7 +948,7 @@ impl CodeWriter {
                 // Dummy table: std inventory only. Pathfound imports use
                 // apply_verified_import with a seeded table instead.
                 let st = SymbolTable::new();
-                self.apply_import_with(&clean, &st)
+                self.apply_import_with_in(file, &clean, &st)
             }
             Fix::Replace { .. } | Fix::InsertAfter { .. } | Fix::ApplySuggestion { .. } => {
                 // Heuristic code replacement is disabled — must come from
@@ -961,7 +961,10 @@ impl CodeWriter {
                     // extract the exact `use` bytes, don't prefix-match
                     // the envelope.
                     if let Some(path) = extract_use_span(suggestion) {
-                        return self.apply_fix(&Fix::AddImport(path));
+                        return self.apply_fix(&Fix::AddImport {
+                            import: path,
+                            file: file.clone(),
+                        });
                     }
                     let _ = file;
                 }
@@ -1003,13 +1006,27 @@ impl CodeWriter {
                 examples: Vec::new(),
             },
         );
-        self.apply_import_with(&clean, &st)
+        self.apply_import_with_in("", &clean, &st)
     }
 
     /// Shared import-plan body: minimal task, evidence-gated plan,
     /// stale-checked apply. Empty vec on every failure path.
-    fn apply_import_with(&self, clean: &str, table: &SymbolTable) -> Vec<String> {
-        if let Some(file) = self.find_source_file()
+    /// The target file comes from the diagnostic when known (never
+    /// the first file in the directory — that misrouting once filed
+    /// an import into android_main.rs); empty falls back to it.
+    fn apply_import_with_in(
+        &self,
+        file_hint: &str,
+        clean: &str,
+        table: &SymbolTable,
+    ) -> Vec<String> {
+        let hint = self.project_dir.join(file_hint);
+        let file = if !file_hint.is_empty() && hint.exists() {
+            Some(hint)
+        } else {
+            self.find_source_file()
+        };
+        if let Some(file) = file
             && let Ok(content) = fs::read_to_string(&file)
         {
             // Build a minimal import task and route through plan/apply.

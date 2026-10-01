@@ -53,8 +53,9 @@ pub struct CorrectionResult {
 /// Fix description — what to apply to the code.
 #[derive(Debug, Clone)]
 pub enum Fix {
-    /// Add an import statement to a file.
-    AddImport(String),
+    /// Add an import statement to the error's file (empty file =
+    /// legacy fallback to first source file).
+    AddImport { import: String, file: String },
     /// Replace a specific code snippet.
     Replace {
         find: String,
@@ -390,7 +391,10 @@ impl CorrectionPipeline {
                 // inferring from the symbol name (usuallyStill blocked
                 // downstream unless verifiable — never guessed).
                 if let Some(path) = suggested_import(error) {
-                    return Fix::AddImport(path);
+                    return Fix::AddImport {
+                        import: path,
+                        file: error.file.clone(),
+                    };
                 }
                 inferred_import(error)
             }
@@ -425,7 +429,10 @@ impl CorrectionPipeline {
             }
             ErrorKind::UnresolvedSymbol => {
                 if let Some(path) = suggested_import(error) {
-                    Fix::AddImport(path)
+                    Fix::AddImport {
+                        import: path,
+                        file: error.file.clone(),
+                    }
                 } else if let Some(s) = error.suggestion.clone() {
                     Fix::ApplySuggestion {
                         file: error.file.clone(),
@@ -447,7 +454,10 @@ impl CorrectionPipeline {
             ErrorKind::UnresolvedSymbol | ErrorKind::MissingImport | ErrorKind::MissingFieldMethod
         ) && let Some(path) = suggested_import(error)
         {
-            return Fix::AddImport(path);
+            return Fix::AddImport {
+                import: path,
+                file: error.file.clone(),
+            };
         }
         match &recipe.fix {
             super::recipes::FixAction::ApplySuggestion { suggestion } => {
@@ -474,7 +484,10 @@ impl CorrectionPipeline {
                 if i.trim().is_empty() {
                     Fix::None
                 } else {
-                    Fix::AddImport(i)
+                    Fix::AddImport {
+                        import: i,
+                        file: error.file.clone(),
+                    }
                 }
             }
             super::recipes::FixAction::WrapConversion { method } => {
@@ -591,7 +604,10 @@ fn inferred_import(error: &CompileError) -> Fix {
     if imp.is_empty() {
         Fix::None
     } else {
-        Fix::AddImport(imp)
+        Fix::AddImport {
+            import: imp,
+            file: error.file.clone(),
+        }
     }
 }
 
