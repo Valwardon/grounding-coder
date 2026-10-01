@@ -161,3 +161,34 @@ fn gibberish_blocks_without_questions() {
     assert_eq!(d, Disposition::Block);
     assert_eq!(conf, 0.0);
 }
+
+#[test]
+fn function_contracts_parse_to_cases() {
+    // given/returns quotes become synthesis cases; page quotes stay content.
+    let u = understand::understand(
+        "Create a function called Shout given \"hi\" returns \"HI\".",
+        None,
+    );
+    assert_eq!(u.frame, "create");
+    let def = u
+        .intent
+        .define
+        .into_iter()
+        .flatten()
+        .next()
+        .expect("define");
+    assert_eq!(def.kind, "function");
+    assert_eq!(def.cases.len(), 1);
+    assert_eq!(def.cases[0].input, "hi");
+    assert_eq!(def.cases[0].expected, "HI");
+    // No case keywords: quotes are not cases.
+    let u = understand::understand("Create a page called Home with \"welcome back\".", None);
+    let def = u
+        .intent
+        .define
+        .into_iter()
+        .flatten()
+        .next()
+        .expect("define");
+    assert!(def.cases.is_empty());
+}

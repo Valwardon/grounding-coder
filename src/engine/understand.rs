@@ -777,6 +777,28 @@ fn quoted(prose: &str) -> Vec<String> {
     out
 }
 
+/// Contract cases from quoted given/returns pairs, for function
+/// intents only: `shout given "hi" returns "HI"` becomes one case.
+/// Needs a case keyword (given/with + returns/becomes/maps) AND an
+/// even run of quotes; pairs fill in order. Anything else leaves
+/// cases empty — quotes stay page content, never test data.
+fn contract_cases(prose: &str, quotes: &[String]) -> Vec<super::tasks::TestCase> {
+    let ws = words(prose);
+    let has_in = ws.iter().any(|w| w == "given" || w == "with");
+    let has_out = ws
+        .iter()
+        .any(|w| w == "returns" || w == "return" || w == "becomes" || w == "maps");
+    if !(has_in && has_out) || quotes.len() < 2 {
+        return Vec::new();
+    }
+    quotes
+        .chunks_exact(2)
+        .map(|pair| super::tasks::TestCase {
+            input: pair[0].clone(),
+            expected: pair[1].clone(),
+        })
+        .collect()
+}
 /// Noun adjacent to a kind word: "a counter page" / "the RiskBoard
 /// component" name the referent right before the kind. Deterministic
 /// positional slot-filling (articles skipped, first letter capitalized
@@ -1118,6 +1140,12 @@ pub fn understand(prose: &str, project_dir: Option<&std::path::Path>) -> Underst
                     slots.push("kind");
                     slots.push("name");
                     let mut def = empty_define(name.clone(), k);
+                    // Function contracts: quoted given/returns pairs
+                    // become synthesis cases (the bot authors the body
+                    // from these, verified by generated contract tests).
+                    if k == "function" {
+                        def.cases = contract_cases(prose, &quotes);
+                    }
                     if k == "page" {
                         def.title = Some(name.clone());
                         def.sections = quotes
