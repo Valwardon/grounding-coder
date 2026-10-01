@@ -249,7 +249,7 @@ Oracle verify (compiler / tests / parser per language)
 
 ## Proof, Not Promises
 
-346 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
+350 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
 `fmt --check` clean:
 
 | Suite | Tests | What it proves |
@@ -267,7 +267,8 @@ Oracle verify (compiler / tests / parser per language)
 | `phase5_assembly` | 6 | relationship placements (hat above head, flag to free hand, salute verified at head, unplaceable stays open); assembly diagram commits under `samples/` |
 | `studio_person` | 5 | end-to-end creation (learned pose + oracle CC0 body morphed/bound by the engine + bound hat/cloth, studio render, per-requirement receipt, strict refusal); constructed person commits under `samples/` |
 | `picture` _(lib)_ | 3 | chat routing (picture vs code), bot source table, skin-model sufficiency gate |
-| `body_oracle` _(lib)_ | 5 | pinned CC0 oracle (manifest verify, base scale, morphs move verts, rest identity, corrupt refusal) |
+| `body_oracle` _(lib)_ | 6 | pinned CC0 oracle (manifest verify, base scale, morphs move verts, rest identity, weight-row normalization, corrupt refusal) |
+| `woman_poses` | 3 | same woman standing/waving/saluting on the measured rig (FK agreement, connected anatomy, joint correctness, committed sample) |
 | `accel` _(lib)_ | 1 | grid march pixel-equal to brute force |
 | `knowledge_loop` | 3 | budget-bounded offline dreaming with persistence, sleep when nothing open, failures deprioritize without deleting |
 | `learning_experiment` | 2 | dreaming arm rediscovers family patterns (rate 0.55) vs amnesiac baseline (0.00); both arms solve every task |

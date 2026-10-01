@@ -125,25 +125,39 @@ pub struct BodyProportions {
     pub shoulder_hw: f64,
     /// Half hip width / stature (joint positions).
     pub hip_hw: f64,
+    /// Root (pelvis) rest position in meters. Measured rigs set it;
+    /// canon defaults hold 55% of stature.
+    pub root: [f64; 3],
+    /// Measured rest offsets (child − parent) in meters, overriding
+    /// canon fractions joint by joint. Empty = all canon. The rig
+    /// measurer fills this; FK and deformation then agree with the
+    /// mesh by construction.
+    pub offsets: HashMap<Joint, [f64; 3]>,
     /// Where the numbers came from.
     pub source: String,
 }
 
 impl BodyProportions {
     pub fn adult_male() -> Self {
+        let s = 1.75;
         BodyProportions {
-            stature_m: 1.75,
+            stature_m: s,
             shoulder_hw: 0.12,
             hip_hw: 0.057,
+            root: [0.0, 0.55 * s, 0.0],
+            offsets: HashMap::new(),
             source: "canon default (7.5-heads proportions)".to_string(),
         }
     }
 
     pub fn adult_female() -> Self {
+        let s = 1.62;
         BodyProportions {
-            stature_m: 1.62,
+            stature_m: s,
             shoulder_hw: 0.11,
             hip_hw: 0.068,
+            root: [0.0, 0.55 * s, 0.0],
+            offsets: HashMap::new(),
             source: "canon default (7.5-heads proportions)".to_string(),
         }
     }
@@ -153,10 +167,13 @@ impl BodyProportions {
     /// to pelvis height so the foot rests on the ground; head top
     /// lands within 2% of stature — both asserted by tests).
     fn offset(&self, j: Joint) -> V3 {
+        if let Some(o) = self.offsets.get(&j) {
+            return V3::new(o[0], o[1], o[2]);
+        }
         let s = self.stature_m;
         use Joint::*;
         let (x, y, z) = match j {
-            Pelvis => (0.0, 0.55 * s, 0.0),
+            Pelvis => (self.root[0], self.root[1], self.root[2]),
             Spine => (0.0, 0.08 * s, 0.0),
             Chest => (0.0, 0.11 * s, 0.0),
             Neck => (0.0, 0.10 * s, 0.0),
@@ -195,15 +212,6 @@ impl V3 {
 
     pub fn len(self) -> f64 {
         (self.x * self.x + self.y * self.y + self.z * self.z).sqrt()
-    }
-
-    /// Rotation about X by `a` radians, then about Z by `b` radians.
-    fn rot_xz(self, a: f64, b: f64) -> V3 {
-        let (sa, ca) = a.sin_cos();
-        let y1 = ca * self.y - sa * self.z;
-        let z1 = sa * self.y + ca * self.z;
-        let (sb, cb) = b.sin_cos();
-        V3::new(cb * self.x - sb * y1, sb * self.x + cb * y1, z1)
     }
 }
 
@@ -386,43 +394,77 @@ pub fn validate_pose_rom(pose: &Pose) -> Result<(), String> {
     Ok(())
 }
 
+/// 3×3 rotation, column-major. One math for FK positions and
+/// mesh deformation alike (see `joint_world_rotations`).
+pub type Mat3 = ([f64; 3], [f64; 3], [f64; 3]);
+
+/// R = Rz(b)·Rx(a) as columns (matches the old rot_xz order).
+pub(crate) fn rot_mat(a: f64, b: f64) -> Mat3 {
+    let (sa, ca) = a.sin_cos();
+    let (sb, cb) = b.sin_cos();
+    let c0 = [cb, sb, 0.0];
+    let c1 = [-sb * ca, cb * ca, sa];
+    let c2 = [sb * sa, -cb * sa, ca];
+    (c0, c1, c2)
+}
+
+/// Matrix product (column convention).
+pub(crate) fn mat_mul(a: &Mat3, b: &Mat3) -> Mat3 {
+    let col = |v: [f64; 3]| -> [f64; 3] {
+        [
+            a.0[0] * v[0] + a.1[0] * v[1] + a.2[0] * v[2],
+            a.0[1] * v[0] + a.1[1] * v[1] + a.2[1] * v[2],
+            a.0[2] * v[0] + a.1[2] * v[1] + a.2[2] * v[2],
+        ]
+    };
+    (col(b.0), col(b.1), col(b.2))
+}
+
+/// Apply a rotation to a vector.
+pub(crate) fn apply_mat(m: &Mat3, v: V3) -> V3 {
+    V3::new(
+        m.0[0] * v.x + m.1[0] * v.y + m.2[0] * v.z,
+        m.0[1] * v.x + m.1[1] * v.y + m.2[1] * v.z,
+        m.0[2] * v.x + m.1[2] * v.y + m.2[2] * v.z,
+    )
+}
+
+/// World rotation per joint, composed exactly down the tree.
+/// Single source for FK positions and mesh deformation.
+pub fn joint_world_rotations(pose: &Pose) -> Result<HashMap<Joint, Mat3>, String> {
+    validate_pose_rom(pose)?;
+    let mut world: HashMap<Joint, Mat3> = HashMap::new();
+    for j in Joint::all() {
+        let a = pose.get(j);
+        let local = rot_mat(
+            -j.flex_sign() * a.flex.to_radians(),
+            j.mirror() * a.abd.to_radians(),
+        );
+        let w = match j.parent() {
+            None => local,
+            Some(p) => mat_mul(&world[&p], &local),
+        };
+        world.insert(j, w);
+    }
+    Ok(world)
+}
+
 /// World-space joint positions for a posed, proportioned skeleton.
-/// Root (pelvis) sits at its rest offset; rotations compose down the
-/// tree. Pure math — same skeleton twice, same coordinates.
+/// Root (pelvis) sits at `props.root`; rotations compose exactly
+/// down the tree. Pure math — same skeleton twice, same coordinates.
 pub fn forward_kinematics(
     props: &BodyProportions,
     pose: &Pose,
 ) -> Result<HashMap<Joint, V3>, String> {
-    validate_pose_rom(pose)?;
-    // World rotation per joint (as flex/abd pair composed downward).
-    let mut rot: HashMap<Joint, (f64, f64)> = HashMap::new();
+    let world = joint_world_rotations(pose)?;
     let mut pos: HashMap<Joint, V3> = HashMap::new();
     for j in Joint::all() {
-        let a = pose.get(j);
-        let local = (
-            -j.flex_sign() * a.flex.to_radians(),
-            j.mirror() * a.abd.to_radians(),
-        );
-        let world_rot = match j.parent() {
-            None => local,
-            Some(p) => {
-                let (pa, pb) = rot[&p];
-                // Compose: parent world rotation, then local. Angles
-                // stay small-to-moderate in v1 poses, so additive
-                // composition holds within test tolerances; exact
-                // matrix chains are a later-phase upgrade, stated here.
-                (pa + local.0, pb + local.1)
-            }
-        };
-        rot.insert(j, world_rot);
         let off = props.offset(j);
-        let rotated = if j.parent().is_none() {
-            off
-        } else {
-            // The offset rides in the parent frame (standard FK: the
-            // joint's own rotation moves its children, not itself).
-            let parent_rot = rot[&j.parent().unwrap()];
-            off.rot_xz(parent_rot.0, parent_rot.1)
+        // The offset rides in the parent frame (standard FK: the
+        // joint's own rotation moves its children, not itself).
+        let rotated = match j.parent() {
+            None => off,
+            Some(p) => apply_mat(&world[&p], off),
         };
         let p = match j.parent() {
             None => rotated,

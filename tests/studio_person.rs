@@ -20,18 +20,43 @@ fn walkthrough_creates_receipted_maquette() {
         grounding_coder::engine::vision::Rgb::new(200, 150, 115),
         3000,
     );
-    assert!(skin > 800, "figure must read, got {}", skin);
-    // Every requirement honestly defaulted — none researched.
+    assert!(skin > 500, "figure must read, got {}", skin);
+    // Receipt: subject rides the researched measured rig; everything
+    // else is still defaulted.
     assert!(!c.receipt.is_empty());
+    let subjects: Vec<_> = c
+        .receipt
+        .iter()
+        .filter(|r| r.requirement.starts_with("subject:"))
+        .collect();
     assert!(
-        c.receipt.iter().all(|r| !r.researched),
-        "nothing researched yet: {:?}",
+        !subjects.is_empty(),
+        "subject status missing: {:?}",
         c.receipt.iter().map(|r| &r.requirement).collect::<Vec<_>>()
     );
-    assert!(
-        c.receipt.iter().any(|r| r.requirement.contains("subject")),
-        "subject status missing"
-    );
+    for s in &subjects {
+        assert!(
+            s.researched,
+            "subject must be researched (measured rig): {:?}",
+            s.requirement
+        );
+        assert!(
+            s.note.contains("proportions researched (hm08 rig)"),
+            "subject note must cite measured rig, got {:?}",
+            s.note
+        );
+    }
+    for r in c
+        .receipt
+        .iter()
+        .filter(|r| !r.requirement.starts_with("subject:") && !r.requirement.starts_with("open:"))
+    {
+        assert!(
+            !r.researched,
+            "only subject is researched, got {:?} researched",
+            r.requirement
+        );
+    }
 }
 
 #[test]

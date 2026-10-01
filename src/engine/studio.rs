@@ -17,7 +17,6 @@ use super::mesh::Mesh;
 use super::scene::{Camera, Light, Material, Scene, Shape, Vec3};
 use super::skeleton::{BodyProportions, Joint, Pose, V3};
 use super::vision::{Image, Rgb};
-use std::collections::HashMap;
 
 /// Per-requirement provenance in the finished image.
 #[derive(Debug, Clone)]
@@ -133,6 +132,15 @@ fn oracle_deltas(sex: &str) -> Vec<super::body_oracle::MorphDelta> {
     super::body_oracle::parse_target(oracle_text(sex)).expect("vendored morph parses")
 }
 
+/// Morphed oracle body for a sex. The research product everything
+/// below measures from — not canon fractions.
+fn morphed_body(female: bool) -> super::body_oracle::OracleBody {
+    let mut body = oracle_base().clone();
+    let deltas = oracle_deltas(if female { "female" } else { "male" });
+    super::body_oracle::apply_morph(&mut body, &deltas, 1.0).expect("vendored morph fits");
+    body
+}
+
 /// Build the posed figure from the premade oracle: morphed base
 /// mesh, rigid-bound to FK parts, joint spheres over the seams.
 /// No tubes, no parametric torso, no sculpted hands or head —
@@ -141,17 +149,15 @@ fn oracle_deltas(sex: &str) -> Vec<super::body_oracle::MorphDelta> {
 /// lowest vert at y=0.
 fn build_figure(
     props: &BodyProportions,
-    pos: &HashMap<Joint, V3>,
     pose: &Pose,
     female: bool,
     skin: &Material,
     shapes: &mut Vec<Shape>,
 ) {
     let s = props.stature_m;
-    let mut body = oracle_base().clone();
-    let deltas = oracle_deltas(if female { "female" } else { "male" });
-    super::body_oracle::apply_morph(&mut body, &deltas, 1.0).expect("vendored morph fits");
-    // Scale to target stature about the feet, then bind + pose.
+    let mut body = morphed_body(female);
+    // Scale is a no-op here (measured stature already), kept so a
+    // future target stature needs no new code path.
     let m = super::body_oracle::measure_body(&body);
     let k = s / m.stature_m;
     for v in &mut body.verts {
@@ -159,9 +165,11 @@ fn build_figure(
         v[1] *= k;
         v[2] *= k;
     }
-    let parts = super::body_oracle::bind_parts(&body, props);
+    // Rig measured off the scaled mesh, then linear-blend skinning.
+    // No seam spheres: the mesh deforms continuously now.
+    let rig = super::body_oracle::rig_for(&body).expect("vendored rig fits vendored mesh");
     let posed =
-        super::body_oracle::pose_body(&body, &parts, props, pose).expect("learned poses validate");
+        super::body_oracle::pose_body(&body, &rig, props, pose).expect("learned poses validate");
     let min_y = posed.iter().map(|v| v[1]).fold(f64::INFINITY, f64::min);
     let verts: Vec<[f64; 3]> = posed.iter().map(|v| [v[0], v[1] - min_y, v[2]]).collect();
     let mut mesh = Mesh {
@@ -174,24 +182,6 @@ fn build_figure(
         mesh,
         mat: skin.clone(),
     });
-    // Seam spheres over bent joints (rigid-part covers, stated).
-    for (j, r) in [
-        (Joint::ShoulderL, 0.058),
-        (Joint::ShoulderR, 0.058),
-        (Joint::ElbowL, 0.040),
-        (Joint::ElbowR, 0.040),
-        (Joint::KneeL, 0.062),
-        (Joint::KneeR, 0.062),
-        (Joint::AnkleL, 0.044),
-        (Joint::AnkleR, 0.044),
-    ] {
-        let q = pos[&j];
-        let ball = Mesh::sphere(10, 6, r * s).translated(q.x, q.y - min_y, q.z);
-        shapes.push(Shape::Mesh {
-            mesh: ball,
-            mat: skin.clone(),
-        });
-    }
 }
 
 /// Straw hat at an assembly anchor: hemisphere crown + brim disc.
@@ -284,11 +274,12 @@ pub fn create_image_with(
         .iter()
         .any(|a| a == "woman" || a == "lady" || a == "female")
         || human.stype == "woman";
-    let props = if female {
-        BodyProportions::adult_female()
-    } else {
-        BodyProportions::adult_male()
-    };
+    // Measured rig, not canon: proportions come from the morphed
+    // oracle mesh (Step 4 — research affects construction, with the
+    // source on the receipt, not smuggled into defaults).
+    let mbody = morphed_body(female);
+    let props = super::body_oracle::measured_proportions(&mbody)
+        .map_err(|e| CreationError::MissingEvidence(vec![e]))?;
 
     // Pose: first poseable action drives the body; salute claims the
     // right arm while a waved object takes the left (assembly rule).
@@ -320,7 +311,7 @@ pub fn create_image_with(
         None => skin_mat(),
     };
     let mut shapes: Vec<Shape> = Vec::new();
-    build_figure(&props, &pos, &pose, female, &skin_mat_built, &mut shapes);
+    build_figure(&props, &pose, female, &skin_mat_built, &mut shapes);
     for a in &asm.attachments {
         if a.object_id.contains("hat") {
             build_hat(a.anchor, props.stature_m, &mut shapes);
@@ -370,12 +361,26 @@ pub fn create_image_with(
             let palette = skin
                 .as_ref()
                 .filter(|_| r.category == super::evidence::Category::Subject);
+            // Subjects ride researched proportions (measured rig);
+            // only the skin palette can still be defaulted.
+            let (researched, note) = match (&palette, r.category) {
+                (Some((_, src)), super::evidence::Category::Subject) => (
+                    true,
+                    format!("proportions researched (hm08 rig); skin {}", src),
+                ),
+                _ if r.category == super::evidence::Category::Subject => (
+                    true,
+                    "proportions researched (hm08 rig); skin default (no photo tones)".to_string(),
+                ),
+                _ => (
+                    false,
+                    "no researched model yet — canon/default construction".to_string(),
+                ),
+            };
             ReqStatus {
                 requirement: r.id.clone(),
-                researched: palette.is_some(),
-                note: palette.map(|(_, src)| src.clone()).unwrap_or_else(|| {
-                    "no researched model yet — canon/default construction".to_string()
-                }),
+                researched,
+                note,
             }
         })
         .collect();

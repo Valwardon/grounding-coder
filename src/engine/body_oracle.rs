@@ -224,117 +224,355 @@ pub fn measure_body(body: &OracleBody) -> MeasuredBody {
     }
 }
 
-/// Segment list for part binding: joint pairs in rest pose.
-fn rest_segments(props: &BodyProportions) -> Vec<(Joint, [f64; 3], [f64; 3])> {
-    let rest = super::skeleton::forward_kinematics(props, &Pose::rest()).expect("rest validates");
-    let mut segs = Vec::new();
-    for j in Joint::all() {
-        if let Some(p) = j.parent() {
-            let a = rest[&p];
-            let b = rest[&j];
-            segs.push((j, [a.x, a.y, a.z], [b.x, b.y, b.z]));
+/// The compatible rig: MakeHuman bones with CC0 skinning weights,
+/// joint centroids measured off the (possibly morphed) mesh, and one
+/// of our FK joints per bone for rotation inheritance.
+#[derive(Debug, Clone)]
+pub struct Rig {
+    /// Bones in stable (sorted) order; weight indices point here.
+    pub bones: Vec<RigBone>,
+    /// Per vert: normalized (bone index, weight). Empty = unweighted
+    /// helper (posed rigidly by nearest joint instead of skinned).
+    pub weights: Vec<Vec<(usize, f64)>>,
+    /// Rest positions of our joints (bone-head centroids, mesh coords).
+    pub joints: HashMap<Joint, [f64; 3]>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RigBone {
+    pub name: String,
+    pub parent: Option<usize>,
+    pub joint: Joint,
+    pub rest_head: [f64; 3],
+}
+
+/// MakeHuman bone → our FK joint for rotation inheritance.
+/// Unlisted bones walk the MH parent chain (breasts follow the
+/// spine, toes follow the foot, face follows the head) — structure,
+/// never invention: every fallback is a true ancestor.
+fn mh_joint(name: &str) -> Option<Joint> {
+    use Joint::*;
+    let base = name.trim_end_matches(".L").trim_end_matches(".R");
+    let sided = |l: Joint, r: Joint| Some(if name.ends_with(".L") { l } else { r });
+    match base {
+        "root" | "spine01" | "spine02" | "pelvis" => Some(Pelvis),
+        "spine03" => Some(Spine),
+        "spine04" | "spine05" | "clavicle" => Some(Chest),
+        "neck01" | "neck02" | "neck03" => Some(Neck),
+        "head" | "jaw" | "eye" | "tongue" | "oris" | "oculi" | "orbicularis" | "temporalis"
+        | "levator" | "risorius" => Some(Head),
+        "shoulder01" | "upperarm01" | "upperarm02" => sided(ShoulderL, ShoulderR),
+        "lowerarm01" | "lowerarm02" => sided(ElbowL, ElbowR),
+        "wrist" | "metacarpal1" | "metacarpal2" | "metacarpal3" | "metacarpal4" | "finger1-1"
+        | "finger1-2" | "finger1-3" | "finger2-1" | "finger2-2" | "finger2-3" | "finger3-1"
+        | "finger3-2" | "finger3-3" | "finger4-1" | "finger4-2" | "finger4-3" | "finger5-1"
+        | "finger5-2" | "finger5-3" => sided(WristL, WristR),
+        "upperleg01" | "upperleg02" => sided(HipL, HipR),
+        "lowerleg01" | "lowerleg02" => sided(KneeL, KneeR),
+        "foot" => sided(AnkleL, AnkleR),
+        _ => None,
+    }
+}
+
+/// Our joint ← MH head-group centroid. The anatomical anchor per
+/// joint (child-segment heads; femoral midline for the pelvis).
+fn joint_group(joint: Joint) -> &'static str {
+    use Joint::*;
+    match joint {
+        Pelvis => "",
+        Spine => "spine02____head",
+        Chest => "spine04____head",
+        Neck => "neck01____head",
+        Head => "head____head",
+        ShoulderL => "upperarm01.L____head",
+        ShoulderR => "upperarm01.R____head",
+        ElbowL => "lowerarm01.L____head",
+        ElbowR => "lowerarm01.R____head",
+        WristL => "wrist.L____head",
+        WristR => "wrist.R____head",
+        HandL => "metacarpal3.L____head",
+        HandR => "metacarpal3.R____head",
+        HipL => "upperleg01.L____head",
+        HipR => "upperleg01.R____head",
+        KneeL => "lowerleg01.L____head",
+        KneeR => "lowerleg01.R____head",
+        AnkleL => "foot.L____head",
+        AnkleR => "foot.R____head",
+        FootL => "foot.L____tail",
+        FootR => "foot.R____tail",
+    }
+}
+
+fn centroid(body: &OracleBody, idx: &[usize]) -> Option<[f64; 3]> {
+    let mut c = [0.0; 3];
+    let mut n = 0usize;
+    for i in idx {
+        if let Some(v) = body.verts.get(*i) {
+            c[0] += v[0];
+            c[1] += v[1];
+            c[2] += v[2];
+            n += 1;
         }
     }
-    segs
+    if n == 0 {
+        return None;
+    }
+    Some([c[0] / n as f64, c[1] / n as f64, c[2] / n as f64])
 }
 
-fn dist_point_seg(p: [f64; 3], a: [f64; 3], b: [f64; 3]) -> f64 {
-    let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-    let l2 = (ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2]).max(1e-12);
-    let t = ((p[0] - a[0]) * ab[0] + (p[1] - a[1]) * ab[1] + (p[2] - a[2]) * ab[2]) / l2;
-    let t = t.clamp(0.0, 1.0);
-    let c = [a[0] + ab[0] * t, a[1] + ab[1] * t, a[2] + ab[2] * t];
-    ((p[0] - c[0]).powi(2) + (p[1] - c[1]).powi(2) + (p[2] - c[2]).powi(2)).sqrt()
-}
+/// Vendored rig text (pinned, CC0 — see PROVENANCE.md).
+const RIG_SKELETON: &str = include_str!("../../assets/oracle/default.mhskel");
+const RIG_WEIGHTS: &str = include_str!("../../assets/oracle/default_weights.mhw");
 
-/// Bind every vertex to its nearest rest-pose bone segment. Returns
-/// per-vertex joint ids. Pure geometry — same mesh twice, same parts.
-pub fn bind_parts(body: &OracleBody, props: &BodyProportions) -> Vec<Joint> {
-    let segs = rest_segments(props);
-    body.verts
-        .iter()
-        .map(|v| {
-            let mut best = segs[0].0;
-            let mut bd = f64::INFINITY;
-            for (j, a, b) in &segs {
-                let d = dist_point_seg(*v, *a, *b);
-                if d < bd {
-                    bd = d;
-                    best = *j;
+/// Build the rig for a (possibly morphed) body: parse the pinned
+/// skeleton + weights, measure joint centroids off THIS mesh,
+/// normalize weights per vert (rows sum to 1; zero rows stay empty
+/// for the rigid fallback). Refuses on missing groups, corrupt
+/// JSON, or out-of-range indices — never half a rig.
+pub fn rig_for(body: &OracleBody) -> Result<Rig, String> {
+    let skel: serde_json::Value =
+        serde_json::from_str(RIG_SKELETON).map_err(|e| format!("rig json: {}", e))?;
+    let wt: serde_json::Value =
+        serde_json::from_str(RIG_WEIGHTS).map_err(|e| format!("weights json: {}", e))?;
+    let bones_json = skel
+        .get("bones")
+        .and_then(|b| b.as_object())
+        .ok_or("rig: no bones")?;
+    let joints_json = skel
+        .get("joints")
+        .and_then(|b| b.as_object())
+        .ok_or("rig: no joints")?;
+    let mut group_pos: HashMap<String, [f64; 3]> = HashMap::new();
+    for (gname, arr) in joints_json {
+        let idx: Vec<usize> = arr
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_u64().map(|i| i as usize))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(c) = centroid(body, &idx) {
+            group_pos.insert(gname.clone(), c);
+        }
+    }
+    let mut names: Vec<String> = bones_json.keys().cloned().collect();
+    names.sort();
+    // Our-joint rest positions FIRST: anchor-group centroids (+ pelvis
+    // midline). Bones pivot here — at their mapped joint, never at
+    // their own head groups (those sit centimeters away and would
+    // break rest-identity).
+    let mut joints = HashMap::new();
+    for j in Joint::all() {
+        if j == Joint::Pelvis {
+            let l = joint_group(Joint::HipL);
+            let r = joint_group(Joint::HipR);
+            match (group_pos.get(l), group_pos.get(r)) {
+                (Some(a), Some(b)) => {
+                    joints.insert(
+                        j,
+                        [
+                            (a[0] + b[0]) / 2.0,
+                            (a[1] + b[1]) / 2.0,
+                            (a[2] + b[2]) / 2.0,
+                        ],
+                    );
+                }
+                _ => return Err("rig: hip groups missing".to_string()),
+            }
+            continue;
+        }
+        let g = joint_group(j);
+        match group_pos.get(g) {
+            Some(c) => {
+                joints.insert(j, *c);
+            }
+            None => return Err(format!("rig: joint group {} missing", g)),
+        }
+    }
+    let mut bones = Vec::new();
+    for name in &names {
+        let b = &bones_json[name];
+        let parent_name = b
+            .get("parent")
+            .and_then(|p| p.as_str())
+            .map(|s| s.to_string());
+        let mut joint = mh_joint(name);
+        let mut walk = parent_name.clone();
+        while joint.is_none() {
+            match walk {
+                Some(pn) => {
+                    joint = mh_joint(&pn);
+                    walk = bones_json
+                        .get(&pn)
+                        .and_then(|b| b.get("parent"))
+                        .and_then(|p| p.as_str())
+                        .map(|s| s.to_string());
+                }
+                None => break,
+            }
+        }
+        let joint = joint.ok_or_else(|| format!("rig: no joint for bone {}", name))?;
+        // Pivot at the MAPPED joint's centroid (shared with FK), so
+        // rest pose is identity bit-for-bit. Bone-local head groups
+        // sit centimeters off-joint and must never pivot.
+        let rest_head = joints[&joint];
+        let parent = parent_name
+            .as_ref()
+            .and_then(|pn| names.iter().position(|n| n == pn));
+        bones.push(RigBone {
+            name: name.clone(),
+            parent,
+            joint,
+            rest_head,
+        });
+    }
+    // Weights, normalized per vert (measured row sums run 0.32–1.67,
+    // mean 0.94 — never assumed to be 1).
+    let wobj = wt
+        .get("weights")
+        .and_then(|w| w.as_object())
+        .ok_or("weights: no weights")?;
+    let mut acc: Vec<HashMap<usize, f64>> = vec![HashMap::new(); body.verts.len()];
+    for (bi, name) in names.iter().enumerate() {
+        if let Some(arr) = wobj.get(name).and_then(|a| a.as_array()) {
+            for row in arr {
+                let (vi, w) = match row.as_array() {
+                    Some(r) if r.len() >= 2 => (r[0].as_u64().map(|i| i as usize), r[1].as_f64()),
+                    _ => (None, None),
+                };
+                if let (Some(vi), Some(w)) = (vi, w)
+                    && vi < acc.len()
+                    && w > 0.0
+                {
+                    *acc[vi].entry(bi).or_insert(0.0) += w;
                 }
             }
-            best
-        })
-        .collect()
+        }
+    }
+    let mut weights: Vec<Vec<(usize, f64)>> = Vec::with_capacity(body.verts.len());
+    for row in acc {
+        let total: f64 = row.values().sum();
+        if total <= 0.0 {
+            weights.push(Vec::new());
+        } else {
+            let mut normed: Vec<(usize, f64)> =
+                row.into_iter().map(|(b, w)| (b, w / total)).collect();
+            normed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            weights.push(normed);
+        }
+    }
+    Ok(Rig {
+        bones,
+        weights,
+        joints,
+    })
 }
 
-/// 3×3 rotation, column-major.
-pub type Mat3 = ([f64; 3], [f64; 3], [f64; 3]);
+/// Rest proportions from a rig: offsets reproduce the measured
+/// joint positions exactly, so FK and the mesh agree by
+/// construction. Stature measured; source labeled researched.
+pub fn rig_to_proportions(rig: &Rig, stature_m: f64) -> BodyProportions {
+    let at = |j: Joint| -> [f64; 3] { rig.joints.get(&j).copied().unwrap_or([0.0, 0.0, 0.0]) };
+    let sh = at(Joint::ShoulderR)[0].abs().max(1e-9);
+    let hip = at(Joint::HipR)[0].abs().max(1e-9);
+    // Measured rest offsets (child − parent): FK reproduces the
+    // measured positions exactly — the review's Step 2, as code.
+    let mut offsets = HashMap::new();
+    for j in Joint::all() {
+        if let Some(p) = j.parent() {
+            let a = at(p);
+            let b = at(j);
+            offsets.insert(j, [b[0] - a[0], b[1] - a[1], b[2] - a[2]]);
+        }
+    }
+    BodyProportions {
+        stature_m,
+        shoulder_hw: sh / stature_m,
+        hip_hw: hip / stature_m,
+        root: at(Joint::Pelvis),
+        offsets,
+        source: "researched: hm08 rig (CC0)".to_string(),
+    }
+}
 
-/// Pose a bound body: each part rotates rigidly about its joint by
-/// the posed-minus-rest rotation, translated to the posed joint.
-/// Rest locals are zero, so the delta is the posed local rotation.
-/// Stated approximation: rigid parts (smooth skinning staged);
-/// joint spheres cover the seams (see studio).
+/// One call from mesh to proportioned skeleton. Refuses when the
+/// rig fails — a canon fallback here would smuggle defaults into
+/// "researched" proportions.
+pub fn measured_proportions(body: &OracleBody) -> Result<BodyProportions, String> {
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    for v in &body.verts {
+        lo = lo.min(v[1]);
+        hi = hi.max(v[1]);
+    }
+    let stature = (hi - lo).max(1e-9);
+    let rig = rig_for(body)?;
+    Ok(rig_to_proportions(&rig, stature))
+}
+
+/// Pose a rigged body: linear-blend skinning over the CC0 weights.
+/// Each bone rotates about its rest head by its joint's world
+/// rotation, translated to the posed joint. Unweighted verts ride
+/// their nearest joint rigidly (helpers, stated). Same matrices as
+/// FK — joints agree bit-for-bit (tested).
 pub fn pose_body(
     body: &OracleBody,
-    parts: &[Joint],
+    rig: &Rig,
     props: &BodyProportions,
     pose: &Pose,
 ) -> Result<Vec<[f64; 3]>, String> {
-    let rest = super::skeleton::forward_kinematics(props, &Pose::rest())?;
+    use super::skeleton::{V3, apply_mat, joint_world_rotations};
     let posed = super::skeleton::forward_kinematics(props, pose)?;
-    let rot_of = |angles: super::skeleton::JointAngles, j: Joint| -> Mat3 {
-        // R = Rz(b)·Rx(a), exactly the FK's rot_xz order: single-axis
-        // chains match FK bit-for-bit; mixed axes agree with it to
-        // second order (documented in skeleton).
-        let a = -j.flex_sign() * angles.flex.to_radians();
-        let b = j.mirror() * angles.abd.to_radians();
-        let (sa, ca) = a.sin_cos();
-        let (sb, cb) = b.sin_cos();
-        let c0 = [cb, sb, 0.0];
-        let c1 = [-sb * ca, cb * ca, sa];
-        let c2 = [sb * sa, -cb * sa, ca];
-        (c0, c1, c2)
+    let world = joint_world_rotations(pose)?;
+    // Nearest joint per vert, for the unweighted fallback.
+    let joints: Vec<(Joint, [f64; 3])> = rig.joints.iter().map(|(j, p)| (*j, *p)).collect();
+    let nearest = |v: &[f64; 3]| -> Joint {
+        let mut best = Joint::Pelvis;
+        let mut bd = f64::INFINITY;
+        for (j, p) in &joints {
+            let d = (v[0] - p[0]).powi(2) + (v[1] - p[1]).powi(2) + (v[2] - p[2]).powi(2);
+            if d < bd {
+                bd = d;
+                best = *j;
+            }
+        }
+        best
     };
-    // World rotation per joint: DFS from the root, composing.
-    let mut world: HashMap<Joint, Mat3> = HashMap::new();
-    for j in Joint::all() {
-        let a = pose.get(j);
-        let local = rot_of(a, j);
-        let w = match j.parent() {
-            None => local,
-            Some(p) => mat_mul(&world[&p], &local),
-        };
-        world.insert(j, w);
-    }
-    let apply = |m: &Mat3, v: [f64; 3]| -> [f64; 3] {
-        [
-            m.0[0] * v[0] + m.1[0] * v[1] + m.2[0] * v[2],
-            m.0[1] * v[0] + m.1[1] * v[1] + m.2[1] * v[2],
-            m.0[2] * v[0] + m.1[2] * v[1] + m.2[2] * v[2],
-        ]
+    let xf = |bone_idx: usize, v: [f64; 3]| -> [f64; 3] {
+        let b = &rig.bones[bone_idx];
+        let r = posed[&b.joint];
+        let rel = V3::new(
+            v[0] - b.rest_head[0],
+            v[1] - b.rest_head[1],
+            v[2] - b.rest_head[2],
+        );
+        let rot = apply_mat(&world[&b.joint], rel);
+        [r.x + rot.x, r.y + rot.y, r.z + rot.z]
     };
     let mut out = Vec::with_capacity(body.verts.len());
-    for (v, j) in body.verts.iter().zip(parts.iter()) {
-        let r = rest[j];
-        let p = posed[j];
-        let rel = [v[0] - r.x, v[1] - r.y, v[2] - r.z];
-        let rot = apply(&world[j], rel);
-        out.push([p.x + rot[0], p.y + rot[1], p.z + rot[2]]);
+    for (vi, v) in body.verts.iter().enumerate() {
+        let row = &rig.weights[vi];
+        if row.is_empty() {
+            // Rigid fallback for unweighted helpers.
+            let j = nearest(v);
+            let r = posed[&j];
+            let jr = rig.joints[&j];
+            let rel = V3::new(v[0] - jr[0], v[1] - jr[1], v[2] - jr[2]);
+            let rot = apply_mat(&world[&j], rel);
+            out.push([r.x + rot.x, r.y + rot.y, r.z + rot.z]);
+            continue;
+        }
+        let mut p = [0.0; 3];
+        for (bi, w) in row {
+            let q = xf(*bi, *v);
+            p[0] += w * q[0];
+            p[1] += w * q[1];
+            p[2] += w * q[2];
+        }
+        out.push(p);
     }
     Ok(out)
-}
-
-fn mat_mul(a: &Mat3, b: &Mat3) -> Mat3 {
-    let col = |a: &Mat3, v: [f64; 3]| -> [f64; 3] {
-        [
-            a.0[0] * v[0] + a.1[0] * v[1] + a.2[0] * v[2],
-            a.0[1] * v[0] + a.1[1] * v[1] + a.2[1] * v[2],
-            a.0[2] * v[0] + a.1[2] * v[1] + a.2[2] * v[2],
-        ]
-    };
-    (col(a, b.0), col(a, b.1), col(a, b.2))
 }
 
 #[cfg(test)]
@@ -395,10 +633,9 @@ mod tests {
     #[test]
     fn rest_pose_is_identity() {
         let body = load_oracle_body(&dir(), Some("male-young.target")).expect("male");
-        let props = BodyProportions::adult_male();
-        let parts = bind_parts(&body, &props);
-        assert_eq!(parts.len(), body.verts.len());
-        let out = pose_body(&body, &parts, &props, &Pose::rest()).expect("pose");
+        let rig = rig_for(&body).expect("rig");
+        let props = measured_proportions(&body).expect("measured");
+        let out = pose_body(&body, &rig, &props, &Pose::rest()).expect("pose");
         let worst = body
             .verts
             .iter()
@@ -408,6 +645,27 @@ mod tests {
             })
             .fold(0.0, f64::max);
         assert!(worst < 1e-9, "rest must be exact: {}", worst);
+    }
+
+    #[test]
+    fn weight_rows_normalize() {
+        let body = load_oracle_body(&dir(), None).expect("base");
+        let rig = rig_for(&body).expect("rig");
+        let mut empty = 0usize;
+        for row in &rig.weights {
+            let s: f64 = row.iter().map(|(_, w)| w).sum();
+            if row.is_empty() {
+                empty += 1;
+            } else {
+                assert!((s - 1.0).abs() < 1e-9, "row sums to {}", s);
+            }
+        }
+        // Helpers ride along; the body is overwhelmingly weighted.
+        assert!(
+            empty < body.verts.len() / 10,
+            "too many bare verts: {}",
+            empty
+        );
     }
 
     #[test]

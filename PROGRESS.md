@@ -1,5 +1,23 @@
 # Grounding Coder — Progress
 
+## v0.25.13 — Real rig: measured joints, weight skinning, one math (2026-10-01)
+
+- Review-driven alignment fix: row-scan heuristics deleted.
+  `default.mhskel` + CC0 weights vendored (pinned, SHA-manifested).
+  Joint positions are bone-head centroids off the morphed mesh;
+  every vert skinned by normalized CC0 weights (rows measured
+  0.32–1.67, never assumed 1); unweighted helpers ride nearest
+  joints. Bones pivot at mapped-joint centroids (bone-local heads
+  sit centimeters off and broke rest-identity — caught by test).
+- One math: FK and deformation share `joint_world_rotations`
+  (exact matrices, additive approximation deleted); rest pose is
+  bit-exact identity, FK/deformation joints agree by construction.
+- Seam spheres deleted (smooth skinning covers continuously).
+  Proportions come from the rig; studio renders the same woman
+  standing/waving/saluting with connected anatomy verified.
+- 350 tests green (198 lib + 152 integration), `cargo check
+  --all-features`, clippy zero warnings, fmt clean.
+
 ## v0.25.12 — Premade body oracle, chat owns pictures (2026-10-01)
 
 - Premade oracle, not hand anatomy: MakeHuman hm08 base mesh +

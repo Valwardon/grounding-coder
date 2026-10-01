@@ -3,9 +3,9 @@
   "prompt": "A man saluting, waving an American flag, wearing a straw hat.",
   "requirements": [
     {
-      "note": "no researched model yet — canon/default construction",
+      "note": "proportions researched (hm08 rig); skin default (no photo tones)",
       "requirement": "subject:man",
-      "researched": false
+      "researched": true
     },
     {
       "note": "no researched model yet — canon/default construction",
@@ -25,6 +25,11 @@
     {
       "note": "no researched model yet — canon/default construction",
       "requirement": "object:hat_2",
+      "researched": false
+    },
+    {
+      "note": "unresolved at assembly — not rendered",
+      "requirement": "open: salute hand 0.58m from head — pose misses",
       "researched": false
     }
   ]

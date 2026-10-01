@@ -1,0 +1,16 @@
+{
+  "kind": "constructed-studio-maquette, not a photograph",
+  "prompt": "a woman standing",
+  "requirements": [
+    {
+      "note": "proportions researched (hm08 rig); skin default (no photo tones)",
+      "requirement": "subject:woman",
+      "researched": true
+    },
+    {
+      "note": "no researched model yet — canon/default construction",
+      "requirement": "action:stand",
+      "researched": false
+    }
+  ]
+}
