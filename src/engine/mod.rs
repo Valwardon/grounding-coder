@@ -13,6 +13,7 @@ pub mod human;
 pub mod imagine;
 pub mod knowledge;
 pub mod lang;
+pub mod material;
 pub mod mesh;
 pub mod object_model;
 pub mod pathfind;

@@ -249,7 +249,7 @@ Oracle verify (compiler / tests / parser per language)
 
 ## Proof, Not Promises
 
-312 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
+320 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
 `fmt --check` clean:
 
 | Suite | Tests | What it proves |
@@ -263,6 +263,7 @@ Oracle verify (compiler / tests / parser per language)
 | `phase2_pose` | 10 | pose learning (ROM-gated examples, mirror normalization, greedy clustering, medoid representative with confidence, clean FK application); salute/wave separate, unknown actions yield nothing |
 | `evidence` | 5 | research phase (requirements from specs, 20/100/500 budgets, query-walking collector with refusal trails, classifier features); any material binds generically, straw/glass/steel proven |
 | `phase3_objects` | 5 | object models (flag stripe/emblem/pole/aspect measurement, 20-gated statistics, construction round-trip, disagreement in agreement, hat gap named); constructed flag commits under `samples/` |
+| `phase4_materials` | 5 | material models (histogram palettes with coverage ranges, 20-gated derivation, swatch round-trip, generic over substances); constructed swatch commits under `samples/` |
 | `knowledge_loop` | 3 | budget-bounded offline dreaming with persistence, sleep when nothing open, failures deprioritize without deleting |
 | `learning_experiment` | 2 | dreaming arm rediscovers family patterns (rate 0.55) vs amnesiac baseline (0.00); both arms solve every task |
 | `build` | 6 | C/Java/Rust real builds + artifacts run; unknown targets block; dx-output APK discovery |

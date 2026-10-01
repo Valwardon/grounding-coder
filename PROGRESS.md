@@ -1,5 +1,20 @@
 # Grounding Coder — Progress
 
+## v0.25.8 — Phase 4 materials: appearance from examples (2026-10-01)
+
+- `engine/material.rs`: quantized color histograms with coverage
+  fractions → palette statistics (mean/min/max coverage, agreement)
+  behind the 20-example gate → procedural swatch that re-measures
+  to its own palette. Generic over every substance (straw, steel,
+  cloth proven identical). No reflectance claims — color + coverage
+  is what was measured.
+- `tests/phase4_materials.rs`: 5 cases (generic derivation, round
+  trip, sample commit, disagreement in ranges, gate). Sample
+  `samples/material-swatch-320x200.bmp` (+ receipt) commits the
+  constructed material, labeled as such.
+- 320 tests green (182 lib + 138 integration), `cargo check
+  --all-features`, clippy zero warnings, fmt clean.
+
 ## v0.25.7 — Phase 3 objects: flag measure → model → construct (2026-10-01)
 
 - `engine/object_model.rs`: first simple object end to end.
