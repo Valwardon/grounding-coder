@@ -17,6 +17,7 @@ use super::mesh::Mesh;
 use super::scene::{Camera, Light, Material, Scene, Shape, Vec3};
 use super::skeleton::{BodyProportions, Joint, Pose, V3};
 use super::vision::{Image, Rgb};
+use std::collections::HashMap;
 
 /// Per-requirement provenance in the finished image.
 #[derive(Debug, Clone)]
@@ -142,11 +143,11 @@ fn morphed_body(female: bool) -> super::body_oracle::OracleBody {
 }
 
 /// Build the posed figure from the premade oracle: morphed base
-/// mesh, rigid-bound to FK parts, joint spheres over the seams.
-/// No tubes, no parametric torso, no sculpted hands or head —
-/// research provides the body; the engine only poses it. The
-/// `female` flag selects the macro morph; ground contact holds the
-/// lowest vert at y=0.
+/// mesh, linear-blend skinning, helper parts in their own materials
+/// (eyes dark, mouth dark red, hair brown, shorts charcoal),
+/// eyebrows, eye catchlights, rim light from the scene. Cubes and
+/// the unidentified shell never render. The `female` flag selects
+/// the macro morph; ground contact holds the lowest vert at y=0.
 fn build_figure(
     props: &BodyProportions,
     pose: &Pose,
@@ -166,22 +167,113 @@ fn build_figure(
         v[2] *= k;
     }
     // Rig measured off the scaled mesh, then linear-blend skinning.
-    // No seam spheres: the mesh deforms continuously now.
+    // Helper parts split into their own materials below.
     let rig = super::body_oracle::rig_for(&body).expect("vendored rig fits vendored mesh");
+    let dom = super::body_oracle::dominant_bones(&rig);
+    let help = super::body_oracle::classify_helpers(&body, &dom);
     let posed =
         super::body_oracle::pose_body(&body, &rig, props, pose).expect("learned poses validate");
     let min_y = posed.iter().map(|v| v[1]).fold(f64::INFINITY, f64::min);
     let verts: Vec<[f64; 3]> = posed.iter().map(|v| [v[0], v[1] - min_y, v[2]]).collect();
-    let mut mesh = Mesh {
-        verts,
-        faces: body.faces.clone(),
-        normals: Vec::new(),
+    // Face classes by vert membership (helpers never share verts
+    // with the body — disconnected by construction, asserted).
+    let in_set = |f: &[u32; 3], set: &[usize]| f.iter().any(|i| set.contains(&(*i as usize)));
+    let all_excluded = |f: &[u32; 3]| f.iter().all(|i| help.excluded.contains(&(*i as usize)));
+    let class_of = |f: &[u32; 3]| -> u8 {
+        if all_excluded(f) {
+            255
+        } else if in_set(f, &help.eyes) {
+            1
+        } else if in_set(f, &help.mouth) {
+            2
+        } else if in_set(f, &help.hair) {
+            3
+        } else if in_set(f, &help.shorts) {
+            4
+        } else {
+            0
+        }
     };
-    mesh.compute_normals();
-    shapes.push(Shape::Mesh {
-        mesh,
-        mat: skin.clone(),
-    });
+    let mats = [
+        skin.clone(),
+        Material::named("eye", Rgb::new(22, 13, 9)),
+        Material::named("mouth", Rgb::new(88, 28, 22)),
+        Material::named("hair", Rgb::new(48, 30, 17)),
+        Material::named("shorts", Rgb::new(38, 38, 44)),
+    ];
+    for class in 0u8..=4u8 {
+        let mut remap: HashMap<usize, u32> = HashMap::new();
+        let mut vout: Vec<[f64; 3]> = Vec::new();
+        let mut fout: Vec<[u32; 3]> = Vec::new();
+        for f in &body.faces {
+            if class_of(f) != class {
+                continue;
+            }
+            let mut tri = [0u32; 3];
+            for (k, i) in f.iter().enumerate() {
+                let iu = *i as usize;
+                let nu = *remap.entry(iu).or_insert_with(|| {
+                    vout.push(verts[iu]);
+                    (vout.len() - 1) as u32
+                });
+                tri[k] = nu;
+            }
+            fout.push(tri);
+        }
+        if fout.is_empty() {
+            continue;
+        }
+        let mut mesh = Mesh {
+            verts: vout,
+            faces: fout,
+            normals: Vec::new(),
+        };
+        mesh.compute_normals();
+        shapes.push(Shape::Mesh {
+            mesh,
+            mat: mats[class as usize].clone(),
+        });
+    }
+    // Eyebrows: dark tubes above the eye centers (posed space).
+    let mut eye_l = Vec::new();
+    let mut eye_r = Vec::new();
+    for i in &help.eyes {
+        let v = verts[*i];
+        if v[0] < 0.0 {
+            eye_l.push(v);
+        } else {
+            eye_r.push(v);
+        }
+    }
+    let brow_mat = Material::named("brow", Rgb::new(48, 30, 17));
+    for eye in [&eye_l, &eye_r] {
+        if eye.is_empty() {
+            continue;
+        }
+        let n = eye.len() as f64;
+        let c = [
+            eye.iter().map(|v| v[0]).sum::<f64>() / n,
+            eye.iter().map(|v| v[1]).sum::<f64>() / n,
+            eye.iter().map(|v| v[2]).sum::<f64>() / n,
+        ];
+        let dir = if c[0] < 0.0 { -1.0 } else { 1.0 };
+        let a = [c[0] - dir * 0.008 * s, c[1] + 0.022 * s, c[2] + 0.004 * s];
+        let b = [c[0] + dir * 0.020 * s, c[1] + 0.026 * s, c[2] + 0.004 * s];
+        shapes.push(Shape::Mesh {
+            mesh: Mesh::tube(a, b, 0.0035 * s, 0.0025 * s, 6),
+            mat: brow_mat.clone(),
+        });
+        // Catchlight: millimeter white glint toward the camera side.
+        let glint = Mesh::sphere(6, 4, 0.0022 * s).translated(
+            c[0] + dir * 0.004 * s,
+            c[1] + 0.006 * s,
+            c[2] + 0.012 * s,
+        );
+        shapes.push(Shape::Mesh {
+            mesh: glint,
+            mat: Material::named("glint", Rgb::new(245, 245, 248)),
+        });
+    }
 }
 
 /// Straw hat at an assembly anchor: hemisphere crown + brim disc.
@@ -333,6 +425,8 @@ pub fn create_image_with(
         lights: vec![
             Light::key(Vec3::new(-0.45, 0.8, 0.35)),
             Light::fill(Vec3::new(0.6, 0.25, 0.7), 0.30),
+            // Rim from behind-top: edge definition against the sweep.
+            Light::fill(Vec3::new(0.3, 0.5, -0.8), 0.35),
         ],
         ambient: 0.38,
         sky_top: Rgb::new(232, 232, 238),

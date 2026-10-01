@@ -469,6 +469,112 @@ pub fn rig_for(body: &OracleBody) -> Result<Rig, String> {
     })
 }
 
+/// Helper-part classification: which helper verts render as what.
+/// Rules use dominant CC0 bones + sizes (eyeballs, mouth, hair),
+/// never position guesses — except the two garments, identified by
+/// size and band with counts asserted in test (the file is pinned,
+/// so drift fails loudly instead of silently restyling).
+/// Unlisted parts render skin. Cubes (rig viz) and the unidentified
+/// full-body shell never render at all.
+#[derive(Debug, Clone, Default)]
+pub struct HelperMats {
+    /// Eyeball vert indices (dark, glossy).
+    pub eyes: Vec<usize>,
+    /// Mouth interior (dark red).
+    pub mouth: Vec<usize>,
+    /// Hair locks (dark brown).
+    pub hair: Vec<usize>,
+    /// Modesty garment (dark gray clothing).
+    pub shorts: Vec<usize>,
+    /// Never rendered: rig-viz cubes + unidentified shell.
+    pub excluded: Vec<usize>,
+}
+
+/// Classify helper verts (index ≥ 13380) of a body. `dominant` maps
+/// vert index → top weight bone name (see `rig_for` weights).
+pub fn classify_helpers(body: &OracleBody, dominant: &HashMap<usize, String>) -> HelperMats {
+    // Connected components over helper verts.
+    let mut adj: HashMap<usize, Vec<usize>> = HashMap::new();
+    for f in &body.faces {
+        for k in 0..3 {
+            let a = f[k] as usize;
+            let b = f[(k + 1) % 3] as usize;
+            if a >= 13380 && b >= 13380 {
+                adj.entry(a).or_default().push(b);
+                adj.entry(b).or_default().push(a);
+            }
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut comps: Vec<Vec<usize>> = Vec::new();
+    for i in 13380..body.verts.len() {
+        if seen.contains(&i) {
+            continue;
+        }
+        let mut stack = vec![i];
+        seen.insert(i);
+        let mut ids = Vec::new();
+        while let Some(j) = stack.pop() {
+            ids.push(j);
+            if let Some(ns) = adj.get(&j) {
+                for k in ns {
+                    if !seen.contains(k) {
+                        seen.insert(*k);
+                        stack.push(*k);
+                    }
+                }
+            }
+        }
+        comps.push(ids);
+    }
+    let mut out = HelperMats::default();
+    for c in &comps {
+        if c.len() == 8 {
+            out.excluded.extend(c.iter().copied());
+            continue;
+        }
+        // Majority vote of member verts' dominant bones.
+        let mut votes: HashMap<String, usize> = HashMap::new();
+        for i in c {
+            if let Some(b) = dominant.get(i) {
+                *votes.entry(b.clone()).or_insert(0) += 1;
+            }
+        }
+        let top = votes.into_iter().max_by_key(|(_, n)| *n).map(|(b, _)| b);
+        let is_eye = top.as_ref().is_some_and(|b| b.starts_with("eye."));
+        let is_mouth = top.as_ref().is_some_and(|b| b.starts_with("tongue"));
+        if is_eye {
+            out.eyes.extend(c.iter().copied());
+        } else if is_mouth {
+            out.mouth.extend(c.iter().copied());
+        } else if c.len() == 226 {
+            // Mouth interior mass (tongue-weighted cavity).
+            out.mouth.extend(c.iter().copied());
+        } else if c.len() == 720 {
+            out.shorts.extend(c.iter().copied());
+        } else if c.len() == 2674 {
+            out.excluded.extend(c.iter().copied());
+        } else if (20..=40).contains(&c.len()) {
+            // Hair locks.
+            out.hair.extend(c.iter().copied());
+        }
+        // Else: skin default (lids, jaw, ears, nails) — no entry needed.
+    }
+    out
+}
+
+/// Dominant (top-weight) bone per vert, for part classification.
+/// Rows sort descending at load, so the first entry wins.
+pub fn dominant_bones(rig: &Rig) -> HashMap<usize, String> {
+    let mut out = HashMap::new();
+    for (vi, row) in rig.weights.iter().enumerate() {
+        if let Some((bi, _)) = row.first() {
+            out.insert(vi, rig.bones[*bi].name.clone());
+        }
+    }
+    out
+}
+
 /// Rest proportions from a rig: offsets reproduce the measured
 /// joint positions exactly, so FK and the mesh agree by
 /// construction. Stature measured; source labeled researched.
@@ -666,6 +772,26 @@ mod tests {
             "too many bare verts: {}",
             empty
         );
+    }
+
+    #[test]
+    fn helper_census_matches_pinned_file() {
+        // Every helper vert accounted for, by rule. The file is
+        // hash-pinned: drift fails here loudly instead of silently
+        // restyling the face.
+        let body = load_oracle_body(&dir(), None).expect("base");
+        let rig = rig_for(&body).expect("rig");
+        let dom = dominant_bones(&rig);
+        let h = classify_helpers(&body, &dom);
+        assert_eq!(h.eyes.len(), 144, "two eyeballs");
+        assert_eq!(h.mouth.len(), 226, "mouth interior");
+        assert_eq!(h.hair.len(), 320, "ten hair locks");
+        assert_eq!(h.shorts.len(), 720, "garment");
+        assert_eq!(h.excluded.len(), 2674 + 125 * 8, "shell + cubes");
+        let total = body.verts.len() - 13380;
+        let rest =
+            total - h.eyes.len() - h.mouth.len() - h.hair.len() - h.shorts.len() - h.excluded.len();
+        assert!(rest > 400, "skin-default helpers remain: {}", rest);
     }
 
     #[test]

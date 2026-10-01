@@ -1,5 +1,19 @@
 # Grounding Coder — Progress
 
+## v0.25.14 — A face, not a ball (2026-10-01)
+
+- Helper parts identified by CC0 bone weights, not guesses:
+  eyeballs (100% eye bones), mouth interior (tongue), eyelids
+  (orbicularis), jaw, hair locks, modesty garment. Cubes (rig viz)
+  and the duplicate full-body shell never render. Census pinned
+  in test (144/226/320/720/3674) — drift fails loudly.
+- Multi-material render (eyes near-black + catchlights, mouth
+  dark red, hair brown, garment charcoal), procedural eyebrows,
+  rim light. Face thresholds asserted live (eyes >50, mouth >80,
+  hair >200, garment >200 px).
+- 351 tests green (199 lib + 152 integration), `cargo check
+  --all-features`, clippy zero warnings, fmt clean.
+
 ## v0.25.13 — Real rig: measured joints, weight skinning, one math (2026-10-01)
 
 - Review-driven alignment fix: row-scan heuristics deleted.

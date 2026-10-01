@@ -21,6 +21,17 @@ fn walkthrough_creates_receipted_maquette() {
         3000,
     );
     assert!(skin > 500, "figure must read, got {}", skin);
+    // A face, not a ball: eyes, mouth, hair, and garment all render
+    // in their own materials (thresholds ~50% under live counts).
+    use grounding_coder::engine::vision::Rgb;
+    let eyes = c.image.count_near(Rgb::new(22, 13, 9), 2000);
+    assert!(eyes > 50, "eyes must read, got {}", eyes);
+    let mouth = c.image.count_near(Rgb::new(88, 28, 22), 2000);
+    assert!(mouth > 80, "mouth must read, got {}", mouth);
+    let hair = c.image.count_near(Rgb::new(48, 30, 17), 2000);
+    assert!(hair > 200, "hair must read, got {}", hair);
+    let shorts = c.image.count_near(Rgb::new(38, 38, 44), 2000);
+    assert!(shorts > 200, "garment must read, got {}", shorts);
     // Receipt: subject rides the researched measured rig; everything
     // else is still defaulted.
     assert!(!c.receipt.is_empty());
