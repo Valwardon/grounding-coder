@@ -1,5 +1,24 @@
 # Grounding Coder — Progress
 
+## v0.25.5 — Phase 2 pose: learn from validated examples (2026-10-01)
+
+- `engine/pose_learn.rs`: examples (ROM-gated ingestion with cited
+  sources) → normalize (dominant side onto right joints; mirroring
+  by sign was wrong for asymmetric ranges like wrist [0,80] — the
+  joint swap already encodes laterality) → greedy complete-linkage
+  clustering → medoid representative (means can violate ROM,
+  medoids cannot) with tightness confidence, ranges, member count,
+  sources. `examples_for` covers raise/wave/salute/point/sit/walk;
+  unknown actions yield nothing. Apply means FK on the Phase 1
+  scaffold. Photo-derived pose still needs fine joints — still
+  missing, still stated.
+- `tests/phase2_pose.rs`: 10 cases (registry coverage, mirror
+  unification, salute/wave separation, representative reach +
+  medoid-membership + ranges, confidence ordering, identicals at
+  1.0, clean application per action, ingestion + empty refusal).
+- 296 tests green (174 lib + 122 integration), `cargo check
+  --all-features`, clippy zero warnings, fmt clean.
+
 ## v0.25.4 — Phase 1 human: articulated skeleton + honest measurements (2026-10-01)
 
 - `engine/skeleton.rs`: the spec's joint tree (pelvis→spine→chest→

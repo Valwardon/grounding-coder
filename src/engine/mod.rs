@@ -16,6 +16,7 @@ pub mod mesh;
 pub mod pathfind;
 pub mod plan;
 pub mod plates;
+pub mod pose_learn;
 pub mod probe;
 pub mod rank;
 pub mod recipes;
