@@ -172,6 +172,20 @@ impl RecipeLog {
                 success_count: 0,
                 attempt_count: 0,
             },
+            // PHOTO_FLAT_SKIN: single-tone clay — enable the mottling
+            // switch the renderer already carries. Parameter repair:
+            // exact bytes, compiler judges next round as always.
+            FixRecipe {
+                error_kind: "photo_defect".into(),
+                error_code: "PHOTO_FLAT_SKIN".into(),
+                context_pattern: Some("mottle".to_string()),
+                fix: FixAction::Replace {
+                    find: "mottled: false".to_string(),
+                    replace: "mottled: true".to_string(),
+                },
+                success_count: 0,
+                attempt_count: 0,
+            },
         ];
 
         for recipe in seeds {

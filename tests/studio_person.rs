@@ -21,6 +21,16 @@ fn walkthrough_creates_receipted_maquette() {
         3000,
     );
     assert!(skin > 500, "figure must read, got {}", skin);
+    // Composition audit from the renderer's own pixel counts.
+    let total: u64 = c.pixel_counts.iter().map(|(_, n)| n).sum();
+    let bg: u64 = c
+        .pixel_counts
+        .iter()
+        .filter(|(m, _)| *m == "sky" || *m == "sweep")
+        .map(|(_, n)| *n)
+        .sum();
+    let fill = 1.0 - bg as f64 / total.max(1) as f64;
+    assert!(fill > 0.12, "tableau must fill the frame: {:.2}", fill);
     // A face, not a ball: eyes, mouth, hair, and garment all render
     // in their own materials (thresholds ~50% under live counts).
     use grounding_coder::engine::vision::Rgb;

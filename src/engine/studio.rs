@@ -33,6 +33,9 @@ pub struct Creation {
     pub image: Image,
     pub receipt: Vec<ReqStatus>,
     pub prompt: String,
+    /// Per-material pixel counts from the render (sky included):
+    /// the composition audit trail.
+    pub pixel_counts: Vec<(String, u64)>,
 }
 
 /// Why creation refused.
@@ -316,6 +319,37 @@ fn build_figure(
     }
 }
 
+/// Measured bounds of figure meshes: center + largest extent.
+/// Drives auto-framing so renders compose correctly for any pose.
+fn figure_bounds(shapes: &[Shape]) -> ([f64; 3], f64) {
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    let mut any = false;
+    for s in shapes {
+        if let Shape::Mesh { mesh, .. } = s {
+            for v in &mesh.verts {
+                any = true;
+                for k in 0..3 {
+                    lo[k] = lo[k].min(v[k]);
+                    hi[k] = hi[k].max(v[k]);
+                }
+            }
+        }
+    }
+    if !any {
+        return ([0.0, 0.9, 0.0], 1.8);
+    }
+    let size = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]);
+    (
+        [
+            (lo[0] + hi[0]) / 2.0,
+            (lo[1] + hi[1]) / 2.0,
+            (lo[2] + hi[2]) / 2.0,
+        ],
+        size,
+    )
+}
+
 /// Straw hat at an assembly anchor: hemisphere crown + brim disc.
 /// Default tan; no researched straw model exists (receipt states it).
 fn build_hat(anchor: V3, s: f64, shapes: &mut Vec<Shape>) {
@@ -452,18 +486,29 @@ pub fn create_image_with(
         }
     }
 
-    // Studio: frame the figure, key + fill, seamless sweep, floor.
-    let s = props.stature_m;
+    // Studio: auto-framed on the measured figure bounds (fills
+    // ~90% of frame height by construction — no hand-tuned camera
+    // to drift). Key from front-above-left so the face reads,
+    // fill + rim for form, seamless sweep + floor.
+    let (c, size) = figure_bounds(&shapes);
+    let half = (size / 2.0).max(0.2);
+    let dist = half / (20.0f64.to_radians().tan()) / 0.9;
+    let dir = Vec3::new(0.15, 0.12, 1.0);
+    let dl = (dir.x * dir.x + dir.y * dir.y + dir.z * dir.z).sqrt();
     let scene = Scene {
         camera: Camera {
-            pos: Vec3::new(0.25 * s, 1.05 * s, 2.9 * s),
-            look_at: Vec3::new(0.0, 0.85 * s, 0.0),
+            pos: Vec3::new(
+                c[0] + dir.x / dl * dist,
+                c[1] + dir.y / dl * dist,
+                c[2] + dir.z / dl * dist,
+            ),
+            look_at: Vec3::new(c[0], c[1], c[2]),
             fov_deg: 40.0,
             width: 640,
             height: 480,
         },
         lights: vec![
-            Light::key(Vec3::new(-0.45, 0.8, 0.35)),
+            Light::key(Vec3::new(-0.35, 0.55, 0.75)),
             Light::fill(Vec3::new(0.6, 0.25, 0.7), 0.30),
             // Rim from behind-top: edge definition against the sweep.
             Light::fill(Vec3::new(0.3, 0.5, -0.8), 0.35),
@@ -480,7 +525,7 @@ pub fn create_image_with(
             all
         },
     };
-    let (mut img, _) = super::scene::render(&scene);
+    let (mut img, pixel_counts) = super::scene::render(&scene);
     img.grade(1.06, 3.0);
     img.vignette(0.22);
     img.grain(0xF16E, 3);
@@ -529,6 +574,7 @@ pub fn create_image_with(
         image: img,
         receipt,
         prompt: prompt.to_string(),
+        pixel_counts,
     })
 }
 

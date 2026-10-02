@@ -49,6 +49,9 @@ pub enum ErrorKind {
     TraitBound,
     /// Generic type parameter error
     GenericError,
+    /// Photo verification defect (see engine::photo): a measured
+    /// visual failure with severity, confidence, and repair target.
+    PhotoDefect,
     /// Other / unclassified
     Other,
 }
@@ -65,6 +68,7 @@ impl ErrorKind {
             ErrorKind::DuplicateDefinition => "duplicate_definition",
             ErrorKind::TraitBound => "trait_bound",
             ErrorKind::GenericError => "generic_error",
+            ErrorKind::PhotoDefect => "photo_defect",
             ErrorKind::Other => "other",
         }
     }

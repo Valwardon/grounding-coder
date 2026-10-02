@@ -21,6 +21,7 @@ pub mod material;
 pub mod mesh;
 pub mod object_model;
 pub mod pathfind;
+pub mod photo;
 pub mod picture;
 pub mod plan;
 pub mod plates;
@@ -590,6 +591,69 @@ impl CodeBot {
     /// Delivery (GitHub publish) is orthogonal to proof: it runs on every
     /// terminal outcome — including Blocked — and only appends to the
     /// message, never flips success into failure or vice versa.
+    /// Full verification: compiler/tests plus, for picture-flavored
+    /// intents, a rendered probe photo through the photo oracle.
+    /// Goal words (photo/picture/skin/render/image) trigger the
+    /// probe deterministically. Photo diagnostics join the error
+    /// list so the repair loop can act on them like any failure.
+    async fn verify_all(
+        &self,
+        intent: &StructuredIntent,
+    ) -> crate::engine::verifier::VerificationResult {
+        let mut verdict = self.verifier.verify().await;
+        let hay = format!(
+            "{} {}",
+            intent.goal,
+            intent
+                .actions
+                .iter()
+                .map(|a| match a {
+                    crate::engine::tasks::IntentAction::Action { action, .. } => action.clone(),
+                    crate::engine::tasks::IntentAction::Research { topic, .. } => topic.clone(),
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+        .to_lowercase();
+        let wants_photo = ["photo", "picture", "skin", "render", "image"]
+            .iter()
+            .any(|w| hay.contains(w));
+        if !wants_photo {
+            return verdict;
+        }
+        // Fixed probe scene: the walkthrough man exercises skin,
+        // features, and attachments deterministically.
+        let probe = "A man saluting, waving an American flag, wearing a straw hat.";
+        match crate::engine::studio::create_image(probe) {
+            Ok(creation) => {
+                for d in crate::engine::photo::verify_photo(
+                    &creation.image,
+                    &crate::engine::photo::PhotoExpect::default(),
+                ) {
+                    verdict.errors.push(crate::engine::photo::to_compile_error(
+                        &d,
+                        &self.project_dir,
+                    ));
+                }
+                verdict.clean = verdict.clean && verdict.errors.is_empty();
+            }
+            Err(e) => {
+                verdict.errors.push(crate::engine::error::CompileError {
+                    code: "PHOTO_NO_FIGURE".to_string(),
+                    message: format!("probe render failed: {}", e),
+                    file: String::new(),
+                    line: 0,
+                    col: 0,
+                    suggestion: None,
+                    source_line: None,
+                    kind: crate::engine::error::ErrorKind::PhotoDefect,
+                });
+                verdict.clean = false;
+            }
+        }
+        verdict
+    }
+
     pub async fn run_task(&mut self, intent_json: &str) -> Result<AgentOutcome, String> {
         let outcome = self.run_task_engine(intent_json).await?;
         let intent: StructuredIntent = match serde_json::from_str(intent_json) {
@@ -1218,7 +1282,7 @@ impl CodeBot {
             }
 
             // 4. Verify: run the compiler/tests
-            let verdict = self.verifier.verify().await;
+            let verdict = self.verify_all(&intent).await;
             log::info!(
                 "VERIFICATION\n  clean={}\n  errors={}\n  warnings={}",
                 verdict.is_clean(),
@@ -1392,7 +1456,7 @@ impl CodeBot {
 
                 // Re-verify fresh: fixed errors stay fixed, remaining ones
                 // get current line numbers for the next attempt.
-                verdict = self.verifier.verify().await;
+                verdict = self.verify_all(&intent).await;
                 // True-fix labels: every recipe applied this round is
                 // judged against the fresh verdict — an error with the
                 // same code+file+message still present did NOT fix;

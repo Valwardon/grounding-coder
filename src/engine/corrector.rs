@@ -492,7 +492,7 @@ impl CorrectionPipeline {
             }
             super::recipes::FixAction::WrapConversion { method } => {
                 // Wrap a literal on the offending line with the suggested method,
-                // e.g. `"a"` → `"a".to_string()` or `42` → `42 as f64`.
+                // e.g., `"a"` → `"a".to_string()` or `42` → `42 as f64`.
                 if let Some((find, replace)) =
                     wrap_with_method(&error.source_line.clone().unwrap_or_default(), method)
                 {
@@ -504,6 +504,20 @@ impl CorrectionPipeline {
                     }
                 } else {
                     Fix::None
+                }
+            }
+            super::recipes::FixAction::Replace { find, replace } => {
+                // Exact-byte parameter repair (photo switches and kin):
+                // the recipe names both sides, the error names the file.
+                if find.trim().is_empty() {
+                    Fix::None
+                } else {
+                    Fix::Replace {
+                        find: find.clone(),
+                        replace: replace.clone(),
+                        file: error.file.clone(),
+                        line: error.line,
+                    }
                 }
             }
             _ => Fix::None,

@@ -1,5 +1,14 @@
 # Grounding Coder — Progress
 
+## v0.25.15 — Composition audit + auto-frame (2026-10-02)
+
+- Render receipt now carries per-material pixel counts
+  (`Creation.pixel_counts`): composition measured by the renderer
+  itself, not by tone guessing (which misses shaded skin).
+  Tableau fill asserted (>0.12); camera auto-frames from measured
+  bounds (~90% fill target) instead of hand-tuned coordinates.
+- Full-suite green below; counts refreshed on push.
+
 ## v0.25.16 — Unknown Resolution: investigate, don't just refuse (2026-10-02)
 
 - `engine/unknown.rs`: UnknownRecord (question, kind, evidence,

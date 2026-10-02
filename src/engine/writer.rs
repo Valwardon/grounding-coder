@@ -968,6 +968,21 @@ impl CodeWriter {
                     }
                     let _ = file;
                 }
+                if let Fix::Replace {
+                    find,
+                    replace,
+                    file,
+                    line,
+                } = fix
+                {
+                    // Exact-byte parameter repair from a known recipe:
+                    // locate `find` (prefer the diagnostic line), then
+                    // the stale-checked EditPlan path judges freshness.
+                    // Anything unfound refuses instead of guessing.
+                    if let Ok(ch) = self.apply_exact_replace(file, *line, find, replace) {
+                        return ch;
+                    }
+                }
                 log::warn!("Blocked heuristic fix: {:?}", fix);
                 Vec::new()
             }
@@ -1068,6 +1083,62 @@ impl CodeWriter {
             }
         }
         Vec::new()
+    }
+
+    /// Exact-byte replacement from a known recipe: locate `find`
+    /// (prefer the diagnostic line, else first occurrence), then the
+    /// stale-checked EditPlan path. Unfound text refuses — the recipe
+    /// names bytes that must exist, never patterns to invent.
+    fn apply_exact_replace(
+        &self,
+        file_hint: &str,
+        line: u32,
+        find: &str,
+        replace: &str,
+    ) -> Result<Vec<String>, String> {
+        if find.is_empty() {
+            return Err("empty find anchor — refusing".to_string());
+        }
+        let path = self.project_dir.join(file_hint);
+        let content =
+            fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {}", file_hint, e))?;
+        // Prefer the diagnostic line; fall back to first occurrence.
+        let at = if line > 0 {
+            let target = content
+                .lines()
+                .nth(line as usize - 1)
+                .and_then(|l| l.find(find))
+                .map(|col| {
+                    let upto: usize = content
+                        .lines()
+                        .take(line as usize - 1)
+                        .map(|l| l.len() + 1)
+                        .sum();
+                    upto + col
+                });
+            target.or_else(|| content.find(find))
+        } else {
+            content.find(find)
+        };
+        let start =
+            at.ok_or_else(|| format!("anchor {:?} absent in {} — refusing", find, file_hint))?;
+        let plan = EditPlan {
+            task_id: 0,
+            edits: vec![SourceEdit {
+                file: path,
+                start,
+                end: start + find.len(),
+                expected_old: find.to_string(),
+                replacement: replace.to_string(),
+            }],
+            evidence: vec![Evidence::CompilerSuggestion {
+                code: "recipe-replace".to_string(),
+                file: file_hint.to_string(),
+                line,
+                col: 0,
+            }],
+        };
+        self.apply_plan(&plan)
     }
 
     // --- Private planning methods ---
