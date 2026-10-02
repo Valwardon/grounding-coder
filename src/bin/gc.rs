@@ -158,6 +158,61 @@ enum Commands {
     },
 }
 
+/// Search project sources for a term: relative .rs paths
+/// containing the word, sorted, capped at 5. Ground truth of what
+/// the codebase already knows — a codebase hit is reliable.
+fn search_codebase(project: &str, query: &str) -> Vec<String> {
+    search_files(project, query, &["rs"])
+}
+
+/// Search project docs (.md/.toml) for a term. Same contract.
+fn search_docs(project: &str, query: &str) -> Vec<String> {
+    search_files(project, query, &["md", "toml"])
+}
+
+fn search_files(project: &str, query: &str, exts: &[&str]) -> Vec<String> {
+    let root = std::path::Path::new(project);
+    let q = query.to_lowercase();
+    let mut hits = Vec::new();
+    let walker = walkdir::WalkDir::new(root)
+        .into_iter()
+        .filter_entry(|e| {
+            !matches!(
+                e.file_name().to_string_lossy().as_ref(),
+                ".git" | "target" | "build" | ".gradle" | ".grounding" | "node_modules"
+            )
+        })
+        .flatten();
+    for entry in walker {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if !path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| exts.contains(&e))
+        {
+            continue;
+        }
+        if let Ok(text) = std::fs::read_to_string(path)
+            && text.to_lowercase().contains(&q)
+        {
+            hits.push(
+                path.strip_prefix(root)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .to_string(),
+            );
+            if hits.len() >= 5 {
+                break;
+            }
+        }
+    }
+    hits.sort();
+    hits
+}
+
 fn main() {
     let cli = Cli::parse();
     if cli.verbose {
@@ -211,6 +266,225 @@ fn main() {
                 if understand::disposition(understood.confidence, &understood.frame, &prompt)
                     != Disposition::Execute
                 {
+                    // Unknown Resolution: investigate before refusing.
+                    // Per-unknown records, typed routes, bounded budget,
+                    // trail-kept attempts, structured report on
+                    // exhaustion. Exit 2 still signals "did not act".
+                    use grounding_coder::engine::research::ResearchOracle;
+                    use grounding_coder::engine::unknown::{
+                        decide, Decision, Evidence, ResearchAttempt, UnknownRecord, UnknownStatus,
+                    };
+                    let tasks = understand::research_tasks(&prompt);
+                    let trail_path = std::path::Path::new(&project)
+                        .join(".grounding")
+                        .join("research.jsonl");
+                    let trail = grounding_coder::engine::unknown::load_trail(&trail_path);
+                    let mut oracle = ResearchOracle::new(6);
+                    let mut web_left = 6u32;
+                    for task in tasks.iter().take(3) {
+                        let mut record = UnknownRecord::open(&task.unknown);
+                        // Trail = attempted routes already walked.
+                        if let Some((summary, source)) = trail.get(&task.unknown) {
+                            record.record_attempt(ResearchAttempt {
+                                method: "trail".to_string(),
+                                query: task.unknown.clone(),
+                                found: true,
+                                reliable: false,
+                                remaining: "prior trail hit, unverified".to_string(),
+                            });
+                            record.record_evidence(Evidence {
+                                source: format!("trail:{}", source),
+                                content: summary.clone(),
+                                reliable: false,
+                            });
+                        }
+                        loop {
+                            match decide(&record, web_left, false) {
+                                Decision::Proceed { evidence } => {
+                                    println!(
+                                        "RESEARCHED {}: {} [{}]",
+                                        task.unknown, evidence.content, evidence.source
+                                    );
+                                    for f in grounding_coder::engine::unknown::followups(
+                                        &record,
+                                        &evidence,
+                                    ) {
+                                        println!("  next question: {}", f);
+                                        record.followups.push(f);
+                                    }
+                                    break;
+                                }
+                                Decision::Continue { method, query } => {
+                                    match method {
+                                        "web" => {
+                                            web_left = web_left.saturating_sub(1);
+                                            match oracle.research_word(&query).await {
+                                                Some(def) => {
+                                                    let reliable = def
+                                                        .source_url
+                                                        .contains("wikipedia.org");
+                                                    record.record_attempt(ResearchAttempt {
+                                                        method: "web".to_string(),
+                                                        query: query.clone(),
+                                                        found: true,
+                                                        reliable,
+                                                        remaining: if reliable {
+                                                            "answered".to_string()
+                                                        } else {
+                                                            "unverified snippet".to_string()
+                                                        },
+                                                    });
+                                                    record.record_evidence(Evidence {
+                                                        source: def.source_url.clone(),
+                                                        content: def.summary.clone(),
+                                                        reliable,
+                                                    });
+                                                }
+                                                None => {
+                                                    record.record_attempt(ResearchAttempt {
+                                                        method: "web".to_string(),
+                                                        query: query.clone(),
+                                                        found: false,
+                                                        reliable: false,
+                                                        remaining: "no usable result"
+                                                            .to_string(),
+                                                    });
+                                                }
+                                            }
+                                        }
+                                        "codebase" => {
+                                            let hits =
+                                                search_codebase(&project, &query);
+                                            if hits.is_empty() {
+                                                record.record_attempt(ResearchAttempt {
+                                                    method: "codebase".to_string(),
+                                                    query: query.clone(),
+                                                    found: false,
+                                                    reliable: false,
+                                                    remaining: "not in sources".to_string(),
+                                                });
+                                            } else {
+                                                println!(
+                                                    "RESEARCHED {}: in project sources: {}",
+                                                    task.unknown,
+                                                    hits.join(", ")
+                                                );
+                                                record.record_attempt(ResearchAttempt {
+                                                    method: "codebase".to_string(),
+                                                    query: query.clone(),
+                                                    found: true,
+                                                    reliable: true,
+                                                    remaining: "answered".to_string(),
+                                                });
+                                                record.record_evidence(Evidence {
+                                                    source: "codebase".to_string(),
+                                                    content: format!(
+                                                        "{} appears in {}",
+                                                        query,
+                                                        hits.join(", ")
+                                                    ),
+                                                    reliable: true,
+                                                });
+                                            }
+                                        }
+                                        "docs" => {
+                                            let hits = search_docs(&project, &query);
+                                            if hits.is_empty() {
+                                                record.record_attempt(ResearchAttempt {
+                                                    method: "docs".to_string(),
+                                                    query: query.clone(),
+                                                    found: false,
+                                                    reliable: false,
+                                                    remaining: "not in docs".to_string(),
+                                                });
+                                            } else {
+                                                println!(
+                                                    "RESEARCHED {}: in project docs: {}",
+                                                    task.unknown,
+                                                    hits.join(", ")
+                                                );
+                                                record.record_attempt(ResearchAttempt {
+                                                    method: "docs".to_string(),
+                                                    query: query.clone(),
+                                                    found: true,
+                                                    reliable: true,
+                                                    remaining: "answered".to_string(),
+                                                });
+                                                record.record_evidence(Evidence {
+                                                    source: "docs".to_string(),
+                                                    content: format!(
+                                                        "{} documented in {}",
+                                                        query,
+                                                        hits.join(", ")
+                                                    ),
+                                                    reliable: true,
+                                                });
+                                            }
+                                        }
+                                        _ => {
+                                            // "user" with nobody home, or
+                                            // anything unrecognized: the
+                                            // route itself is exhausted.
+                                            record.record_attempt(ResearchAttempt {
+                                                method: method.to_string(),
+                                                query: query.clone(),
+                                                found: false,
+                                                reliable: false,
+                                                remaining: "route unavailable".to_string(),
+                                            });
+                                        }
+                                    }
+                                }
+                                Decision::Blocked { report } => {
+                                    println!("STATUS: BLOCKED");
+                                    println!("OBJECTIVE: {}", report.objective);
+                                    for e in &report.established {
+                                        println!("ESTABLISHED: {}", e);
+                                    }
+                                    for i in &report.investigated {
+                                        println!("INVESTIGATED: {}", i);
+                                    }
+                                    for u in &report.unresolved {
+                                        println!("UNRESOLVED: {}", u);
+                                    }
+                                    println!("NEXT POSSIBLE STEP: {}", report.next_step);
+                                    println!("NO CHANGES APPLIED.");
+                                    break;
+                                }
+                            }
+                        }
+                        // Persist the record (status + attempts): the
+                        // next turn never re-walks these routes.
+                        record.status = match decide(&record, 0, false) {
+                            Decision::Proceed { .. } => UnknownStatus::Resolved,
+                            Decision::Blocked { .. } => {
+                                if matches!(
+                                    record.status,
+                                    UnknownStatus::Resolved
+                                ) {
+                                    UnknownStatus::Resolved
+                                } else {
+                                    UnknownStatus::Exhausted
+                                }
+                            }
+                            Decision::Continue { .. } => UnknownStatus::Exhausted,
+                        };
+                        let dir = std::path::Path::new(&project).join(".grounding");
+                        let _ = std::fs::create_dir_all(&dir);
+                        let row = serde_json::json!({
+                            "term": record.question,
+                            "kind": format!("{:?}", record.kind),
+                            "status": format!("{:?}", record.status),
+                            "summary": record.known_facts.first().map(|e| e.content.clone()).unwrap_or_default(),
+                            "source": record.known_facts.first().map(|e| e.source.clone()).unwrap_or_default(),
+                            "attempts": record.attempted_routes.iter().map(|a| format!("{}:{}", a.method, a.query)).collect::<Vec<_>>(),
+                        });
+                        let mut trail_text =
+                            std::fs::read_to_string(&trail_path).unwrap_or_default();
+                        trail_text.push_str(&row.to_string());
+                        trail_text.push('\n');
+                        let _ = std::fs::write(&trail_path, trail_text);
+                    }
                     eprintln!(
                         "UNDERSTOOD confidence {:.2} frame={} — too thin: {:?}",
                         understood.confidence,

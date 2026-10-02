@@ -425,6 +425,42 @@ pub fn curiosities(prose: &str, project_dir: Option<&std::path::Path>) -> Vec<Cu
     out
 }
 
+/// One unknown begging for research: the word plus where to look.
+/// Queries are the word itself and its nearest-lexicon hypotheses
+/// (bare words — the researcher decides sources, never the parser).
+#[derive(Debug, Clone)]
+pub struct ResearchTask {
+    pub unknown: String,
+    pub queries: Vec<String>,
+}
+
+/// Research tasks for prose with leftovers: at most 3, in prose
+/// order (same bound as curiosities). Pure function of the text —
+/// the chat layer executes these against web sources, bounded by
+/// the oracle fetch budget. Unknown → research first; Ask and Block
+/// move down the equation, firing only on exhaustion or vacuity.
+pub fn research_tasks(prose: &str) -> Vec<ResearchTask> {
+    curiosities(prose, None)
+        .into_iter()
+        .take(3)
+        .map(|c| {
+            let mut queries = vec![c.unknown.clone()];
+            for s in &c.suggestions {
+                // Suggestions read "word (role)"; the query is the word.
+                if let Some(w) = s.split_whitespace().next()
+                    && w != c.unknown
+                    && !queries.iter().any(|q| q == w)
+                {
+                    queries.push(w.to_string());
+                }
+            }
+            ResearchTask {
+                unknown: c.unknown,
+                queries,
+            }
+        })
+        .collect()
+}
 /// Detect multiple requests hiding in one breath ("do X and also Y").
 /// Returns the clause count (1 = single). Deterministic substring scan.
 pub fn clause_count(prose: &str) -> usize {
@@ -801,8 +837,9 @@ fn contract_cases(prose: &str, quotes: &[String]) -> Vec<super::tasks::TestCase>
             format!("{:?}", s)
         }
     };
-    quotes
-        .chunks_exact(2)
+    let (pairs, _) = quotes.as_chunks::<2>();
+    pairs
+        .iter()
         .map(|pair| super::tasks::TestCase {
             input: lit(&pair[0]),
             expected: lit(&pair[1]),

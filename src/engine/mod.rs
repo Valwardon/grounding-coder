@@ -38,6 +38,7 @@ pub mod symbols;
 pub mod synthesize;
 pub mod tasks;
 pub mod understand;
+pub mod unknown;
 pub mod verifier;
 pub mod vision;
 pub mod writer;

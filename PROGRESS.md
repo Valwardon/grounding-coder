@@ -1,5 +1,25 @@
 # Grounding Coder — Progress
 
+## v0.25.16 — Unknown Resolution: investigate, don't just refuse (2026-10-02)
+
+- `engine/unknown.rs`: UnknownRecord (question, kind, evidence,
+  missing, hypotheses, attempted routes, unresolved, followups,
+  status) with typed unknowns (symbol/API, factual, ambiguous,
+  unknowable), per-kind routes, no-repeat rule, and principled
+  exhaustion (methods spent + budget out + user unavailable →
+  structured BLOCKED report: objective/established/investigated/
+  unresolved/next-step). Follow-up curiosity from verified
+  findings (repeated terms only — single mentions are noise).
+- Chat: below-threshold parses research unknowns first (codebase,
+  project docs, web with reliability grading), trail-kept per
+  project, structured report on exhaustion. Refusal now terminal
+  output after real attempts, never the first response.
+- Proved live: "Add a flux capacitor" → split queries → Wikipedia
+  summaries with sources → Resolved trail (double-print and
+  noisy-followup bugs caught live and fixed).
+- 362 tests green (208 lib + 154 integration), `cargo check
+  --all-features`, clippy zero warnings, fmt clean.
+
 ## v0.25.15 — Bot writes code: repair + synthesis proven live (2026-10-02)
 
 - Self-test on a scratch worktree, chat-only, babysat. Design
