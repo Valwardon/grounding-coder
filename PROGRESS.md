@@ -1,5 +1,22 @@
 # Grounding Coder — Progress
 
+## v0.25.15 — Bot writes code: repair + synthesis proven live (2026-10-02)
+
+- Self-test on a scratch worktree, chat-only, babysat. Design
+  attempts scaffold compilable stubs and stop (architecture holds:
+  no authored logic without evidence). Repair of a deleted import:
+  detected 12 knock-on errors, synthesized the exact `use` via the
+  compiler's insertion span, filed it into the error's file (two
+  engine bugs found en route: envelope prefix-match, first-file
+  misrouting — both fixed with unit tests), re-verified clean,
+  1 file changed. Authorship: `Create a function called Shout
+  given "hi" returns "HI"` → contract cases + inferred `&str`
+  signature (new groundwork) → string-transform family elected
+  `to_uppercase` by contract evidence → verified green, committed
+  with its contract test.
+- 355 tests green (202 lib + 153 integration), `cargo check
+  --all-features`, clippy zero warnings, fmt clean.
+
 ## v0.25.14 — A face, not a ball (2026-10-01)
 
 - Helper parts identified by CC0 bone weights, not guesses:

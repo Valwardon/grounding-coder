@@ -249,7 +249,7 @@ Oracle verify (compiler / tests / parser per language)
 
 ## Proof, Not Promises
 
-351 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
+355 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
 `fmt --check` clean:
 
 | Suite | Tests | What it proves |
@@ -276,7 +276,7 @@ Oracle verify (compiler / tests / parser per language)
 | `replicate` | 6 | byte-exact replication, hash-mismatch block, replace-exact rules, clean-room refusal + opt-out |
 | `editplan` | 4 | byte-range apply, stale rejection, invalid-range rejection, LLM-code rejection |
 | `end_to_end` | 2 | boring import path commits; unknown symbols block honestly |
-| `synthesize` | 13 | word_counts, Counter struct, parse_port, new-module wiring, cross-task rollback, unknown-op block, unsupported-shape block, config defaults, component slots, unknown-slot block, statemachine transition, statemachine refusal, asynctask scheduler |
+| `synthesize` | 14 | word_counts, Counter struct, parse_port, new-module wiring, cross-task rollback, unknown-op block, unsupported-shape block, config defaults, component slots, unknown-slot block, statemachine transition, statemachine refusal, asynctask scheduler |
 | `polyglot` | 5 | Python import, unknown-import block, registry-JS import, TOML-defined language, missing-toolchain block |
 | `webpage` | 4 | homepage build, script-escape safety, empty-title block, strict-intent page injection |
 | `repair` | 2 | missing-import repair + compile, unfixable block with untouched disk |
