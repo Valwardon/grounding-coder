@@ -799,6 +799,28 @@ fn contract_cases(prose: &str, quotes: &[String]) -> Vec<super::tasks::TestCase>
         })
         .collect()
 }
+/// Signature inference from contract literals: quoted text is
+/// String, digits are i32, true/false are bool — determined by the
+/// literal shape, never guessed. The synthesizer requires a
+/// signature; this grounds it in the cases the user stated.
+fn infer_signature(name: &str, cases: &[super::tasks::TestCase]) -> Option<String> {
+    let first = cases.first()?;
+    fn ty(lit: &str) -> &'static str {
+        if lit.parse::<i64>().is_ok() {
+            "i32"
+        } else if lit == "true" || lit == "false" {
+            "bool"
+        } else {
+            "String"
+        }
+    }
+    Some(format!(
+        "fn {}(input: {}) -> {}",
+        name,
+        ty(&first.input),
+        ty(&first.expected)
+    ))
+}
 /// Noun adjacent to a kind word: "a counter page" / "the RiskBoard
 /// component" name the referent right before the kind. Deterministic
 /// positional slot-filling (articles skipped, first letter capitalized
@@ -1145,6 +1167,11 @@ pub fn understand(prose: &str, project_dir: Option<&std::path::Path>) -> Underst
                     // from these, verified by generated contract tests).
                     if k == "function" {
                         def.cases = contract_cases(prose, &quotes);
+                        // Ground the signature in the stated cases so
+                        // synthesis can run (literal shapes → types).
+                        if !def.cases.is_empty() {
+                            def.signature = infer_signature(&def.name, &def.cases);
+                        }
                     }
                     if k == "page" {
                         def.title = Some(name.clone());
