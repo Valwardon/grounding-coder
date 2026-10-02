@@ -791,11 +791,21 @@ fn contract_cases(prose: &str, quotes: &[String]) -> Vec<super::tasks::TestCase>
     if !(has_in && has_out) || quotes.len() < 2 {
         return Vec::new();
     }
+    // String literals re-quoted for codegen (contract tests call
+    // `Shout("hi")`, not `Shout(hi)`); numbers/bools pass through
+    // bare. `{:?}` escapes deterministically.
+    let lit = |s: &String| {
+        if s.parse::<i64>().is_ok() || s == "true" || s == "false" {
+            s.clone()
+        } else {
+            format!("{:?}", s)
+        }
+    };
     quotes
         .chunks_exact(2)
         .map(|pair| super::tasks::TestCase {
-            input: pair[0].clone(),
-            expected: pair[1].clone(),
+            input: lit(&pair[0]),
+            expected: lit(&pair[1]),
         })
         .collect()
 }

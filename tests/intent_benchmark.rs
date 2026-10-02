@@ -179,8 +179,8 @@ fn function_contracts_parse_to_cases() {
         .expect("define");
     assert_eq!(def.kind, "function");
     assert_eq!(def.cases.len(), 1);
-    assert_eq!(def.cases[0].input, "hi");
-    assert_eq!(def.cases[0].expected, "HI");
+    assert_eq!(def.cases[0].input, "\"hi\"");
+    assert_eq!(def.cases[0].expected, "\"HI\"");
     assert_eq!(
         def.signature.as_deref(),
         Some("fn Shout(input: &str) -> String")
