@@ -458,7 +458,10 @@ impl CodeBot {
         if let Some(path) = crate::engine::corrector::suggested_import(error) {
             let files = self
                 .writer
-                .apply_fix(&crate::engine::corrector::Fix::AddImport { import: path.clone(), file: error.file.clone() });
+                .apply_fix(&crate::engine::corrector::Fix::AddImport {
+                    import: path.clone(),
+                    file: error.file.clone(),
+                });
             trail.push(format!("suggestion:{} -> {} file(s)", path, files.len()));
             if !files.is_empty() {
                 return Some(files);
@@ -561,7 +564,10 @@ impl CodeBot {
         })?;
         let files = self
             .writer
-            .apply_fix(&crate::engine::corrector::Fix::AddImport { import: candidate.clone(), file: error.file.clone() });
+            .apply_fix(&crate::engine::corrector::Fix::AddImport {
+                import: candidate.clone(),
+                file: error.file.clone(),
+            });
         trail.push(format!("catalog:{} -> {} file(s)", candidate, files.len()));
         if files.is_empty() {
             return None;
