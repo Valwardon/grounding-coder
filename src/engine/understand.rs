@@ -800,9 +800,11 @@ fn contract_cases(prose: &str, quotes: &[String]) -> Vec<super::tasks::TestCase>
         .collect()
 }
 /// Signature inference from contract literals: quoted text is
-/// String, digits are i32, true/false are bool — determined by the
-/// literal shape, never guessed. The synthesizer requires a
-/// signature; this grounds it in the cases the user stated.
+/// `&str` in / `String` out, digits are i32, true/false are bool —
+/// determined by the literal shape, never guessed. Borrowing the
+/// input matches every synthesis family convention (contract tests
+/// pass literals straight into the call). The synthesizer requires
+/// a signature; this grounds it in the cases the user stated.
 fn infer_signature(name: &str, cases: &[super::tasks::TestCase]) -> Option<String> {
     let first = cases.first()?;
     fn ty(lit: &str) -> &'static str {
@@ -814,10 +816,14 @@ fn infer_signature(name: &str, cases: &[super::tasks::TestCase]) -> Option<Strin
             "String"
         }
     }
+    let param = match ty(&first.input) {
+        "String" => "&str",
+        t => t,
+    };
     Some(format!(
         "fn {}(input: {}) -> {}",
         name,
-        ty(&first.input),
+        param,
         ty(&first.expected)
     ))
 }

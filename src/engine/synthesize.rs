@@ -196,6 +196,16 @@ const INGREDIENTS: &[Ingredient] = &[
         method: "trim",
         on_type: "str",
     },
+    // fn to_uppercase(&self) -> String
+    Ingredient {
+        method: "to_uppercase",
+        on_type: "str",
+    },
+    // fn to_lowercase(&self) -> String
+    Ingredient {
+        method: "to_lowercase",
+        on_type: "str",
+    },
 ];
 
 pub struct Synthesizer;
@@ -261,6 +271,16 @@ impl Synthesizer {
         if req.params.len() == 1 && req.params[0].1 == "&str" && is_parse_result(&req.ret) {
             return Ok(self.parse_candidates(req));
         }
+        // Family 8: string unary transform — (x: String | &str) -> String.
+        // Candidates are single verified str calls; the contract tests
+        // pick the winner (uppercase/lowercase/trim), the rest fail
+        // verification honestly.
+        if req.params.len() == 1
+            && (req.params[0].1 == "String" || req.params[0].1 == "&str")
+            && req.ret == "String"
+        {
+            return Ok(self.string_transform_candidates(req));
+        }
         // Family 1: map-accumulation — (text: &str) -> HashMap<String, N>.
         if req.params.len() == 1
             && req.params[0].1 == "&str"
@@ -319,6 +339,32 @@ impl Synthesizer {
                     ev("or_insert", "Entry"),
                     ev("to_string", "str"),
                 ],
+            },
+        ]
+    }
+
+    /// Candidate bodies for `(x: String | &str) -> String` shapes.
+    /// One verified str call each; contract tests elect the winner.
+    fn string_transform_candidates(&self, req: &SynthRequest) -> Vec<Candidate> {
+        let (input, _) = &req.params[0];
+        let name = &req.fn_name;
+        let sig = format!("pub fn {}({}: {}) -> String", name, input, req.params[0].1);
+        let ev = |method: &str, on_type: &str| Evidence::VerifiedSymbol {
+            qname: format!("{}::{}", on_type, method),
+            source: "std-ingredient-index".to_string(),
+        };
+        vec![
+            Candidate {
+                body: format!("{sig} {{\n    {input}.to_uppercase()\n}}"),
+                evidence: vec![ev("to_uppercase", "str")],
+            },
+            Candidate {
+                body: format!("{sig} {{\n    {input}.to_lowercase()\n}}"),
+                evidence: vec![ev("to_lowercase", "str")],
+            },
+            Candidate {
+                body: format!("{sig} {{\n    {input}.trim().to_string()\n}}"),
+                evidence: vec![ev("trim", "str"), ev("to_string", "str")],
             },
         ]
     }

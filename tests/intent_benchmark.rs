@@ -183,7 +183,7 @@ fn function_contracts_parse_to_cases() {
     assert_eq!(def.cases[0].expected, "HI");
     assert_eq!(
         def.signature.as_deref(),
-        Some("fn Shout(input: String) -> String")
+        Some("fn Shout(input: &str) -> String")
     );
     // No case keywords: quotes are not cases.
     let u = understand::understand("Create a page called Home with \"welcome back\".", None);

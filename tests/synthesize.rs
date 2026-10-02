@@ -743,3 +743,54 @@ async fn synthesizes_asynctask_scheduler() {
     );
     let _ = fs::remove_dir_all(&base);
 }
+
+#[tokio::test]
+async fn synthesizes_string_shout_from_contract() {
+    let base = tmp_rust_project();
+    let project = base.to_string_lossy().to_string();
+    let mut bot = CodeBot::new(&project, 5);
+    let intent = serde_json::json!({
+        "goal": "Shout text",
+        "file": "src/lib.rs",
+        "language": "rust",
+        "actions": [],
+        "references": [],
+        "define": [{
+            "name": "shout",
+            "kind": "function",
+            "references": [],
+            "signature": "fn shout(input: &str) -> String",
+            "cases": [
+                {"input": "\"hi\"", "expected": "\"HI\""}
+            ]
+        }],
+        "test": [],
+        "imports": [],
+        "platform": "desktop",
+        "architecture": "native",
+        "runtime": "",
+        "capabilities": [],
+        "domains": [],
+        "constraints": [],
+        "dependencies": [],
+        "unknown_requirements": [],
+        "confidence": 1.0
+    });
+    let outcome = bot
+        .run_task(&serde_json::to_string(&intent).unwrap())
+        .await
+        .expect("run");
+    let rendered = format!("{}", outcome);
+    assert!(
+        rendered.contains("SUCCESS"),
+        "expected synthesis SUCCESS, got: {}",
+        rendered
+    );
+    let lib = fs::read_to_string(base.join("src/lib.rs")).unwrap();
+    assert!(
+        lib.contains("to_uppercase"),
+        "contract elects uppercase:\n{}",
+        lib
+    );
+    let _ = fs::remove_dir_all(&base);
+}
