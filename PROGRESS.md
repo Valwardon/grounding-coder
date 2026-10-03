@@ -1,5 +1,20 @@
 # Grounding Coder — Progress
 
+## v0.25.17 — Self-model: grounded, turned inward (2026-10-03)
+
+- `engine/self_model.rs`: capability table (8 rows: what each
+  does, needs, and where it stops), scored can-do matching
+  (2+ distinct hits + unique winner or honest refusal),
+  track-record reads from judged logs (absent = "no history yet",
+  never fabricated), tight self-question routing (code prompts
+  unaffected, proven).
+- Chat answers who/what-can/limits from the table; count in the
+  description fails visibly on drift. Proved live 3 ways.
+- Staged, stated: goal-formation over self-metrics (the loop that
+  would notice its own repair stalls and open investigations).
+- 376 tests green (222 lib + 154 integration), `cargo check
+  --all-features`, clippy zero warnings, fmt clean.
+
 ## v0.25.17 — Diffusion parallel: refine + sample (2026-10-03)
 
 - `engine/refine.rs`: iterative refinement with residuals —

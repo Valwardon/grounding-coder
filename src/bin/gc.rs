@@ -232,9 +232,19 @@ fn main() {
                 project,
                 budget,
             } => {
-                // Picture requests go to the picture pipeline: the bot
-                // researches, models, and constructs by itself from the
-                // chat text. Everything else stays on the code path.
+                // Self-questions first: the bot answers what it is,
+                // can do, and cannot do from its capability table —
+                // never generated, never guessed.
+                if grounding_coder::engine::self_model::is_self_question(&prompt) {
+                    print!(
+                        "{}",
+                        grounding_coder::engine::self_model::answer_self(
+                            &prompt,
+                            std::path::Path::new(&project)
+                        )
+                    );
+                    return;
+                }
                 if grounding_coder::engine::picture::is_picture_request(&prompt) {
                     use grounding_coder::engine::picture::picture_from_prompt;
                     let stamp = std::time::SystemTime::now()
