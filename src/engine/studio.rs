@@ -533,6 +533,33 @@ pub fn create_image_with(
     }
     let pos =
         crate::engine::skeleton::forward_kinematics(&props, &pose).expect("learned poses validate");
+    // Diffusion-style refinement pass: plant the feet, tighten the
+    // salute toward the head — bounded, ROM-gated, receipted. The
+    // refined pose (not the nominal one) is what renders.
+    let mut refine_targets = vec![
+        crate::engine::refine::RefineTarget::Plant {
+            joint: Joint::FootL,
+            y: 0.02,
+            tol: 0.02,
+        },
+        crate::engine::refine::RefineTarget::Plant {
+            joint: Joint::FootR,
+            y: 0.02,
+            tol: 0.02,
+        },
+    ];
+    if atypes.contains(&"salute") {
+        let h = pos[&Joint::Head];
+        refine_targets.push(crate::engine::refine::RefineTarget::Reach {
+            joint: Joint::HandR,
+            point: [h.x, h.y, h.z],
+            tol: 0.20,
+        });
+    }
+    let (pose, refine_trail) =
+        crate::engine::refine::refine_pose(&props, &pose, &refine_targets, 60);
+    let pos =
+        crate::engine::skeleton::forward_kinematics(&props, &pose).expect("refined poses validate");
     let asm = crate::engine::assembly::assemble(&spec, &pos, &props);
 
     let skin_mat_built = match &skin {
@@ -631,6 +658,18 @@ pub fn create_image_with(
             requirement: format!("open: {}", u),
             researched: false,
             note: "unresolved at assembly — not rendered".to_string(),
+        });
+    }
+    // Refinement trajectory joins the receipt: the denoising steps,
+    // measured, that produced the rendered pose.
+    for s in &refine_trail {
+        receipt.push(ReqStatus {
+            requirement: format!("refine: {}", s.joint),
+            researched: true,
+            note: format!(
+                "flex {:.1}→{:.1}, residual {:.4}→{:.4}",
+                s.flex_before, s.flex_after, s.residual_before, s.residual_after
+            ),
         });
     }
     Ok(Creation {

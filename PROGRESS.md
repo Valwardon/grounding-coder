@@ -1,5 +1,21 @@
 # Grounding Coder — Progress
 
+## v0.25.17 — Diffusion parallel: refine + sample (2026-10-03)
+
+- `engine/refine.rs`: iterative refinement with residuals —
+  coordinate descent over joints (±5° proposals, ROM-gated with
+  correct arity), keep on strict improvement only, bounded budget,
+  trajectory receipt per step. Feet plant on demand; salute
+  tightens toward the head. Wired into creation: the refined pose
+  renders, and its trail joins the receipt.
+- `sample_individual`: new individuals uniform within researched
+  ranges (seeded LCG) — explicit histograms, never a network.
+- Forward (known degradations) stays staged behind measurement
+  calibration; reverse (recover truth) is proven by the roundtrip
+  tests. Sampling ships today.
+- 372 tests green (218 lib + 154 integration), `cargo check
+  --all-features`, clippy zero warnings, fmt clean.
+
 ## v0.25.16 — Oracle verdict + compute-once bodies (2026-10-03)
 
 - Investigated OxiHuman (5 commits, posing unclear, no reachable

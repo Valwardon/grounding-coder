@@ -29,8 +29,68 @@
     },
     {
       "note": "unresolved at assembly — not rendered",
-      "requirement": "open: salute hand 0.58m from head — pose misses",
+      "requirement": "open: salute hand 0.55m from head — pose misses",
       "researched": false
+    },
+    {
+      "note": "flex 150.0→145.0, residual 1.3527→1.3522",
+      "requirement": "refine: ShoulderR",
+      "researched": true
+    },
+    {
+      "note": "flex 145.0→140.0, residual 1.3522→1.3514",
+      "requirement": "refine: ShoulderR",
+      "researched": true
+    },
+    {
+      "note": "flex 140.0→135.0, residual 1.3514→1.3506",
+      "requirement": "refine: ShoulderR",
+      "researched": true
+    },
+    {
+      "note": "flex 135.0→130.0, residual 1.3506→1.3496",
+      "requirement": "refine: ShoulderR",
+      "researched": true
+    },
+    {
+      "note": "flex 130.0→125.0, residual 1.3496→1.3485",
+      "requirement": "refine: ShoulderR",
+      "researched": true
+    },
+    {
+      "note": "flex 125.0→120.0, residual 1.3485→1.3473",
+      "requirement": "refine: ShoulderR",
+      "researched": true
+    },
+    {
+      "note": "flex 120.0→115.0, residual 1.3473→1.3460",
+      "requirement": "refine: ShoulderR",
+      "researched": true
+    },
+    {
+      "note": "flex 115.0→110.0, residual 1.3460→1.3446",
+      "requirement": "refine: ShoulderR",
+      "researched": true
+    },
+    {
+      "note": "flex 110.0→105.0, residual 1.3446→1.3432",
+      "requirement": "refine: ShoulderR",
+      "researched": true
+    },
+    {
+      "note": "flex 105.0→100.0, residual 1.3432→1.3416",
+      "requirement": "refine: ShoulderR",
+      "researched": true
+    },
+    {
+      "note": "flex 100.0→95.0, residual 1.3416→1.3400",
+      "requirement": "refine: ShoulderR",
+      "researched": true
+    },
+    {
+      "note": "flex 95.0→90.0, residual 1.3400→1.3384",
+      "requirement": "refine: ShoulderR",
+      "researched": true
     }
   ]
 }

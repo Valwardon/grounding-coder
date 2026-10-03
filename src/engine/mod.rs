@@ -29,6 +29,7 @@ pub mod pose_learn;
 pub mod probe;
 pub mod rank;
 pub mod recipes;
+pub mod refine;
 pub mod research;
 pub mod restore;
 pub mod scene;

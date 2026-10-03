@@ -89,17 +89,28 @@ fn walkthrough_creates_receipted_maquette() {
             s.note
         );
     }
-    for r in c
-        .receipt
-        .iter()
-        .filter(|r| !r.requirement.starts_with("subject:") && !r.requirement.starts_with("open:"))
-    {
+    for r in c.receipt.iter().filter(|r| {
+        !r.requirement.starts_with("subject:")
+            && !r.requirement.starts_with("open:")
+            && !r.requirement.starts_with("refine:")
+    }) {
         assert!(
             !r.researched,
-            "only subject is researched, got {:?} researched",
+            "only subject+refine are researched, got {:?} researched",
             r.requirement
         );
     }
+    // Refinement trajectory: present, non-empty, strictly improving.
+    let steps: Vec<_> = c
+        .receipt
+        .iter()
+        .filter(|r| r.requirement.starts_with("refine:"))
+        .collect();
+    assert!(!steps.is_empty(), "refinement must take steps");
+    assert!(
+        steps.iter().all(|r| r.researched),
+        "refine steps are verified work"
+    );
 }
 
 #[test]
