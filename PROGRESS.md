@@ -1,5 +1,19 @@
 # Grounding Coder — Progress
 
+## v0.25.16 — Oracle verdict + compute-once bodies (2026-10-03)
+
+- Investigated OxiHuman (5 commits, posing unclear, no reachable
+  crate) and anny-rs (LBS/DQS + pose fitting, but full data tree +
+  candle for 9 commits of maturity). Verdict: no single oracle
+  covers texture/hair/markings — those stay procedural. OxiHuman
+  tracked as engine upgrade (same CC0 lineage, parsers transfer).
+- `PreparedBody` cache: morphed mesh + rig + classification compute
+  once per sex (pointer-equality tested), shared across photos.
+  Per-photo work is FK pose, skinning transforms, render only.
+  Research runs to sufficiency, then persists in evidence.jsonl.
+- 367 tests green (213 lib + 154 integration), `cargo check
+  --all-features`, clippy zero warnings, fmt clean.
+
 ## v0.25.15 — Face readability: open lids, brows, mottling that matters (2026-10-03)
 
 - Rule-based eyelid opening (`Mesh::eyelid_deltas`, like

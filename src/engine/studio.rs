@@ -145,6 +145,36 @@ fn morphed_body(female: bool) -> super::body_oracle::OracleBody {
     body
 }
 
+/// Prepared oracle: morphed mesh + measured rig + dominant bones +
+/// helper classification. Pure functions of pinned bytes — computed
+/// ONCE per sex and shared across every photo. Per-photo work stays
+/// minimal: FK pose, skinning transforms, render. Training every
+/// photo would be waste; this cache is the opposite, stated.
+pub struct PreparedBody {
+    pub body: super::body_oracle::OracleBody,
+    pub rig: super::body_oracle::Rig,
+    pub dominant: std::collections::HashMap<usize, String>,
+    pub helpers: super::body_oracle::HelperMats,
+}
+
+fn prepared(female: bool) -> &'static PreparedBody {
+    static MALE: OnceLock<PreparedBody> = OnceLock::new();
+    static FEMALE: OnceLock<PreparedBody> = OnceLock::new();
+    let cell = if female { &FEMALE } else { &MALE };
+    cell.get_or_init(|| {
+        let body = morphed_body(female);
+        let rig = super::body_oracle::rig_for(&body).expect("vendored rig fits");
+        let dominant = super::body_oracle::dominant_bones(&rig);
+        let helpers = super::body_oracle::classify_helpers(&body, &dominant);
+        PreparedBody {
+            body,
+            rig,
+            dominant,
+            helpers,
+        }
+    })
+}
+
 /// Build the posed figure from the premade oracle: morphed base
 /// mesh, linear-blend skinning, helper parts in their own materials
 /// (eyes dark, mouth dark red, hair brown, shorts charcoal),
@@ -159,23 +189,17 @@ fn build_figure(
     shapes: &mut Vec<Shape>,
 ) {
     let s = props.stature_m;
-    let mut body = morphed_body(female);
-    // Scale is a no-op here (measured stature already), kept so a
-    // future target stature needs no new code path.
-    let m = super::body_oracle::measure_body(&body);
-    let k = s / m.stature_m;
-    for v in &mut body.verts {
-        v[0] *= k;
-        v[1] *= k;
-        v[2] *= k;
-    }
+    // Cached prepared oracle (morphed mesh + rig + classification):
+    // pure functions of pinned bytes, computed once per sex. Only
+    // the pose below varies per photo.
+    let prep = prepared(female);
+    let body = &prep.body;
+    let rig = &prep.rig;
+    let help = &prep.helpers;
     // Rig measured off the scaled mesh, then linear-blend skinning.
     // Helper parts split into their own materials below.
-    let rig = super::body_oracle::rig_for(&body).expect("vendored rig fits vendored mesh");
-    let dom = super::body_oracle::dominant_bones(&rig);
-    let help = super::body_oracle::classify_helpers(&body, &dom);
     let posed =
-        super::body_oracle::pose_body(&body, &rig, props, pose).expect("learned poses validate");
+        super::body_oracle::pose_body(body, rig, props, pose).expect("learned poses validate");
     let min_y = posed.iter().map(|v| v[1]).fold(f64::INFINITY, f64::min);
     let mut verts: Vec<[f64; 3]> = posed.iter().map(|v| [v[0], v[1] - min_y, v[2]]).collect();
     // Eyeballs sit proud of their sockets (real corneas protrude).
@@ -651,5 +675,15 @@ mod tests {
         let radial = [m.verts[0][0], 0.0, m.verts[0][2]];
         let dot = n[0] * radial[0] + n[2] * radial[2];
         assert!(dot > 0.0, "inward normals: {:?}", n);
+    }
+
+    #[test]
+    fn prepared_bodies_compute_once() {
+        // Same reference both calls: morph + rig + classification run
+        // once per sex no matter how many photos follow.
+        assert!(std::ptr::eq(prepared(false), prepared(false)));
+        assert!(std::ptr::eq(prepared(true), prepared(true)));
+        assert!(!std::ptr::eq(prepared(false), prepared(true)));
+        assert_eq!(prepared(false).body.verts.len(), 19158);
     }
 }

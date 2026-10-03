@@ -249,7 +249,7 @@ Oracle verify (compiler / tests / parser per language)
 
 ## Proof, Not Promises
 
-362 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
+367 tests, all green (`cargo test`), plus `cargo check`, `clippy -D warnings`,
 `fmt --check` clean:
 
 | Suite | Tests | What it proves |
