@@ -22,8 +22,10 @@ pub struct PhotoExpect {
     /// Skin reference color + match tolerance (Manhattan).
     pub skin: (Rgb, u32),
     /// Minimum high-pass energy (mean neighbor difference) over
-    /// skin pixels: finish grain alone floors ~0.006, mottled skin
-    /// measures ~0.012. Below the floor, no tonal modeling exists.
+    /// skin pixels. Calibrated on real renders: finish grain alone
+    /// floors ~0.0117, mottled skin measures ~0.0139 — the oracle
+    /// must sit above the finish floor, never in it. Below the
+    /// floor, no tonal modeling exists.
     pub min_skin_detail: f64,
     /// Minimum dark-pixel fraction inside the face band (eyes, mouth,
     /// brows, nostrils must exist as pixels).
@@ -36,7 +38,7 @@ impl Default for PhotoExpect {
     fn default() -> Self {
         PhotoExpect {
             skin: (Rgb::new(200, 150, 115), 90),
-            min_skin_detail: 0.008,
+            min_skin_detail: 0.0128,
             min_feature_fraction: 0.005,
             face_band: (0.05, 0.30),
         }

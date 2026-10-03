@@ -177,7 +177,45 @@ fn build_figure(
     let posed =
         super::body_oracle::pose_body(&body, &rig, props, pose).expect("learned poses validate");
     let min_y = posed.iter().map(|v| v[1]).fold(f64::INFINITY, f64::min);
-    let verts: Vec<[f64; 3]> = posed.iter().map(|v| [v[0], v[1] - min_y, v[2]]).collect();
+    let mut verts: Vec<[f64; 3]> = posed.iter().map(|v| [v[0], v[1] - min_y, v[2]]).collect();
+    // Eyeballs sit proud of their sockets (real corneas protrude).
+    for i in &help.eyes {
+        verts[*i][2] += 0.002;
+    }
+    // Eyelids part around the posed eye centers: rule-selected
+    // verts split up/down with distance falloff, like smile_deltas.
+    {
+        let mut centers = Vec::new();
+        for side in [-1.0f64, 1.0] {
+            let mut c = [0.0; 3];
+            let mut n = 0usize;
+            for i in &help.eyes {
+                let v = verts[*i];
+                if (v[0] < 0.0) == (side < 0.0) {
+                    c[0] += v[0];
+                    c[1] += v[1];
+                    c[2] += v[2];
+                    n += 1;
+                }
+            }
+            if n > 0 {
+                centers.push([c[0] / n as f64, c[1] / n as f64, c[2] / n as f64]);
+            }
+        }
+        if !centers.is_empty() {
+            let tmp = Mesh {
+                verts: verts.clone(),
+                faces: body.faces.clone(),
+                normals: Vec::new(),
+            };
+            for (i, d) in tmp.eyelid_deltas(&centers, &help.eyes, 0.025) {
+                let v = &mut verts[i as usize];
+                v[0] += d[0];
+                v[1] += d[1];
+                v[2] += d[2];
+            }
+        }
+    }
     // Lips: blush the skin toward red around the posed mouth center.
     // The center comes from posed mouth verts — measured, not placed.
     let mouth_c = {
@@ -288,7 +326,7 @@ fn build_figure(
         let a = [c[0] - dir * 0.008 * s, c[1] + 0.022 * s, c[2] + 0.004 * s];
         let b = [c[0] + dir * 0.020 * s, c[1] + 0.026 * s, c[2] + 0.004 * s];
         shapes.push(Shape::Mesh {
-            mesh: Mesh::tube(a, b, 0.0035 * s, 0.0025 * s, 6),
+            mesh: Mesh::tube(a, b, 0.0045 * s, 0.0035 * s, 6),
             mat: brow_mat.clone(),
         });
         // Catchlight: millimeter white glint toward the camera side.
@@ -306,7 +344,7 @@ fn build_figure(
     // Placement measured from geometry; symmetry asserted by test.
     if let Some(tip) = nose_tip {
         for side in [-1.0, 1.0] {
-            let dot = Mesh::sphere(6, 4, 0.0018 * s).translated(
+            let dot = Mesh::sphere(6, 4, 0.003 * s).translated(
                 tip[0] + side * 0.008,
                 tip[1] - 0.006,
                 tip[2] - 0.003,
@@ -430,7 +468,7 @@ pub fn create_image_with(
     prompt: &str,
     skin: Option<(Rgb, String)>,
 ) -> Result<Creation, CreationError> {
-    let spec = super::scene_intent::parse_scene(prompt);
+    let spec = crate::engine::scene_intent::parse_scene(prompt);
     let human = spec
         .subjects
         .first()
@@ -469,8 +507,9 @@ pub fn create_image_with(
     {
         set_arm(&mut pose, false, &wv);
     }
-    let pos = super::skeleton::forward_kinematics(&props, &pose).expect("learned poses validate");
-    let asm = super::assembly::assemble(&spec, &pos, &props);
+    let pos =
+        crate::engine::skeleton::forward_kinematics(&props, &pose).expect("learned poses validate");
+    let asm = crate::engine::assembly::assemble(&spec, &pos, &props);
 
     let skin_mat_built = match &skin {
         Some((c, _)) => Material::skin("skin", *c),
@@ -582,7 +621,7 @@ pub fn create_image_with(
 /// missing requirement. Today that is all of them — the refusal IS
 /// the §12 path, tested, not a dead letter.
 pub fn create_image_strict(prompt: &str) -> Result<Creation, CreationError> {
-    let spec = super::scene_intent::parse_scene(prompt);
+    let spec = crate::engine::scene_intent::parse_scene(prompt);
     if spec.subjects.is_empty() {
         return Err(CreationError::UnsupportedPrompt(
             "no human subject parsed".to_string(),

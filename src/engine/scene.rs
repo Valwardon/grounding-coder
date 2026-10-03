@@ -109,7 +109,7 @@ fn mottle(p: Vec3) -> f64 {
         let d = v.x * 12.9898 + v.y * 78.233 + v.z * 37.719;
         (d.sin() * 43758.5453).fract().abs()
     }
-    0.93 + 0.05 * hash(p.scale(9.0)) + 0.02 * hash(p.scale(23.0))
+    0.86 + 0.10 * hash(p.scale(9.0)) + 0.04 * hash(p.scale(23.0))
 }
 
 /// Base color with material finish applied (mottling, then blush).

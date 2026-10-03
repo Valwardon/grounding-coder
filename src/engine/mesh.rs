@@ -201,6 +201,37 @@ impl Mesh {
         mesh
     }
 
+    /// Eyelid-open deltas: verts within `radius` of an eye center
+    /// split — upper verts rise, lower verts fall off with distance.
+    /// Rule-selected like `smile_deltas` (no sculpted indices); the
+    /// caller keeps eyeball verts out via `skip`. Weight scales the
+    /// opening; 1.0 parts the lids ~9mm total.
+    pub fn eyelid_deltas(
+        &self,
+        centers: &[[f64; 3]],
+        skip: &[usize],
+        radius: f64,
+    ) -> Vec<(u32, [f64; 3])> {
+        let skipped: std::collections::HashSet<usize> = skip.iter().copied().collect();
+        let mut out = Vec::new();
+        for (i, v) in self.verts.iter().enumerate() {
+            if skipped.contains(&i) {
+                continue;
+            }
+            for c in centers {
+                let d =
+                    ((v[0] - c[0]).powi(2) + (v[1] - c[1]).powi(2) + (v[2] - c[2]).powi(2)).sqrt();
+                if d < radius {
+                    let side = if v[1] >= c[1] { 1.0 } else { -1.0 };
+                    let f = 1.0 - d / radius;
+                    out.push((i as u32, [0.0, side * 0.0045 * f, 0.0]));
+                    break;
+                }
+            }
+        }
+        out
+    }
+
     /// Translate all verts. Returns a new mesh.
     pub fn translated(&self, dx: f64, dy: f64, dz: f64) -> Self {
         let verts = self

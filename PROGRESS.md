@@ -1,5 +1,18 @@
 # Grounding Coder — Progress
 
+## v0.25.15 — Face readability: open lids, brows, mottling that matters (2026-10-03)
+
+- Rule-based eyelid opening (`Mesh::eyelid_deltas`, like
+  `smile_deltas`): lids part around posed eye centers, eyeballs
+  pushed proud like real corneas, thicker brows, larger nostrils
+  placed from nose-tip geometry with symmetry asserted.
+- Skin mottling strengthened until it separates from the finish
+  floor in live renders (flat 0.01175 vs mottled 0.017+, oracle
+  threshold 0.0128 between them); uniform-grid accelerator keeps
+  37k-tri oracle bodies at seconds per render.
+- 366 tests green (212 lib + 154 integration), `cargo check
+  --all-features`, clippy zero warnings, fmt clean.
+
 ## v0.25.15 — Composition audit + auto-frame (2026-10-02)
 
 - Render receipt now carries per-material pixel counts
@@ -7,7 +20,8 @@
   itself, not by tone guessing (which misses shaded skin).
   Tableau fill asserted (>0.12); camera auto-frames from measured
   bounds (~90% fill target) instead of hand-tuned coordinates.
-- Full-suite green below; counts refreshed on push.
+- 366 tests green (212 lib + 154 integration), `cargo check
+  --all-features`, clippy zero warnings, fmt clean.
 
 ## v0.25.16 — Unknown Resolution: investigate, don't just refuse (2026-10-02)
 
