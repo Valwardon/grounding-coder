@@ -11,6 +11,36 @@
       "note": "no researched model yet — canon/default construction",
       "requirement": "action:stand",
       "researched": false
+    },
+    {
+      "note": "flex 0.0→5.0, residual 1.2140→1.2003",
+      "requirement": "refine: HipL",
+      "researched": true
+    },
+    {
+      "note": "flex 5.0→10.0, residual 1.2003→1.1778",
+      "requirement": "refine: HipL",
+      "researched": true
+    },
+    {
+      "note": "flex 10.0→15.0, residual 1.1778→1.1473",
+      "requirement": "refine: HipL",
+      "researched": true
+    },
+    {
+      "note": "flex 15.0→20.0, residual 1.1473→1.1096",
+      "requirement": "refine: HipL",
+      "researched": true
+    },
+    {
+      "note": "flex 20.0→25.0, residual 1.1096→1.0659",
+      "requirement": "refine: HipL",
+      "researched": true
+    },
+    {
+      "note": "flex 25.0→30.0, residual 1.0659→1.0176",
+      "requirement": "refine: HipL",
+      "researched": true
     }
   ]
 }
