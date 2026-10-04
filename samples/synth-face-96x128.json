@@ -1,0 +1,52 @@
+{
+  "bank": "/tmp/oi-bank2",
+  "donor_count": 15,
+  "donors": [
+    "plate-02.bmp",
+    "plate-04.bmp",
+    "plate-06.bmp",
+    "plate-08.bmp",
+    "plate-10.bmp",
+    "plate-12.bmp",
+    "plate-13.bmp",
+    "plate-14.bmp",
+    "plate-15.bmp",
+    "plate-16.bmp",
+    "plate-18.bmp",
+    "plate-20.bmp",
+    "plate-25.bmp",
+    "plate-28.bmp",
+    "plate-29.bmp"
+  ],
+  "min_novelty": 0.12224839154411765,
+  "ops": [
+    "face regions: 15 usable of 15 (top 38% of box, ≥24px)",
+    "align: resize to 96x128 (scale only, no landmarks)",
+    "median: per-pixel per-channel (outliers lose the vote)",
+    "detail: seeded graft bounded by measured deviation (0.6x) + grain(2)",
+    "sharpness 0.0925, min novelty 0.1222"
+  ],
+  "seed": 64206,
+  "sharpness": 0.09251022642678419,
+  "size": [
+    96,
+    128
+  ],
+  "skipped": [
+    "plate-00.bmp: full-frame box (1.000)",
+    "plate-01.bmp: name-titled (\"lifrita lifi,Christina Hendricks 3\")",
+    "plate-03.bmp: edge-cropped (0.000 margin)",
+    "plate-05.bmp: edge-cropped (0.028 margin)",
+    "plate-07.bmp: edge-cropped (0.000 margin)",
+    "plate-09.bmp: edge-cropped (0.000 margin)",
+    "plate-11.bmp: edge-cropped (0.020 margin)",
+    "plate-17.bmp: edge-cropped (0.008 margin)",
+    "plate-19.bmp: edge-cropped (0.029 margin)",
+    "plate-21.bmp: edge-cropped (0.006 margin)",
+    "plate-22.bmp: edge-cropped (0.000 margin)",
+    "plate-23.bmp: edge-cropped (0.000 margin)",
+    "plate-24.bmp: edge-cropped (0.000 margin)",
+    "plate-26.bmp: edge-cropped (0.000 margin)",
+    "plate-27.bmp: edge-cropped (0.000 margin)"
+  ]
+}
