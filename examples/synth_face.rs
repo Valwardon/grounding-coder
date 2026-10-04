@@ -121,6 +121,11 @@ fn main() {
         println!("synth: skipped {}", s);
     }
     if debug_eyes {
+        // Per-donor workup with the exact pipeline pieces synthesis
+        // uses: extraction tier + aligned sharpness. If donors are
+        // sharp and the median is mush, the fault is alignment; if
+        // donors are mush, the fault is content.
+        let mut sharps = Vec::new();
         for (k, (img, bx)) in plates.iter().zip(boxes.iter()).enumerate() {
             let diag = match synth::head_square(img, *bx) {
                 Some((sx0, sy0, side)) => {
@@ -129,7 +134,57 @@ fn main() {
                 }
                 None => "no head square".to_string(),
             };
-            println!("synth: eyes {}: {}", kept[k], diag);
+            let workup = match synth::extract_face_region(img, *bx, k) {
+                Ok(hit) => {
+                    let a = synth::align(&hit.image);
+                    let s = synth::sharpness(&a);
+                    sharps.push(s);
+                    format!(
+                        "tier={} sharp={:.4}",
+                        if hit.eye_aligned {
+                            "eye"
+                        } else if hit.anchored {
+                            "head"
+                        } else {
+                            "heur"
+                        },
+                        s
+                    )
+                }
+                Err(e) => format!("unusable ({})", e),
+            };
+            println!("synth: eyes {}: {} | {}", kept[k], diag, workup);
+        }
+        sharps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        if !sharps.is_empty() {
+            println!(
+                "synth: donor sharpness min={:.4} median={:.4} max={:.4} (median output was 0.0947)",
+                sharps[0],
+                sharps[sharps.len() / 2],
+                sharps[sharps.len() - 1]
+            );
+        }
+        // Locked-median probe: median of eye-tier donors ONLY, no
+        // gate, nothing saved — a diagnostic, not a synthesis. If
+        // this number beats the all-donor median, alignment is the
+        // fault and eye-locked banking is the fix; if flat, the fault
+        // is deeper (rotation, brow/eye mixing).
+        let mut locked_aligned = Vec::new();
+        for (img, bx) in plates.iter().zip(boxes.iter()) {
+            if let Ok(hit) = synth::extract_face_region(img, *bx, 0)
+                && hit.eye_aligned
+            {
+                locked_aligned.push(synth::align(&hit.image));
+            }
+        }
+        if let Ok(med) = synth::median_face(&locked_aligned) {
+            println!(
+                "synth: locked-median probe: N={} sharpness={:.4} (diagnostic only)",
+                locked_aligned.len(),
+                synth::sharpness(&med)
+            );
+        } else {
+            println!("synth: locked-median probe: no locked donors");
         }
         return;
     }
