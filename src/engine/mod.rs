@@ -38,6 +38,7 @@ pub mod self_model;
 pub mod skeleton;
 pub mod studio;
 pub mod symbols;
+pub mod synth;
 pub mod synthesize;
 pub mod tasks;
 pub mod understand;
