@@ -1,5 +1,5 @@
 //! Synthesize a novel face from banked Open Images plates:
-//! `cargo run --example synth_face -- <bank-dir> <out-bmp> [seed]`
+//! `cargo run --example synth_face -- <bank-dir> <out-bmp> [seed] [--locked]`
 //!
 //! The bank dir holds `plate-*.bmp` plus the `provenance.json` manifest
 //! written by `gc plate --source openimages` (fractional bboxes). This
@@ -9,15 +9,34 @@
 //! per-pixel median with measured detail. Every output pixel is
 //! statistics; no donor pixel is copied. A `<out>.json` receipt lands
 //! beside the photo.
+//!
+//! `--locked`: eye-locked synthesis only — donors without a measured
+//! eye pair are excluded instead of averaged in (needs 8+ locks).
 use grounding_coder::engine::{imagine, synth, vision::Image};
 
-const USAGE: &str = "usage: synth_face <bank-dir> <out-bmp> [seed]";
+const USAGE: &str = "usage: synth_face <bank-dir> <out-bmp> [seed] [--locked]";
 
 fn main() {
     let mut args = std::env::args().skip(1);
     let bank = args.next().expect(USAGE);
     let out = args.next().expect(USAGE);
-    let seed: u64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(0xFACE);
+    let mut seed: u64 = 0xFACE;
+    let mut locked = false;
+    let mut debug_eyes = false;
+    for a in args {
+        if a == "--locked" {
+            locked = true;
+        } else if a == "--debug-eyes" {
+            debug_eyes = true;
+        } else if let Some(v) = a
+            .strip_prefix("0x")
+            .and_then(|h| u64::from_str_radix(h, 16).ok())
+        {
+            seed = v;
+        } else if let Ok(v) = a.parse::<u64>() {
+            seed = v;
+        }
+    }
 
     let bank_path = std::path::Path::new(&bank);
     let manifest =
@@ -49,23 +68,49 @@ fn main() {
             skipped.push(format!("{}: full-frame box ({:.3})", file, area));
             continue;
         }
-        let worst = x0.min(y0).min(1.0 - x1);
-        if worst < 0.03 {
-            skipped.push(format!("{}: edge-cropped ({:.3} margin)", file, worst));
-            continue;
-        }
         if imagine::looks_like_person_name(author) {
             skipped.push(format!("{}: name-titled ({:?})", file, author));
             continue;
         }
-        match Image::load_bmp(&bank_path.join(file)) {
-            Ok(img) => {
-                plates.push(img);
-                boxes.push((x0, y0, x1, y1));
-                kept.push(file.to_string());
+        let img = match Image::load_bmp(&bank_path.join(file)) {
+            Ok(img) => img,
+            Err(e) => {
+                skipped.push(format!("{}: unreadable ({})", file, e));
+                continue;
             }
-            Err(e) => skipped.push(format!("{}: unreadable ({})", file, e)),
+        };
+        // Margin rule is montage framing policy; for synthesis what
+        // matters is the FACE being whole. Edge-cropped boxes get a
+        // second chance iff eye-locked with the head square fully
+        // interior (≥2% margins) — a complete face is usable no matter
+        // what the box does at the frame edge.
+        let worst = x0.min(y0).min(1.0 - x1);
+        if worst < 0.03 {
+            let complete = match synth::head_square(&img, (x0, y0, x1, y1)) {
+                Some((sx0, sy0, side)) => {
+                    let m = 0.02 * img.width.max(img.height) as f64;
+                    let head = img.crop(sx0, sy0, side, side);
+                    synth::eye_pair(&head).is_some()
+                        && sx0 as f64 >= m
+                        && sy0 as f64 >= m
+                        && (sx0 + side) as f64 <= img.width as f64 - m
+                        && (sy0 + side) as f64 <= img.height as f64 - m
+                }
+                None => false,
+            };
+            if !complete {
+                skipped.push(format!(
+                    "{}: edge-cropped ({:.3} margin, face incomplete)",
+                    file, worst
+                ));
+                continue;
+            }
+            kept.push(format!("{} (margin-exempt: face complete)", file));
+        } else {
+            kept.push(file.to_string());
         }
+        plates.push(img);
+        boxes.push((x0, y0, x1, y1));
     }
     println!(
         "synth: {} candidate(s), {} skipped",
@@ -75,7 +120,29 @@ fn main() {
     for s in &skipped {
         println!("synth: skipped {}", s);
     }
-    match synth::synthesize(&plates, &boxes, seed) {
+    if debug_eyes {
+        for (k, (img, bx)) in plates.iter().zip(boxes.iter()).enumerate() {
+            let diag = match synth::head_square(img, *bx) {
+                Some((sx0, sy0, side)) => {
+                    let head = img.crop(sx0, sy0, side, side);
+                    format!("head {}x{} {}", side, side, synth::eye_debug(&head))
+                }
+                None => "no head square".to_string(),
+            };
+            println!("synth: eyes {}: {}", kept[k], diag);
+        }
+        return;
+    }
+    println!(
+        "synth: mode {}",
+        if locked { "eye-locked" } else { "all-usable" }
+    );
+    let result = if locked {
+        synth::synthesize_locked(&plates, &boxes, seed)
+    } else {
+        synth::synthesize(&plates, &boxes, seed)
+    };
+    match result {
         Ok((img, log)) => {
             for op in &log.ops {
                 println!("synth: {}", op);
@@ -89,6 +156,7 @@ fn main() {
             let receipt = serde_json::json!({
                 "bank": bank,
                 "seed": seed,
+                "locked": locked,
                 "donors": kept,
                 "donor_count": log.donors.len(),
                 "skipped": skipped,
