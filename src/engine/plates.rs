@@ -204,7 +204,7 @@ pub async fn search_commons(
          &gsrsearch=filetype:bitmap%20{}&gsrnamespace=6&gsrlimit={}&prop=imageinfo\
          &iiprop=url%7Cuser%7Cextmetadata&iiurlwidth=2560",
         percent_encode(query),
-        limit.min(20)
+        limit.min(50)
     );
     let value: serde_json::Value = crate::http::get_json(&url, None, None).await?;
     let mut out = Vec::new();

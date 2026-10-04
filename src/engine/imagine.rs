@@ -32,6 +32,7 @@ pub enum SubjectKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PropKind {
     Roses,
+    Flag,
 }
 
 /// The parsed request: deterministic keyword scan, stated limits —
@@ -49,15 +50,17 @@ pub struct Brief {
 pub fn parse_brief(prose: &str) -> Brief {
     let lower = prose.to_lowercase();
     let has = |w: &str| lower.contains(w);
-    let subject = if has("woman") || has("female") || has("lady") {
+    let subject = if has("woman") || has("female") || has("lady") || has("girl") {
         SubjectKind::Woman
-    } else if has("man") || has("male") || has("gentleman") {
+    } else if has("man") || has("male") || has("gentleman") || has("boy") {
         SubjectKind::Man
     } else {
         SubjectKind::Person
     };
     let pose = if has("peace") {
         "peace sign".to_string()
+    } else if has("salut") {
+        "saluting".to_string()
     } else if has("wav") {
         "waving".to_string()
     } else {
@@ -66,6 +69,9 @@ pub fn parse_brief(prose: &str) -> Brief {
     let mut props = Vec::new();
     if has("rose") || has("flower") || has("bouquet") {
         props.push(PropKind::Roses);
+    }
+    if has("flag") {
+        props.push(PropKind::Flag);
     }
     Brief {
         subject,
@@ -320,8 +326,29 @@ pub fn imagine_from_plates(
     Ok((img, log))
 }
 
+/// Search-query hygiene: the safety review refuses titles containing
+/// minor words ("girl", "boy", ...), so searching those words verbatim
+/// only harvests refusals. Rewrite to the adult equivalent for search —
+/// the Open Images Girl/Boy exclusion + title review still keep actual
+/// minors out of the library. Pure string rewrite, logged by callers.
+fn sanitize_search_query(prose: &str) -> String {
+    let mut q = prose.to_lowercase();
+    for (from, to) in [
+        ("girls", "women"),
+        ("girl", "woman"),
+        ("boys", "men"),
+        ("boy", "man"),
+    ] {
+        q = q.replace(from, to);
+    }
+    q
+}
+
 /// The full trajectory: research references for the brief, study
 /// them, composite the new photo. One command, full receipts.
+/// Per-request training, narrow scope: research only what this prompt
+/// needs (subject + pose + props), measure the plates, then composite
+/// real pixels — grounded, never from noise.
 pub async fn imagine(
     prose: &str,
     width: u32,
@@ -333,16 +360,26 @@ pub async fn imagine(
         brief.subject, brief.pose, brief.props
     )];
     // Subject query follows the ask (pose/subject/props words feed
-    // research now); backdrop query seeks a place.
-    let mut query = String::from("portrait");
-    if brief.pose != "standing" {
-        query = format!("{} portrait", brief.pose);
-    }
+    // research now); backdrop query seeks a place — or the named prop.
+    let subject_word = match brief.subject {
+        SubjectKind::Woman => "woman",
+        SubjectKind::Man => "man",
+        SubjectKind::Person => "person",
+    };
+    let mut query = if brief.pose != "standing" {
+        format!("{} {} portrait", brief.pose, subject_word)
+    } else {
+        format!("{} portrait", subject_word)
+    };
     if brief.props.contains(&PropKind::Roses) {
         query = format!("{} with roses", query);
     }
+    if brief.props.contains(&PropKind::Flag) && !query.contains("flag") {
+        query = format!("{} with flag", query);
+    }
+    query = sanitize_search_query(&query);
     log.push(format!("research: query {:?}", query));
-    let (mut plates, refused) = super::plates::source_plates_web(&query, 3).await;
+    let (mut plates, refused) = super::plates::source_plates_web(&query, 10).await;
     for r in &refused {
         log.push(format!("refused: {}", r));
     }
@@ -350,7 +387,7 @@ pub async fn imagine(
     // portraiture once rather than study nothing. Logged either way.
     if plates.is_empty() {
         log.push("research: fallback query \"portrait\"".to_string());
-        let (fallback, refused2) = super::plates::source_plates_web("portrait", 3).await;
+        let (fallback, refused2) = super::plates::source_plates_web("portrait", 10).await;
         for r in &refused2 {
             log.push(format!("refused: {}", r));
         }
@@ -361,8 +398,9 @@ pub async fn imagine(
     // segmentation, and the adult filter is structural. Metadata
     // caches under .grounding/openimages (the plate library).
     let oi_cache = std::path::Path::new(".grounding/openimages");
+    let oi_query = sanitize_search_query(prose);
     let (oi_plates, oi_refused) =
-        super::plates::openimages::search_openimages(oi_cache, prose, 3).await;
+        super::plates::openimages::search_openimages(oi_cache, &oi_query, 10).await;
     for r in &oi_refused {
         log.push(format!("openimages refused: {}", r));
     }
@@ -409,7 +447,15 @@ pub async fn imagine(
             "path: openimages box {} by {}",
             hit.label, hit.plate.provenance.author
         ));
-        let (bg_plates, bg_refused) = super::plates::source_plates_web("landscape", 1).await;
+        // Backdrop follows the brief: a named flag becomes the place,
+        // otherwise a generic landscape. This is the per-request scope —
+        // only what this prompt needs, nothing else.
+        let bg_query = if brief.props.contains(&PropKind::Flag) {
+            "american flag"
+        } else {
+            "landscape"
+        };
+        let (bg_plates, bg_refused) = super::plates::source_plates_web(bg_query, 3).await;
         for r in &bg_refused {
             log.push(format!("backdrop refused: {}", r));
         }
@@ -449,8 +495,13 @@ pub async fn imagine(
     if let Some(f) = study.subject_fill {
         log.push(format!("study: fill {:.2}", f));
     }
-    // Backdrop search: a place, not a person.
-    let (bg_plates, bg_refused) = super::plates::source_plates_web("landscape", 2).await;
+    // Backdrop search: the named prop when present, else a place.
+    let bg_query = if brief.props.contains(&PropKind::Flag) {
+        "american flag"
+    } else {
+        "landscape"
+    };
+    let (bg_plates, bg_refused) = super::plates::source_plates_web(bg_query, 3).await;
     for r in &bg_refused {
         log.push(format!("backdrop refused: {}", r));
     }
@@ -508,6 +559,32 @@ mod tests {
             (b.subject, b.pose.as_str()),
             (SubjectKind::Person, "standing")
         );
+    }
+
+    #[test]
+    fn brief_parses_salute_flag_and_girl() {
+        // The failing prompt: girl saluting a flag must reach research
+        // as an adult woman saluting with a flag — never as a bare
+        // "portrait" with the pose and prop dropped.
+        let b = parse_brief("girl saluting a flag");
+        assert_eq!(b.subject, SubjectKind::Woman);
+        assert_eq!(b.pose, "saluting");
+        assert!(b.props.contains(&PropKind::Flag));
+        let b = parse_brief("a woman saluting");
+        assert_eq!(
+            (b.subject, b.pose.as_str()),
+            (SubjectKind::Woman, "saluting")
+        );
+    }
+
+    #[test]
+    fn search_queries_rewrite_minor_words() {
+        // Safety hygiene: search text rewrites minor words to adult
+        // equivalents so queries don't only harvest title refusals.
+        // The Girl/Boy image exclusion still applies downstream.
+        assert_eq!(sanitize_search_query("girl saluting"), "woman saluting");
+        assert_eq!(sanitize_search_query("boy standing"), "man standing");
+        assert_eq!(sanitize_search_query("woman portrait"), "woman portrait");
     }
 
     #[test]

@@ -135,22 +135,80 @@ async fn picture_from_prompt_dim(
     per_req: u32,
     max_dim: u32,
 ) -> Result<PictureOutcome, String> {
+    std::fs::create_dir_all(out_dir).map_err(|e| format!("cannot create dir: {}", e))?;
+    // Photo-first: per-request training, narrow scope. Try to composite
+    // real people over real places (grounded pixels, never noise) before
+    // spending budget on statistical evidence + procedural fallback.
+    // Only what this prompt needs: subject + pose + backdrop.
+    match super::imagine::imagine(prompt, 640, 800).await {
+        Ok((img, ilog)) => {
+            let image_path = out_dir.join("picture.bmp");
+            img.save_bmp(&image_path)
+                .map_err(|e| format!("cannot save picture: {}", e))?;
+            let receipt_path = out_dir.join("picture.json");
+            let mut reply = vec![
+                "I see a picture request — researching photos for this prompt now.".to_string(),
+            ];
+            for l in &ilog {
+                reply.push(format!("research: {}", l));
+            }
+            reply.push("path: photographic montage (real people, real place)".to_string());
+            reply.push(format!("Done — picture at {}", image_path.display()));
+            let body = serde_json::json!({
+                "prompt": prompt,
+                "path": "photographic-montage",
+                "reply": reply,
+                "log": ilog,
+            });
+            std::fs::write(
+                &receipt_path,
+                serde_json::to_string_pretty(&body).unwrap_or_default(),
+            )
+            .map_err(|e| format!("cannot save receipt: {}", e))?;
+            Ok(PictureOutcome {
+                reply,
+                image_path,
+                receipt_path,
+            })
+        }
+        Err(ilog) => {
+            // Montage refused — keep its trail for the receipt, then fall
+            // through to evidence + procedural maquette (honestly labeled).
+            let mut reply = vec![format!(
+                "Photo montage refused ({} step(s)) — falling back to evidence + construction.",
+                ilog.len()
+            )];
+            for l in &ilog {
+                reply.push(format!("montage: {}", l));
+            }
+            picture_fallback_evidence(prompt, out_dir, per_req, max_dim, reply).await
+        }
+    }
+}
+
+async fn picture_fallback_evidence(
+    prompt: &str,
+    out_dir: &std::path::Path,
+    per_req: u32,
+    max_dim: u32,
+    mut reply: Vec<String>,
+) -> Result<PictureOutcome, String> {
     use super::scene_intent::plan_research;
     let spec = super::scene_intent::parse_scene(prompt);
     let plan = plan_research(&spec);
     let mut store = EvidenceStore::new();
     store.require_from_spec(&spec, &plan);
-    let mut reply = vec![format!(
+    reply.push(format!(
         "I see {} — {} requirement(s). Researching each one now.",
         spec.subjects
             .first()
             .map(|s| s.stype.clone())
             .unwrap_or_else(|| "a scene".to_string()),
         store.requirements.len()
-    )];
+    ));
 
     std::fs::create_dir_all(out_dir).map_err(|e| format!("cannot create dir: {}", e))?;
-    let per = per_req.clamp(1, 20) as usize;
+    let per = per_req.clamp(1, 100) as usize;
     let ids: Vec<String> = store.requirements.iter().map(|r| r.id.clone()).collect();
     let mut n = 0u32;
     for id in &ids {

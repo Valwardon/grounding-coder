@@ -252,7 +252,7 @@ fn main() {
                         .map(|d| d.as_secs())
                         .unwrap_or(0);
                     let out = std::path::PathBuf::from(format!("picture-{}", stamp));
-                    match picture_from_prompt(&prompt, &out, 5).await {
+                    match picture_from_prompt(&prompt, &out, 20).await {
                         Ok(outcome) => {
                             for line in &outcome.reply {
                                 println!("{}", line);
@@ -743,7 +743,7 @@ fn main() {
                     eprintln!("RESEARCH FAILED: cannot create {}", out);
                     std::process::exit(1);
                 }
-                let per = limit.clamp(1, 20) as usize;
+                let per = limit.clamp(1, 100) as usize;
                 let mut n = 0u32;
                 let ids: Vec<String> = store.requirements.iter().map(|r| r.id.clone()).collect();
                 for id in &ids {
