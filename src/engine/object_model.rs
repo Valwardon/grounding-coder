@@ -175,6 +175,24 @@ pub fn derive_flag_model(measures: &[FlagMeasure]) -> Result<FlagModel, String> 
             super::evidence::MINIMUM_EXAMPLES
         ));
     }
+    Ok(flag_statistics(measures))
+}
+
+/// Rough model for construction: same statistics, smaller gate
+/// (3+ examples). The receipt must carry `n` and `stripe_agreement`
+/// — a 3-example model with 0.67 agreement is usable but rough, and
+/// says so. Below 3: refusal, never a one-photo generalization.
+pub fn rough_flag_model(measures: &[FlagMeasure]) -> Result<FlagModel, String> {
+    if measures.len() < 3 {
+        return Err(format!(
+            "only {} flag examples (need 3 for a rough model) — refusing",
+            measures.len()
+        ));
+    }
+    Ok(flag_statistics(measures))
+}
+
+fn flag_statistics(measures: &[FlagMeasure]) -> FlagModel {
     let aspects: Vec<f64> = measures.iter().map(|m| m.aspect).collect();
     let mut counts: HashMap<u32, usize> = HashMap::new();
     for m in measures {
@@ -215,7 +233,7 @@ pub fn derive_flag_model(measures: &[FlagMeasure]) -> Result<FlagModel, String> 
             None => {}
         }
     }
-    Ok(FlagModel {
+    FlagModel {
         aspect_min: aspects.iter().cloned().fold(f64::INFINITY, f64::min),
         aspect_max: aspects.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
         aspect_mean: aspects.iter().sum::<f64>() / aspects.len() as f64,
@@ -232,7 +250,7 @@ pub fn derive_flag_model(measures: &[FlagMeasure]) -> Result<FlagModel, String> 
         },
         n: measures.len(),
         palette,
-    })
+    }
 }
 
 fn median(vs: &mut [u8]) -> u8 {
@@ -337,6 +355,25 @@ mod tests {
             .map(|_| measure_flag(&synthetic_flag(6, 120, 80)))
             .collect();
         assert!(derive_flag_model(&few).is_err());
+    }
+
+    #[test]
+    fn rough_model_constructs_from_few_with_receipt() {
+        // Same statistics, smaller gate: 5 agreeing examples build a
+        // rough model carrying n + agreement for the receipt.
+        let ms: Vec<FlagMeasure> = (0..5)
+            .map(|_| measure_flag(&synthetic_flag(6, 120, 80)))
+            .collect();
+        let model = rough_flag_model(&ms).expect("rough model");
+        assert_eq!((model.stripes, model.n), (6, 5));
+        assert!((model.stripe_agreement - 1.0).abs() < 1e-9);
+        assert!(!model.palette.is_empty());
+        // Below 3: refusal, never a one-photo generalization.
+        let two: Vec<FlagMeasure> = (0..2)
+            .map(|_| measure_flag(&synthetic_flag(6, 120, 80)))
+            .collect();
+        assert!(rough_flag_model(&two).is_err());
+        assert!(rough_flag_model(&[]).is_err());
     }
 
     #[test]

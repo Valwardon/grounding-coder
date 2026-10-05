@@ -436,16 +436,20 @@ fn build_hat(anchor: V3, s: f64, shapes: &mut Vec<Shape>) {
     });
 }
 
-/// Unmarked waving cloth + pole at a hand anchor. Gray on purpose:
-/// stripes would invent a researched flag model that does not exist.
-fn build_cloth(anchor: V3, s: f64, shapes: &mut Vec<Shape>) {
-    let cloth = Material::named(
-        "cloth",
-        Rgb::new(DEFAULT_CLOTH.0, DEFAULT_CLOTH.1, DEFAULT_CLOTH.2),
-    );
+/// Unmarked waving cloth + pole at a hand anchor. With a researched
+/// flag model the panel builds stripe-by-stripe in the measured
+/// palette (one strip mesh per stripe, same wave field so the
+/// pattern rides the cloth exactly); without one it stays the
+/// stated gray — stripes would invent provenance. Returns the
+/// receipt note for the cloth.
+fn build_cloth(
+    anchor: V3,
+    s: f64,
+    flag: Option<&super::object_model::FlagModel>,
+    shapes: &mut Vec<Shape>,
+) -> String {
     let w = 0.34 * s;
     let h = 0.24 * s;
-    let mut panel = Mesh::plane_grid(w, h, 24, 12);
     let params = super::deform::WaveParams {
         amplitude: 0.025 * s,
         wavelength: 0.24 * s,
@@ -453,7 +457,10 @@ fn build_cloth(anchor: V3, s: f64, shapes: &mut Vec<Shape>) {
         pole_x: -w / 2.0,
         width: w,
     };
-    super::deform::apply_wave(&mut panel, params);
+    let cloth = Material::named(
+        "cloth",
+        Rgb::new(DEFAULT_CLOTH.0, DEFAULT_CLOTH.1, DEFAULT_CLOTH.2),
+    );
     // Left edge rides the pole: pole base at the hand.
     let pole_top = [anchor.x, anchor.y + 0.34 * s, anchor.z];
     let pole = Mesh::tube(
@@ -468,29 +475,68 @@ fn build_cloth(anchor: V3, s: f64, shapes: &mut Vec<Shape>) {
         mesh: pole,
         mat: gray,
     });
-    let panel = panel.translated(
-        anchor.x + w / 2.0 + 0.008 * s,
-        anchor.y + 0.17 * s,
-        anchor.z,
-    );
-    shapes.push(Shape::Mesh {
-        mesh: panel,
-        mat: cloth,
-    });
+    // Researched stripes: one strip mesh per stripe in the measured
+    // palette (capped: absurd counts are refused upstream by the
+    // model gate, but the renderer still defends itself). Each strip
+    // spans the full width under the same wave field, so the pattern
+    // rides the cloth exactly. Default: one gray panel, receipted.
+    match flag {
+        Some(m) => {
+            let n = m.stripes.clamp(1, 25) as usize;
+            for i in 0..n {
+                let (r, g, b) = m
+                    .palette
+                    .get(i % m.palette.len().max(1))
+                    .copied()
+                    .unwrap_or((DEFAULT_CLOTH.0, DEFAULT_CLOTH.1, DEFAULT_CLOTH.2));
+                let mut strip = Mesh::plane_grid(w, h / n as f64, 24, 2);
+                super::deform::apply_wave(&mut strip, params);
+                let strip = strip.translated(
+                    anchor.x + w / 2.0 + 0.008 * s,
+                    anchor.y + 0.17 * s + h / 2.0 - h * (i as f64 + 0.5) / n as f64,
+                    anchor.z,
+                );
+                shapes.push(Shape::Mesh {
+                    mesh: strip,
+                    mat: Material::named("flag-stripe", Rgb::new(r, g, b)),
+                });
+            }
+            format!(
+                "cloth striped from researched flag model ({} stripes, agreement {:.2}, {} examples)",
+                m.stripes, m.stripe_agreement, m.n
+            )
+        }
+        None => {
+            let mut panel = Mesh::plane_grid(w, h, 24, 12);
+            super::deform::apply_wave(&mut panel, params);
+            let panel = panel.translated(
+                anchor.x + w / 2.0 + 0.008 * s,
+                anchor.y + 0.17 * s,
+                anchor.z,
+            );
+            shapes.push(Shape::Mesh {
+                mesh: panel,
+                mat: cloth,
+            });
+            "cloth default gray (no researched flag model)".to_string()
+        }
+    }
 }
 
 /// Full pipeline: prompt → requirements → learned pose → figure →
 /// bound objects → studio render. See `create_image_with` for the
 /// researched-skin variant; this one constructs with stated defaults.
 pub fn create_image(prompt: &str) -> Result<Creation, CreationError> {
-    create_image_with(prompt, None)
+    create_image_with(prompt, None, None)
 }
 
-/// Full pipeline with an optional researched skin palette
-/// (color + provenance note). Receipted as researched when present.
+/// Full pipeline with optional researched inputs: skin palette and
+/// flag model (each color + provenance note). Receipted as
+/// researched when present, stated defaults otherwise.
 pub fn create_image_with(
     prompt: &str,
     skin: Option<(Rgb, String)>,
+    flag: Option<super::object_model::FlagModel>,
 ) -> Result<Creation, CreationError> {
     let spec = crate::engine::scene_intent::parse_scene(prompt);
     let human = spec
@@ -568,11 +614,17 @@ pub fn create_image_with(
     };
     let mut shapes: Vec<Shape> = Vec::new();
     build_figure(&props, &pose, female, &skin_mat_built, &mut shapes);
+    let mut cloth_note: Option<String> = None;
     for a in &asm.attachments {
         if a.object_id.contains("hat") {
             build_hat(a.anchor, props.stature_m, &mut shapes);
         } else if a.object_id.contains("flag") {
-            build_cloth(a.anchor, props.stature_m, &mut shapes);
+            cloth_note = Some(build_cloth(
+                a.anchor,
+                props.stature_m,
+                flag.as_ref(),
+                &mut shapes,
+            ));
         }
     }
 
@@ -630,16 +682,33 @@ pub fn create_image_with(
             let palette = skin
                 .as_ref()
                 .filter(|_| r.category == super::evidence::Category::Subject);
+            let cloth = flag.as_ref().filter(|_| {
+                matches!(
+                    r.category,
+                    super::evidence::Category::Object | super::evidence::Category::Material
+                )
+            });
             // Subjects ride researched proportions (measured rig);
-            // only the skin palette can still be defaulted.
-            let (researched, note) = match (&palette, r.category) {
-                (Some((_, src)), super::evidence::Category::Subject) => (
+            // only the skin palette can still be defaulted. Cloth
+            // counts as researched only when the model existed AND
+            // assembly actually placed it — a researched-but-unplaced
+            // flag is an open gap, never a success.
+            let (researched, note) = match (&palette, &cloth, &cloth_note, r.category) {
+                (Some((_, src)), _, _, super::evidence::Category::Subject) => (
                     true,
                     format!("proportions researched (hm08 rig); skin {}", src),
                 ),
-                _ if r.category == super::evidence::Category::Subject => (
+                (_, _, _, super::evidence::Category::Subject) => (
                     true,
                     "proportions researched (hm08 rig); skin default (no photo tones)".to_string(),
+                ),
+                (_, Some(_), Some(built), _) => {
+                    (true, format!("researched object model; {}", built))
+                }
+                (_, Some(_), None, _) => (
+                    false,
+                    "flag model researched but assembly left it unplaced — not rendered"
+                        .to_string(),
                 ),
                 _ => (
                     false,

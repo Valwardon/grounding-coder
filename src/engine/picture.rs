@@ -81,13 +81,24 @@ fn source_for(category: super::evidence::Category) -> &'static str {
 }
 
 /// Median skin tone across a requirement's examples (tone features
-/// banked at ingestion). Requires a Sufficient collection — fewer
-/// than preferred examples is not a researched palette.
-pub fn derive_skin_model(store: &EvidenceStore, req_id: &str) -> Option<(Rgb, String, usize)> {
-    if !matches!(
+/// banked at ingestion). Tiered by collection state: Sufficient
+/// collections give a researched palette; Collecting ones (at/above
+/// minimum, below preferred) give a ROUGH palette that carries its
+/// own warning. Below minimum: nothing — defaults stay honestly
+/// defaulted. Returns (tone, note, n, sufficient).
+pub fn derive_skin_palette(
+    store: &EvidenceStore,
+    req_id: &str,
+) -> Option<(Rgb, String, usize, bool)> {
+    let sufficient = matches!(
         store.sufficiency(req_id),
         Ok(evidence::Sufficiency::Sufficient { .. })
-    ) {
+    );
+    let collecting = matches!(
+        store.sufficiency(req_id),
+        Ok(evidence::Sufficiency::Collecting { .. })
+    );
+    if !sufficient && !collecting {
         return None;
     }
     let req = store.get(req_id)?;
@@ -112,11 +123,51 @@ pub fn derive_skin_model(store: &EvidenceStore, req_id: &str) -> Option<(Rgb, St
     gs.sort_unstable();
     bs.sort_unstable();
     let mid = rs.len() / 2;
+    let note = if sufficient {
+        format!("researched: {} photo tones", req.examples.len())
+    } else {
+        format!(
+            "rough: {} photo tones (below preferred {})",
+            req.examples.len(),
+            store.preferred
+        )
+    };
     Some((
         Rgb::new(rs[mid], gs[mid], bs[mid]),
-        format!("researched: {} photo tones", req.examples.len()),
+        note,
         req.examples.len(),
+        sufficient,
     ))
+}
+
+/// Rough flag model from a flag requirement's banked plates: reload
+/// each example's saved BMP, measure stripes classically, derive
+/// with the rough gate (3+). Anything below that is not a model —
+/// the cloth stays honestly gray.
+pub fn derive_flag_for(
+    store: &EvidenceStore,
+    req_id: &str,
+) -> Option<(super::object_model::FlagModel, String)> {
+    let req = store.get(req_id)?;
+    let mut measures = Vec::new();
+    for ex in &req.examples {
+        // Unreadable plates skip (logged nowhere here — the evidence
+        // record already vouches the file existed at banking); the
+        // rough gate judges what remains.
+        if let Ok(img) = super::vision::Image::load_bmp(std::path::Path::new(&ex.source)) {
+            measures.push(super::object_model::measure_flag(&img));
+        }
+    }
+    match super::object_model::rough_flag_model(&measures) {
+        Ok(m) => {
+            let note = format!(
+                "researched: {} stripes, agreement {:.2} over {} examples",
+                m.stripes, m.stripe_agreement, m.n
+            );
+            Some((m, note))
+        }
+        Err(_) => None,
+    }
 }
 
 /// Run the whole picture loop for a chat prompt. `per_req` bounds
@@ -330,20 +381,32 @@ async fn picture_fallback_evidence(
     evidence::save_jsonl(&store, &out_dir.join("evidence.jsonl"))
         .map_err(|e| format!("cannot save evidence: {}", e))?;
 
-    // Researched skin applies when (and only when) a subject
-    // collection went Sufficient; everything else stays defaulted
-    // with the receipt saying so.
+    // Researched inputs apply when the collections support them:
+    // skin palettes tiered (researched at Sufficient, rough at
+    // Collecting), flag models rough-gated (3+ measured plates).
+    // Everything else stays defaulted with the receipt saying so.
     let mut skin: Option<(Rgb, String)> = None;
     for r in &store.requirements {
         if r.category == super::evidence::Category::Subject
-            && let Some((c, src, _)) = derive_skin_model(&store, &r.id)
+            && let Some((c, src, _, _)) = derive_skin_palette(&store, &r.id)
         {
             skin = Some((c, src));
             reply.push(format!("{}: skin palette researched", r.id));
             break;
         }
     }
-    let creation = super::studio::create_image_with(prompt, skin)
+    let mut flag: Option<super::object_model::FlagModel> = None;
+    for r in &store.requirements {
+        if r.category == super::evidence::Category::Object
+            && r.concept.contains("flag")
+            && let Some((m, note)) = derive_flag_for(&store, &r.id)
+        {
+            reply.push(format!("{}: {}", r.id, note));
+            flag = Some(m);
+            break;
+        }
+    }
+    let creation = super::studio::create_image_with(prompt, skin, flag)
         .map_err(|e| format!("cannot construct: {}", e))?;
     let image_path = out_dir.join("picture.bmp");
     creation
@@ -409,7 +472,10 @@ mod tests {
     }
 
     #[test]
-    fn skin_needs_sufficient_collection() {
+    fn skin_tiers_gate_honestly() {
+        // Budgets: minimum 2, preferred 3. Below minimum nothing;
+        // at minimum a ROUGH palette with its warning; at preferred
+        // a researched one.
         let mut store = EvidenceStore::with_budgets(2, 3, 4);
         store.requirements.push(super::evidence::VisualRequirement {
             id: "subject:man".to_string(),
@@ -421,6 +487,47 @@ mod tests {
             examples: Vec::new(),
             model: None,
         });
-        assert!(derive_skin_model(&store, "subject:man").is_none());
+        assert!(derive_skin_palette(&store, "subject:man").is_none());
+        let tones = |r: f64, g: f64, b: f64| {
+            let mut f = std::collections::HashMap::new();
+            f.insert("tone_r".to_string(), r);
+            f.insert("tone_g".to_string(), g);
+            f.insert("tone_b".to_string(), b);
+            f.insert("skin_head".to_string(), 0.2);
+            f.insert("skin_torso".to_string(), 0.2);
+            f.insert("skin_legs".to_string(), 0.1);
+            f.insert("aspect".to_string(), 0.5);
+            f.insert("brightness".to_string(), 0.5);
+            super::evidence::VisualExample {
+                source: "test".to_string(),
+                title: "test".to_string(),
+                page_url: "test".to_string(),
+                license: "test".to_string(),
+                basis: "test".to_string(),
+                bbox: [0, 0, 8, 8],
+                segmentation: None,
+                keypoints: None,
+                dimensions: (8, 8),
+                features: f,
+            }
+        };
+        store
+            .add_example("subject:man", tones(200.0, 150.0, 115.0))
+            .unwrap();
+        store
+            .add_example("subject:man", tones(205.0, 155.0, 120.0))
+            .unwrap();
+        let (c, note, n, sufficient) =
+            derive_skin_palette(&store, "subject:man").expect("rough palette");
+        assert_eq!((n, sufficient), (2, false));
+        assert!(note.contains("rough"), "must carry its warning: {}", note);
+        assert!((c.r as i32 - 200).abs() <= 8);
+        store
+            .add_example("subject:man", tones(195.0, 145.0, 110.0))
+            .unwrap();
+        let (_, note, n, sufficient) =
+            derive_skin_palette(&store, "subject:man").expect("researched palette");
+        assert_eq!((n, sufficient), (3, true));
+        assert!(note.contains("researched"), "{}", note);
     }
 }
