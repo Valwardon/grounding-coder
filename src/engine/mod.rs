@@ -41,6 +41,7 @@ pub mod symbols;
 pub mod synth;
 pub mod synthesize;
 pub mod tasks;
+pub mod truth;
 pub mod understand;
 pub mod unknown;
 pub mod verifier;
