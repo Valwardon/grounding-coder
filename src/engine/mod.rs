@@ -9,6 +9,7 @@ pub mod catalog;
 pub mod compose;
 pub mod corrector;
 pub mod deform;
+pub mod diffuse;
 pub mod error;
 pub mod evidence;
 pub mod experiment;
