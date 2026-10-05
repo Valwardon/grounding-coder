@@ -7,6 +7,7 @@ pub mod body_oracle;
 pub mod budget;
 pub mod catalog;
 pub mod compose;
+pub mod conditioning;
 pub mod corrector;
 pub mod deform;
 pub mod error;
