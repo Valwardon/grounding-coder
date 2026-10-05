@@ -163,10 +163,16 @@ pub async fn post_binary(
 }
 
 /// GET raw bytes. Non-2xx is an error. Used by the tool provisioner —
-/// compilers arrive as bytes, never as text. Follows up to 5 redirects
-/// (release CDNs answer 302 to another https host); anything else fails
-/// honestly instead of saving an error page as a "toolchain".
+/// compilers arrive as bytes, never as text (10-minute deadline).
 pub async fn get_bytes(url: &str) -> Result<Vec<u8>, String> {
+    get_bytes_timeout(url, Duration::from_secs(600)).await
+}
+
+/// GET raw bytes with a caller-chosen deadline. Plate collectors use
+/// a short one: a black-holed image host must fail the fetch (and
+/// yield to the next candidate) instead of stalling collection.
+/// Follows up to 5 redirects; anything else fails honestly.
+pub async fn get_bytes_timeout(url: &str, timeout: Duration) -> Result<Vec<u8>, String> {
     let mut current = url.to_string();
     for _ in 0..6 {
         let req = hyper::Request::builder()
@@ -175,8 +181,9 @@ pub async fn get_bytes(url: &str) -> Result<Vec<u8>, String> {
             .header("user-agent", "grounding-coder-provision/0.1")
             .body(Full::new(Bytes::new()))
             .map_err(|e| format!("Request build error: {}", e))?;
-        // Toolchains are tens of MB; bound generously, still never a hang.
-        let (status, headers, raw) = request_with_headers(req, Duration::from_secs(600)).await?;
+        // Bound by the caller's deadline, still never a hang: the
+        // timeout applies per redirect hop, so slow hosts fail fast.
+        let (status, headers, raw) = request_with_headers(req, timeout).await?;
         if (200..300).contains(&status) {
             return Ok(raw);
         }

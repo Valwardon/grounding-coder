@@ -312,3 +312,47 @@ fn spec_serializes_to_doc_shape() {
     assert_eq!(v["actions"][0]["object"], "american_flag");
     assert_eq!(v["actions"][0]["ambiguous"], false);
 }
+
+#[test]
+fn elephant_crossing_river_parses_generically() {
+    // Open vocabulary: no lexicon row names the elephant — the parser
+    // proposes an unclassified subject and research disposes. The
+    // elephant is never silently dropped and never programmed in.
+    let spec = parse_scene("An elephant crossing a river.");
+    assert_eq!(spec.subjects.len(), 1);
+    assert_eq!(spec.subjects[0].stype, "elephant");
+    assert_eq!(spec.actions.len(), 1);
+    assert_eq!(spec.actions[0].atype, "cross");
+    assert_eq!(spec.actions[0].actor, "elephant");
+    assert_eq!(spec.actions[0].target.as_deref(), Some("river"));
+    assert_eq!(spec.objects.len(), 1);
+    assert_eq!(spec.objects[0].otype, "river");
+
+    let plan = plan_research(&spec);
+    assert!(
+        plan.iter().any(|q| q
+            .queries
+            .iter()
+            .any(|s| s.contains("elephant") && s.contains("anatomy"))),
+        "elephant anatomy query missing"
+    );
+    assert!(
+        plan.iter()
+            .any(|q| q.queries.iter().any(|s| s.contains("river"))),
+        "river query missing"
+    );
+    // Photographic paths cover all three requirements: the subject
+    // photographs, the crossing photographs (no joints needed for a
+    // montage), the river photographs. Nothing names a missing
+    // capability here — segmentation quality is a later measurement,
+    // not a parse-time verdict.
+    let verdicts = match_capabilities(&plan);
+    assert!(
+        verdicts.iter().all(|v| v.supported),
+        "all elephant requirements should be supported: {:?}",
+        verdicts
+            .iter()
+            .map(|v| (&v.requirement, v.supported))
+            .collect::<Vec<_>>()
+    );
+}

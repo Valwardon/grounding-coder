@@ -15,7 +15,9 @@ use super::evidence::{self, EvidenceStore};
 use super::vision::Rgb;
 
 /// True when the prompt is a picture request: a human subject doing
-/// something poseable. Everything else stays on the code path.
+/// something poseable, or an unclassified (researched, never guessed)
+/// subject doing anything parsed. Everything else stays on the code
+/// path.
 pub fn is_picture_request(prompt: &str) -> bool {
     let spec = super::scene_intent::parse_scene(prompt);
     let human = spec.subjects.iter().any(|s| {
@@ -34,11 +36,25 @@ pub fn is_picture_request(prompt: &str) -> bool {
         "point",
         "raise",
     ];
-    human
+    if human
         && spec
             .actions
             .iter()
             .any(|a| poseable.contains(&a.atype.as_str()))
+    {
+        return true;
+    }
+    // Open vocabulary: a researched subject (human words excluded —
+    // those took the branch above) with a parsed action is a picture
+    // of that thing doing that thing. "A tower out of glass" stays
+    // out: no action parsed.
+    let generic = spec.subjects.iter().any(|s| {
+        !matches!(
+            s.stype.as_str(),
+            "man" | "woman" | "human" | "person" | "people"
+        )
+    });
+    generic && !spec.actions.is_empty()
 }
 
 /// Chat-style outcome: lines the app would show as the reply, plus
@@ -373,6 +389,16 @@ mod tests {
         assert!(!is_picture_request("A tower out of glass."));
         // Human but no poseable action: not a picture request.
         assert!(!is_picture_request("A man."));
+    }
+
+    #[test]
+    fn routing_sends_generic_subjects_to_pictures() {
+        // Open vocabulary: an unclassified subject with a parsed
+        // action is a picture request — research resolves the noun.
+        assert!(is_picture_request("An elephant crossing a river."));
+        // Still out: action-less scenes and code tasks.
+        assert!(!is_picture_request("An elephant."));
+        assert!(!is_picture_request("A tower out of glass."));
     }
 
     #[test]

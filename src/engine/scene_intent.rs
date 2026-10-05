@@ -64,6 +64,10 @@ const LEXICON: &[(&str, &str)] = &[
     ("waves", "wave"),
     ("waved", "wave"),
     ("waving", "wave"),
+    ("cross", "cross"),
+    ("crosses", "cross"),
+    ("crossed", "cross"),
+    ("crossing", "cross"),
     ("stand", "stand"),
     ("stands", "stand"),
     ("standing", "stand"),
@@ -83,6 +87,8 @@ const LEXICON: &[(&str, &str)] = &[
     ("flags", "flag"),
     ("mountain", "mountain"),
     ("mountains", "mountain"),
+    ("river", "river"),
+    ("rivers", "river"),
     ("american_flag", "american_flag"),
     ("peace_sign", "peace_sign"),
 ];
@@ -115,6 +121,7 @@ const ONTOLOGY: &[(&str, ConceptKind, &[&str])] = &[
     ("woman", ConceptKind::Human, &["proportions", "photograph"]),
     ("human", ConceptKind::Human, &["proportions", "photograph"]),
     ("salute", ConceptKind::Action, &["pose-reference", "joints"]),
+    ("cross", ConceptKind::Action, &["motion-reference", "place"]),
     (
         "wave",
         ConceptKind::Action,
@@ -126,6 +133,7 @@ const ONTOLOGY: &[(&str, ConceptKind, &[&str])] = &[
     ("flag", ConceptKind::Fabric, &["design", "cloth"]),
     ("american_flag", ConceptKind::Fabric, &["design", "cloth"]),
     ("mountain", ConceptKind::Place, &["photograph"]),
+    ("river", ConceptKind::Place, &["photograph"]),
 ];
 
 fn kind_of(concept: &str) -> Option<ConceptKind> {
@@ -249,15 +257,40 @@ pub fn parse_scene(prose: &str) -> SceneSpec {
             attributes,
         });
     }
-    let actor = subjects
-        .first()
-        .map(|s| s.stype.clone())
-        .unwrap_or_else(|| "subject".to_string());
-
     // Material edge FIRST (Wikidata `material-used` analogue): "X made
     // of Y" binds ANY Y to X's material slot via the understander's
     // deterministic grammar — no material is ever a scene object.
     let material_edge = super::understand::extract_material(prose);
+    // Generic subject (open vocabulary): with no known human, the
+    // first unknown content word becomes a research-candidate subject
+    // ("elephant crossing a river" → elephant). Doctrine: the parser
+    // proposes, research disposes — an unclassified noun is a work
+    // order for the knowledge graph, never a silent drop and never a
+    // programmed classification. Skipped: stopwords, known concepts,
+    // material-edge markers and edge words (they belong elsewhere).
+    if subjects.is_empty() {
+        let edge_markers = ["made", "out", "from", "built", "constructed"];
+        let edge_words: Vec<&str> = material_edge
+            .as_ref()
+            .map(|(b, m)| vec![b.as_str(), m.as_str()])
+            .unwrap_or_default();
+        if let Some(word) = folded.iter().find(|w| {
+            !STOPWORDS.contains(&w.as_str())
+                && concept_of(w).is_none()
+                && !edge_markers.contains(&w.as_str())
+                && !edge_words.contains(&w.as_str())
+                && w.len() > 2
+        }) {
+            subjects.push(Subject {
+                stype: word.clone(),
+                attributes: vec!["unclassified".to_string()],
+            });
+        }
+    }
+    let actor = subjects
+        .first()
+        .map(|s| s.stype.clone())
+        .unwrap_or_else(|| "subject".to_string());
 
     // Objects: wearable / fabric / place concepts in prose order.
     let mut objects: Vec<SceneObject> = Vec::new();
@@ -389,6 +422,23 @@ pub fn parse_scene(prose: &str) -> SceneSpec {
             ambiguous: false,
         });
     }
+    if has("cross") {
+        // "crossing X" crosses the named place, if any.
+        let place = objects
+            .iter()
+            .find(|o| kind_of(&o.otype).is_some_and(|k| k == ConceptKind::Place))
+            .map(|o| o.otype.clone());
+        if place.is_none() {
+            unresolved.push("cross: no place named — needs evidence".to_string());
+        }
+        actions.push(SceneAction {
+            atype: "cross".to_string(),
+            actor: actor.clone(),
+            target: place,
+            object: None,
+            ambiguous: false,
+        });
+    }
 
     // Confidence: ontology-mapped content tokens over content tokens.
     // The light verb "give" ("giving a sign") is forgiven; words bound
@@ -458,14 +508,31 @@ pub fn plan_research(spec: &SceneSpec) -> Vec<ResearchQuery> {
         } else {
             format!("{} {}", s.attributes.join(" "), s.stype)
         };
-        out.push(ResearchQuery {
-            requirement: format!("subject: {}", label),
-            queries: vec![
-                format!("human {} proportions reference", label),
-                format!("human {} photograph", label),
-            ],
-            capability: "photographic-subject",
-        });
+        // Known humans research through the human path; unclassified
+        // subjects research through anatomy — body plan, proportions,
+        // and photographs of the thing itself, for the knowledge graph
+        // to resolve, never for the parser to guess.
+        let is_human = matches!(s.stype.as_str(), "man" | "woman" | "human");
+        if is_human {
+            out.push(ResearchQuery {
+                requirement: format!("subject: {}", label),
+                queries: vec![
+                    format!("human {} proportions reference", label),
+                    format!("human {} photograph", label),
+                ],
+                capability: "photographic-subject",
+            });
+        } else {
+            out.push(ResearchQuery {
+                requirement: format!("subject: {}", s.stype),
+                queries: vec![
+                    format!("{} anatomy reference", s.stype),
+                    format!("{} body proportions reference", s.stype),
+                    format!("{} photograph", s.stype),
+                ],
+                capability: "photographic-subject",
+            });
+        }
     }
     for a in &spec.actions {
         match a.atype.as_str() {
@@ -505,6 +572,20 @@ pub fn plan_research(spec: &SceneSpec) -> Vec<ResearchQuery> {
                 queries: vec!["peace sign hand pose reference".to_string()],
                 capability: "articulated-pose",
             }),
+            // Crossing is photographed motion, not articulated joints:
+            // a real crossing photo needs no rig, so the montage
+            // capability (supported) consumes it, honestly stated.
+            "cross" => out.push(ResearchQuery {
+                requirement: format!("action: cross {}", a.target.as_deref().unwrap_or("nowhere")),
+                queries: vec![
+                    format!(
+                        "crossing {} photograph",
+                        a.target.as_deref().unwrap_or("place")
+                    ),
+                    "crossing motion reference".to_string(),
+                ],
+                capability: "photo-montage",
+            }),
             _ => {}
         }
     }
@@ -533,6 +614,11 @@ pub fn plan_research(spec: &SceneSpec) -> Vec<ResearchQuery> {
             "mountain" => out.push(ResearchQuery {
                 requirement: format!("place: {}", o.id),
                 queries: vec!["mountain landscape photograph".to_string()],
+                capability: "photographic-place",
+            }),
+            "river" => out.push(ResearchQuery {
+                requirement: format!("place: {}", o.id),
+                queries: vec!["river landscape photograph".to_string()],
                 capability: "photographic-place",
             }),
             // Generic object (any base noun): silhouette + reference.

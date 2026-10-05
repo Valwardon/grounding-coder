@@ -28,6 +28,12 @@ use super::vision::{Image, Rgb};
 ///   so re-runs and retries resume instead of re-downloading.
 pub const FETCH_CONCURRENCY: usize = 4;
 pub const POLITENESS_SECS: u64 = 2;
+/// Per-image fetch deadline: a black-holed host fails in 90s and
+/// yields to the next candidate instead of stalling a whole
+/// collection run. Slow-but-honest hosts still succeed (a 7MB plate
+/// at 80KB/s lands inside it); the miss is a logged refusal with a
+/// resume-friendly cache behind it.
+pub const PLATE_FETCH_SECS: u64 = 90;
 /// One indexed fetch outcome: candidate index plus bytes or reason.
 pub type BytesFetch = (usize, Result<Vec<u8>, String>);
 /// One indexed page outcome: candidate index plus status/body or reason.
@@ -71,7 +77,9 @@ pub async fn fetch_bytes_cached(url: &str) -> Result<Vec<u8>, String> {
     {
         return Ok(bytes);
     }
-    let bytes = crate::http::get_bytes(url).await?;
+    let bytes =
+        crate::http::get_bytes_timeout(url, std::time::Duration::from_secs(PLATE_FETCH_SECS))
+            .await?;
     if bytes.is_empty() {
         return Err("empty response — refusing to cache nothing".to_string());
     }
@@ -81,18 +89,30 @@ pub async fn fetch_bytes_cached(url: &str) -> Result<Vec<u8>, String> {
 }
 
 /// Per-host politeness reservations. Cloneable across workers;
-/// the reservation table is the shared choke point.
+/// the reservation table is the shared choke point. Politeness has
+/// two halves that serial code got for free and concurrent code must
+/// enforce explicitly: minimum interval between fetch STARTS per
+/// host, and maximum fetches IN FLIGHT per host. Four workers
+/// hammering one host with staggered starts still reads as a burst
+/// (Commons answered 429, measured) — the in-flight cap fixes that.
 #[derive(Debug, Clone)]
 pub struct Politeness {
     last: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
+    slots: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, usize>>>,
     min_interval: std::time::Duration,
+    max_per_host: usize,
 }
+
+/// Maximum simultaneous fetches against any single host.
+pub const HOST_CONCURRENCY: usize = 2;
 
 impl Politeness {
     pub fn new() -> Self {
         Politeness {
             last: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            slots: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             min_interval: std::time::Duration::from_secs(POLITENESS_SECS),
+            max_per_host: HOST_CONCURRENCY.max(1),
         }
     }
 
@@ -101,6 +121,19 @@ impl Politeness {
     /// lock is never held across the sleep.
     pub async fn wait(&self, url: &str) {
         let host = host_of(url);
+        // In-flight cap first: never stack more than max_per_host
+        // requests against one host no matter how the starts stagger.
+        loop {
+            {
+                let mut map = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+                let n = map.entry(host.clone()).or_insert(0);
+                if *n < self.max_per_host {
+                    *n += 1;
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
         let now = std::time::Instant::now();
         let delay = {
             let mut map = self.last.lock().unwrap_or_else(|e| e.into_inner());
@@ -114,6 +147,16 @@ impl Politeness {
         };
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
+        }
+    }
+
+    /// Release one in-flight slot. Always paired with `wait` — call
+    /// it when the fetch settles, success or failure.
+    pub fn release(&self, url: &str) {
+        let host = host_of(url);
+        let mut map = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = map.get_mut(&host) {
+            *n = n.saturating_sub(1);
         }
     }
 }
@@ -140,6 +183,7 @@ pub async fn fetch_many_text(urls: &[String]) -> Vec<PageFetch> {
                 let r = crate::http::get_text(&url)
                     .await
                     .map_err(|e| format!("page fetch failed: {}", e));
+                polite.release(&url);
                 (i, r)
             }
         })
@@ -162,7 +206,9 @@ pub async fn fetch_many(urls: &[String]) -> Vec<BytesFetch> {
             let url = url.clone();
             async move {
                 polite.wait(&url).await;
-                (i, fetch_bytes_cached(&url).await)
+                let r = fetch_bytes_cached(&url).await;
+                polite.release(&url);
+                (i, r)
             }
         })
         .buffer_unordered(FETCH_CONCURRENCY.max(1))
@@ -938,9 +984,12 @@ pub mod openimages {
         std::fs::create_dir_all(cache_dir)
             .map_err(|e| format!("plate cache unavailable: {}", e))?;
         let url = format!("{}/{}", BASE, name);
-        let bytes = crate::http::get_bytes(&url)
-            .await
-            .map_err(|e| format!("metadata fetch failed: {}", e))?;
+        let bytes = crate::http::get_bytes_timeout(
+            &url,
+            std::time::Duration::from_secs(super::PLATE_FETCH_SECS),
+        )
+        .await
+        .map_err(|e| format!("metadata fetch failed: {}", e))?;
         std::fs::write(&path, bytes).map_err(|e| format!("metadata cache write failed: {}", e))?;
         Ok(path)
     }

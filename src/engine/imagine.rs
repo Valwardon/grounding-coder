@@ -61,6 +61,8 @@ pub fn parse_brief(prose: &str) -> Brief {
         "peace sign".to_string()
     } else if has("salut") {
         "saluting".to_string()
+    } else if has("cross") {
+        "crossing".to_string()
     } else if has("wav") {
         "waving".to_string()
     } else {
@@ -326,6 +328,48 @@ pub fn imagine_from_plates(
     Ok((img, log))
 }
 
+/// Place word in prose, if any: backdrops and query anchors come
+/// from the scene's own nouns, never from a default list consulted
+/// blindly. Small closed set (product decision); unknown places
+/// ride the generic landscape fallback downstream.
+pub fn place_word(prose: &str) -> Option<&'static str> {
+    let lower = prose.to_lowercase();
+    ["river", "mountain", "lake", "ocean", "forest", "desert"]
+        .into_iter()
+        .find(|w| lower.contains(w))
+}
+
+/// Subject query for research. People take pose-portraits ("waving
+/// woman portrait"); generic subjects take noun queries with their
+/// place ("elephant river") and NEVER pose words — "crossing"
+/// drifts web search into road signs and game wikis, measured live.
+/// Pure over the brief: testable without network.
+pub fn build_subject_query(
+    brief: &Brief,
+    subject_word: &str,
+    generic: bool,
+    place: Option<&str>,
+) -> String {
+    if generic {
+        return match place {
+            Some(p) => format!("{} {}", subject_word, p),
+            None => format!("{} wildlife photograph", subject_word),
+        };
+    }
+    let mut query = if brief.pose != "standing" {
+        format!("{} {} portrait", brief.pose, subject_word)
+    } else {
+        format!("{} portrait", subject_word)
+    };
+    if brief.props.contains(&PropKind::Roses) {
+        query = format!("{} with roses", query);
+    }
+    if brief.props.contains(&PropKind::Flag) && !query.contains("flag") {
+        query = format!("{} with flag", query);
+    }
+    query
+}
+
 /// Search-query hygiene: the safety review refuses titles containing
 /// minor words ("girl", "boy", ...), so searching those words verbatim
 /// only harvests refusals. Rewrite to the adult equivalent for search —
@@ -361,28 +405,45 @@ pub async fn imagine(
     )];
     // Subject query follows the ask (pose/subject/props words feed
     // research now); backdrop query seeks a place — or the named prop.
-    let subject_word = match brief.subject {
-        SubjectKind::Woman => "woman",
-        SubjectKind::Man => "man",
-        SubjectKind::Person => "person",
+    // Unclassified subjects come from the scene parse (researched,
+    // never guessed): the brief only knows people by keyword.
+    let is_generic = matches!(brief.subject, SubjectKind::Person)
+        && !prose.to_lowercase().contains("person")
+        && !prose.to_lowercase().contains("human")
+        && !prose.to_lowercase().contains("people");
+    let subject_word: String = match brief.subject {
+        SubjectKind::Woman => "woman".to_string(),
+        SubjectKind::Man => "man".to_string(),
+        SubjectKind::Person => {
+            if is_generic {
+                super::scene_intent::parse_scene(prose)
+                    .subjects
+                    .first()
+                    .map(|s| s.stype.clone())
+                    .filter(|s| !matches!(s.as_str(), "man" | "woman" | "human"))
+                    .unwrap_or_else(|| "person".to_string())
+            } else {
+                "person".to_string()
+            }
+        }
     };
-    let mut query = if brief.pose != "standing" {
-        format!("{} {} portrait", brief.pose, subject_word)
-    } else {
-        format!("{} portrait", subject_word)
-    };
-    if brief.props.contains(&PropKind::Roses) {
-        query = format!("{} with roses", query);
-    }
-    if brief.props.contains(&PropKind::Flag) && !query.contains("flag") {
-        query = format!("{} with flag", query);
-    }
-    query = sanitize_search_query(&query);
+    let generic = subject_word != "woman" && subject_word != "man" && subject_word != "person";
+    let place = place_word(prose);
+    let query = sanitize_search_query(&build_subject_query(&brief, &subject_word, generic, place));
     log.push(format!("research: query {:?}", query));
+    // Curated Commons first (machine-readable provenance beats
+    // aggregator soup), then general web search. Both rank together.
+    let (commons_plates, commons_refused) = super::plates::source_plates(&query, 10).await;
+    for r in &commons_refused {
+        log.push(format!("commons refused: {}", r));
+    }
     let (mut plates, refused) = super::plates::source_plates_web(&query, 10).await;
     for r in &refused {
         log.push(format!("refused: {}", r));
     }
+    let mut all = commons_plates;
+    all.append(&mut plates);
+    let mut plates = all;
     // Stock-photo queries wall off entirely; fall back to plain
     // portraiture once rather than study nothing. Logged either way.
     if plates.is_empty() {
@@ -394,13 +455,17 @@ pub async fn imagine(
         plates = fallback;
     }
     log.push(format!("references: {} plate(s)", plates.len()));
-    // Open Images first for people: ground-truth boxes beat
-    // segmentation, and the adult filter is structural. Metadata
-    // caches under .grounding/openimages (the plate library).
+    // Open Images is a people-only index (Person/Woman boxes): for
+    // non-person subjects it would return strangers' photos as false
+    // candidates, so the path is skipped with the reason stated.
     let oi_cache = std::path::Path::new(".grounding/openimages");
     let oi_query = sanitize_search_query(prose);
-    let (oi_plates, oi_refused) =
-        super::plates::openimages::search_openimages(oi_cache, &oi_query, 10).await;
+    let (oi_plates, oi_refused) = if generic {
+        log.push("openimages: skipped (people-only index, non-person subject)".to_string());
+        (Vec::new(), Vec::new())
+    } else {
+        super::plates::openimages::search_openimages(oi_cache, &oi_query, 10).await
+    };
     for r in &oi_refused {
         log.push(format!("openimages refused: {}", r));
     }
@@ -448,14 +513,17 @@ pub async fn imagine(
             hit.label, hit.plate.provenance.author
         ));
         // Backdrop follows the brief: a named flag becomes the place,
-        // otherwise a generic landscape. This is the per-request scope —
-        // only what this prompt needs, nothing else.
+        // a named scene place becomes the place, otherwise a generic
+        // landscape. This is the per-request scope — only what this
+        // prompt needs, nothing else.
         let bg_query = if brief.props.contains(&PropKind::Flag) {
-            "american flag"
+            "american flag".to_string()
+        } else if let Some(p) = place {
+            format!("{} landscape", p)
         } else {
-            "landscape"
+            "landscape".to_string()
         };
-        let (bg_plates, bg_refused) = super::plates::source_plates_web(bg_query, 3).await;
+        let (bg_plates, bg_refused) = super::plates::source_plates_web(&bg_query, 3).await;
         for r in &bg_refused {
             log.push(format!("backdrop refused: {}", r));
         }
@@ -495,13 +563,16 @@ pub async fn imagine(
     if let Some(f) = study.subject_fill {
         log.push(format!("study: fill {:.2}", f));
     }
-    // Backdrop search: the named prop when present, else a place.
+    // Backdrop search: the named prop or place when present, else
+    // a generic landscape.
     let bg_query = if brief.props.contains(&PropKind::Flag) {
-        "american flag"
+        "american flag".to_string()
+    } else if let Some(p) = place {
+        format!("{} landscape", p)
     } else {
-        "landscape"
+        "landscape".to_string()
     };
-    let (bg_plates, bg_refused) = super::plates::source_plates_web(bg_query, 3).await;
+    let (bg_plates, bg_refused) = super::plates::source_plates_web(&bg_query, 3).await;
     for r in &bg_refused {
         log.push(format!("backdrop refused: {}", r));
     }
@@ -585,6 +656,41 @@ mod tests {
         assert_eq!(sanitize_search_query("girl saluting"), "woman saluting");
         assert_eq!(sanitize_search_query("boy standing"), "man standing");
         assert_eq!(sanitize_search_query("woman portrait"), "woman portrait");
+    }
+
+    #[test]
+    fn brief_parses_generic_subjects() {
+        // Open vocabulary: an elephant stays an elephant (never a
+        // "person"), crossing is the pose, and the river shapes the
+        // backdrop search downstream.
+        let b = parse_brief("an elephant crossing a river");
+        assert_eq!(b.subject, SubjectKind::Person);
+        assert_eq!(b.pose, "crossing");
+        let b = parse_brief("person waving");
+        assert_eq!(b.pose, "waving");
+    }
+
+    #[test]
+    fn subject_queries_use_scene_not_pose_for_generics() {
+        // "crossing" in a web query harvests road signs (measured
+        // live): generic subjects query noun + place, never the pose.
+        let b = parse_brief("an elephant crossing a river");
+        assert_eq!(
+            build_subject_query(&b, "elephant", true, Some("river")),
+            "elephant river"
+        );
+        assert_eq!(
+            build_subject_query(&b, "elephant", true, None),
+            "elephant wildlife photograph"
+        );
+        // People keep pose-portraits.
+        let w = parse_brief("woman waving");
+        assert_eq!(
+            build_subject_query(&w, "woman", false, None),
+            "waving woman portrait"
+        );
+        assert_eq!(place_word("an elephant crossing a river"), Some("river"));
+        assert_eq!(place_word("a man standing"), None);
     }
 
     #[test]
