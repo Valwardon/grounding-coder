@@ -12,6 +12,166 @@
 //! this come from, who made it, under what terms.
 use super::vision::{Image, Rgb};
 
+/// Collection engine: many plates per request, politely and only once.
+///
+/// Per-request training needs dozens of plates, but the old loop
+/// fetched them one at a time with a 2s sleep between every two —
+/// 100 plates meant 200s+ of waiting. This module fetches with
+/// bounded concurrency while keeping every politeness promise:
+/// - at most [`FETCH_CONCURRENCY`] fetches in flight at once;
+/// - at least [`POLITENESS_SECS`] between two fetches from the same
+///   host (reservations are atomic, so concurrent workers queue
+///   instead of stampeding);
+/// - results come back in CANDIDATE order, never completion order,
+///   so selection stays deterministic run to run;
+/// - fetched bytes land in a shared disk cache (`.grounding/`),
+///   so re-runs and retries resume instead of re-downloading.
+pub const FETCH_CONCURRENCY: usize = 4;
+pub const POLITENESS_SECS: u64 = 2;
+/// One indexed fetch outcome: candidate index plus bytes or reason.
+pub type BytesFetch = (usize, Result<Vec<u8>, String>);
+/// One indexed page outcome: candidate index plus status/body or reason.
+pub type PageFetch = (usize, Result<(u16, String), String>);
+
+/// Host part of a URL (`https://a.b/c` → `a.b`). Best-effort parse
+/// for politeness bucketing — unknown shapes bucket together.
+pub fn host_of(url: &str) -> String {
+    let after_scheme = url.split("://").nth(1).unwrap_or(url);
+    after_scheme
+        .split('/')
+        .next()
+        .unwrap_or(after_scheme)
+        .to_lowercase()
+}
+
+/// Cache key for a fetched URL: hex SHA-256, so cache files carry
+/// no information about what was fetched.
+pub fn cache_key(url: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(url.as_bytes());
+    format!("{:x}", h.finalize())
+}
+
+/// Shared byte cache dir (runtime state, gitignored like the rest
+/// of `.grounding/`).
+fn byte_cache_dir() -> std::path::PathBuf {
+    std::path::Path::new(".grounding/plate-bytes").to_path_buf()
+}
+
+/// Read-through byte cache: cached bytes win, otherwise fetch,
+/// store, and return. Corrupt-or-missing cache reads fall through
+/// to a fresh fetch — the cache never fails a fetch, it only
+/// avoids repeats.
+pub async fn fetch_bytes_cached(url: &str) -> Result<Vec<u8>, String> {
+    let dir = byte_cache_dir();
+    let path = dir.join(cache_key(url));
+    if let Ok(bytes) = std::fs::read(&path)
+        && !bytes.is_empty()
+    {
+        return Ok(bytes);
+    }
+    let bytes = crate::http::get_bytes(url).await?;
+    if bytes.is_empty() {
+        return Err("empty response — refusing to cache nothing".to_string());
+    }
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(&path, &bytes);
+    Ok(bytes)
+}
+
+/// Per-host politeness reservations. Cloneable across workers;
+/// the reservation table is the shared choke point.
+#[derive(Debug, Clone)]
+pub struct Politeness {
+    last: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
+    min_interval: std::time::Duration,
+}
+
+impl Politeness {
+    pub fn new() -> Self {
+        Politeness {
+            last: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            min_interval: std::time::Duration::from_secs(POLITENESS_SECS),
+        }
+    }
+
+    /// Wait until this URL's host is due, then reserve the slot.
+    /// The reservation is atomic under one lock acquisition and the
+    /// lock is never held across the sleep.
+    pub async fn wait(&self, url: &str) {
+        let host = host_of(url);
+        let now = std::time::Instant::now();
+        let delay = {
+            let mut map = self.last.lock().unwrap_or_else(|e| e.into_inner());
+            let wait_until = map
+                .get(&host)
+                .map(|t| *t + self.min_interval)
+                .unwrap_or(now);
+            let delay = wait_until.saturating_duration_since(now);
+            map.insert(host, if delay.is_zero() { now } else { wait_until });
+            delay
+        };
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+    }
+}
+
+impl Default for Politeness {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Fetch many page texts with bounded concurrency and shared
+/// politeness, in candidate order. Hosting pages are NOT disk-cached:
+/// license evidence must be read fresh every run, never trusted from
+/// a stale copy.
+pub async fn fetch_many_text(urls: &[String]) -> Vec<PageFetch> {
+    use futures_util::stream::{self, StreamExt};
+    let polite = Politeness::new();
+    let mut out: Vec<PageFetch> = stream::iter(urls.iter().enumerate())
+        .map(|(i, url)| {
+            let polite = polite.clone();
+            let url = url.clone();
+            async move {
+                polite.wait(&url).await;
+                let r = crate::http::get_text(&url)
+                    .await
+                    .map_err(|e| format!("page fetch failed: {}", e));
+                (i, r)
+            }
+        })
+        .buffer_unordered(FETCH_CONCURRENCY.max(1))
+        .collect()
+        .await;
+    out.sort_by_key(|(i, _)| *i);
+    out
+}
+
+/// Fetch many URLs with bounded concurrency, shared politeness, and
+/// the read-through cache. Returns `(candidate index, bytes)` pairs
+/// sorted by index — completion order never leaks into selection.
+pub async fn fetch_many(urls: &[String]) -> Vec<BytesFetch> {
+    use futures_util::stream::{self, StreamExt};
+    let polite = Politeness::new();
+    let mut out: Vec<BytesFetch> = stream::iter(urls.iter().enumerate())
+        .map(|(i, url)| {
+            let polite = polite.clone();
+            let url = url.clone();
+            async move {
+                polite.wait(&url).await;
+                (i, fetch_bytes_cached(&url).await)
+            }
+        })
+        .buffer_unordered(FETCH_CONCURRENCY.max(1))
+        .collect()
+        .await;
+    out.sort_by_key(|(i, _)| *i);
+    out
+}
+
 /// Licenses the loop accepts, matched against Commons'
 /// `LicenseShortName` (lowercased, trimmed). Public domain and
 /// attribution licenses only.
@@ -285,7 +445,9 @@ fn percent_encode(s: &str) -> String {
 /// Source up to `limit` plates for a query: search, require
 /// provenance, fetch bytes, decode. Each step can refuse with its
 /// reason; refusals are reported, never silent, and never fatal to
-/// the plates that did verify.
+/// the plates that did verify. File fetches run through the shared
+/// collection engine (bounded concurrency, per-host politeness,
+/// disk cache) in candidate order.
 pub async fn source_plates(query: &str, limit: u32) -> (Vec<SourcedPlate>, Vec<String>) {
     let mut plates = Vec::new();
     let mut refused = Vec::new();
@@ -296,42 +458,48 @@ pub async fn source_plates(query: &str, limit: u32) -> (Vec<SourcedPlate>, Vec<S
             return (plates, refused);
         }
     };
+    // Pass 1 (cheap, sequential): title review + provenance. Only
+    // verified candidates spend network.
+    let mut vetted: Vec<(String, PlateProvenance, String)> = Vec::new();
     for (title, page_url, file_url, author, license) in candidates {
-        if plates.len() >= limit as usize {
+        if vetted.len() >= limit as usize {
             break;
         }
         if let Err(e) = review_title(&title) {
             refused.push(e);
             continue;
         }
-        let provenance = match require_provenance(&title, &page_url, &file_url, &author, &license) {
-            Ok(p) => p,
-            Err(e) => {
-                refused.push(e);
-                continue;
-            }
-        };
-        // Politeness delay between file fetches: burst traffic earns
-        // 429s (measured), and shared infrastructure deserves better.
-        // Skipped before the first fetch of the run.
-        if !plates.is_empty() || !refused.is_empty() {
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        match require_provenance(&title, &page_url, &file_url, &author, &license) {
+            Ok(p) => vetted.push((
+                title,
+                p,
+                "Commons file metadata (LicenseShortName)".to_string(),
+            )),
+            Err(e) => refused.push(e),
         }
-        let bytes = match crate::http::get_bytes(&provenance.source_url).await {
-            Ok(b) => b,
-            Err(e) => {
-                refused.push(format!("{:?}: fetch failed: {}", title, e));
-                continue;
-            }
-        };
-        match decode_plate(&bytes) {
-            Ok(image) => plates.push(SourcedPlate {
-                image,
-                provenance,
-                basis: "Commons file metadata (LicenseShortName)".to_string(),
-                title: title.clone(),
-            }),
-            Err(e) => refused.push(format!("{:?}: {}", title, e)),
+    }
+    // Pass 2 (bulk): concurrent polite cached fetches, order kept.
+    let urls: Vec<String> = vetted
+        .iter()
+        .map(|(_, p, _)| p.source_url.clone())
+        .collect();
+    let mut fetched = fetch_many(&urls).await;
+    // Pass 3 (in order): decode wins and losses both reported.
+    for ((title, provenance, basis), (_, bytes)) in vetted.into_iter().zip(fetched.drain(..)) {
+        if plates.len() >= limit as usize {
+            break;
+        }
+        match bytes {
+            Err(e) => refused.push(format!("{:?}: fetch failed: {}", title, e)),
+            Ok(b) => match decode_plate(&b) {
+                Ok(image) => plates.push(SourcedPlate {
+                    image,
+                    provenance,
+                    basis,
+                    title: title.clone(),
+                }),
+                Err(e) => refused.push(format!("{:?}: {}", title, e)),
+            },
         }
     }
     (plates, refused)
@@ -589,6 +757,9 @@ pub async fn source_plates_web(query: &str, limit: u32) -> (Vec<SourcedPlate>, V
             return (plates, refused);
         }
     };
+    // Pass 1 (cheap, sequential): title review only. Pages and
+    // files are bulk-fetched below.
+    let mut vetted_hits: Vec<(String, WebHit)> = Vec::new();
     for hit in hits {
         if plates.len() >= limit as usize {
             break;
@@ -602,7 +773,21 @@ pub async fn source_plates_web(query: &str, limit: u32) -> (Vec<SourcedPlate>, V
             refused.push(e);
             continue;
         }
-        let html = match crate::http::get_text(&hit.page_url).await {
+        vetted_hits.push((label, hit));
+    }
+    // Pass 2 (bulk): hosting pages concurrently (fresh every run —
+    // license evidence is never cached), order kept.
+    let page_urls: Vec<String> = vetted_hits
+        .iter()
+        .map(|(_, h)| h.page_url.clone())
+        .collect();
+    let pages = fetch_many_text(&page_urls).await;
+    // Pass 3 (cheap, sequential): page evidence + provenance. No
+    // cap here — fetch/decode failures below backfill from later
+    // hits, exactly like the old sequential loop.
+    let mut vetted: Vec<(String, PlateProvenance, String, Vec<String>)> = Vec::new();
+    for ((label, hit), (_, page)) in vetted_hits.into_iter().zip(pages) {
+        let html = match page {
             Ok((st, body)) if (200..300).contains(&st) => body,
             _ => {
                 refused.push(format!("{:?}: hosting page unreadable", label));
@@ -635,14 +820,49 @@ pub async fn source_plates_web(query: &str, limit: u32) -> (Vec<SourcedPlate>, V
         {
             file_urls.insert(0, og);
         }
+        vetted.push((label, provenance, ev.basis.clone(), file_urls));
+    }
+    // Pass 4 (bulk): first-choice files concurrently, order kept.
+    let firsts: Vec<String> = vetted
+        .iter()
+        .map(|(_, _, _, urls)| urls[0].clone())
+        .collect();
+    let first_bytes = fetch_many(&firsts).await;
+    // Pass 5 (bulk): second choices only for first-choice failures.
+    let mut need_second = Vec::new();
+    let mut second_for: Vec<usize> = Vec::new();
+    for (k, (_, r)) in first_bytes.iter().enumerate() {
+        if r.is_err() && vetted[k].3.len() > 1 {
+            second_for.push(k);
+            need_second.push(vetted[k].3[1].clone());
+        }
+    }
+    let second_bytes = fetch_many(&need_second).await;
+    let mut second_by_k: std::collections::HashMap<usize, Result<Vec<u8>, String>> =
+        std::collections::HashMap::new();
+    for (k, (_, r)) in second_for.into_iter().zip(second_bytes) {
+        second_by_k.insert(k, r);
+    }
+    // Pass 6 (in order): decode wins and losses both reported.
+    for (k, (label, provenance, basis, _)) in vetted.into_iter().enumerate() {
+        if plates.len() >= limit as usize {
+            break;
+        }
         let mut decoded = None;
         let mut fetch_err = String::new();
-        if !plates.is_empty() || !refused.is_empty() {
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        }
-        for url in &file_urls {
-            match crate::http::get_bytes(url).await {
-                Ok(bytes) => match decode_plate(&bytes) {
+        let attempts: Vec<Result<Vec<u8>, String>> = vec![
+            first_bytes.get(k).map(|(_, r)| match r {
+                Ok(b) => Ok(b.clone()),
+                Err(e) => Err(e.clone()),
+            }),
+            second_by_k.remove(&k),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        for bytes in attempts {
+            match bytes {
+                Ok(b) => match decode_plate(&b) {
                     Ok(img) => {
                         decoded = Some(img);
                         break;
@@ -656,7 +876,7 @@ pub async fn source_plates_web(query: &str, limit: u32) -> (Vec<SourcedPlate>, V
             Some(image) => plates.push(SourcedPlate {
                 image,
                 provenance,
-                basis: ev.basis.clone(),
+                basis,
                 title: label.clone(),
             }),
             None => refused.push(format!("{:?}: undecodable: {}", label, fetch_err)),
@@ -725,6 +945,7 @@ pub mod openimages {
         Ok(path)
     }
 
+    #[derive(Debug, Clone)]
     pub struct ImageMeta {
         pub url: String,
         pub page: String,
@@ -767,6 +988,7 @@ pub mod openimages {
         ))
     }
 
+    #[derive(Debug, Clone)]
     pub struct BoxRow {
         pub image: String,
         pub label: String,
@@ -883,80 +1105,94 @@ pub mod openimages {
         }
         // Assemble: biggest clean box wins per image; anything else
         // takes the biggest box available. Banned images drop out.
+        // Rounds preserve the old sequential selection order exactly
+        // (sorted IDs, first `limit` plates): each round vets the next
+        // chunk, bulk-fetches it concurrently, and decodes in order —
+        // fetch failures backfill from later IDs like before.
         let mut plates = Vec::new();
         let mut order: Vec<String> = hits.keys().cloned().collect();
         order.sort();
-        for id in order {
-            if plates.len() >= limit as usize {
-                break;
-            }
-            if banned.contains(&id) {
-                continue;
-            }
-            let Some(meta) = metas.get(&id) else {
-                refused.push(format!("{}: no image row", id));
-                continue;
-            };
-            if meta.rotation.abs() > 0.01 {
-                refused.push(format!("{}: rotated, boxes would misalign", id));
-                continue;
-            }
-            let rows = &hits[&id];
-            let pick = rows
-                .iter()
-                .filter(|r| r.clean)
-                .max_by(|a, b| {
-                    let area = |r: &BoxRow| (r.x1 - r.x0) * (r.y1 - r.y0);
-                    area(a)
-                        .partial_cmp(&area(b))
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .or_else(|| {
-                    rows.iter().max_by(|a, b| {
+        let mut cursor = 0usize;
+        let want = limit as usize;
+        while plates.len() < want && cursor < order.len() {
+            let mut chunk: Vec<(String, BoxRow, ImageMeta, super::PlateProvenance)> = Vec::new();
+            while chunk.len() + plates.len() < want && cursor < order.len() {
+                let id = &order[cursor];
+                cursor += 1;
+                if banned.contains(id) {
+                    continue;
+                }
+                let Some(meta) = metas.get(id) else {
+                    refused.push(format!("{}: no image row", id));
+                    continue;
+                };
+                if meta.rotation.abs() > 0.01 {
+                    refused.push(format!("{}: rotated, boxes would misalign", id));
+                    continue;
+                }
+                let rows = &hits[id];
+                let pick = rows
+                    .iter()
+                    .filter(|r| r.clean)
+                    .max_by(|a, b| {
                         let area = |r: &BoxRow| (r.x1 - r.x0) * (r.y1 - r.y0);
                         area(a)
                             .partial_cmp(&area(b))
                             .unwrap_or(std::cmp::Ordering::Equal)
                     })
-                });
-            let Some(row) = pick else { continue };
-            let Some(token) = license_token(&meta.license) else {
-                refused.push(format!(
-                    "{}: license {:?} not allowlisted",
-                    id, meta.license
-                ));
-                continue;
-            };
-            let provenance =
-                match require_provenance(&id, &meta.page, &meta.url, &meta.author, &token) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        refused.push(e);
-                        continue;
-                    }
-                };
-            let bytes = match crate::http::get_bytes(&provenance.source_url).await {
-                Ok(b) => b,
-                Err(e) => {
-                    refused.push(format!("{}: fetch failed: {}", id, e));
+                    .or_else(|| {
+                        rows.iter().max_by(|a, b| {
+                            let area = |r: &BoxRow| (r.x1 - r.x0) * (r.y1 - r.y0);
+                            area(a)
+                                .partial_cmp(&area(b))
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                    });
+                let Some(row) = pick else { continue };
+                let Some(token) = license_token(&meta.license) else {
+                    refused.push(format!(
+                        "{}: license {:?} not allowlisted",
+                        id, meta.license
+                    ));
                     continue;
+                };
+                match require_provenance(id, &meta.page, &meta.url, &meta.author, &token) {
+                    Ok(p) => chunk.push((id.clone(), (*row).clone(), (*meta).clone(), p)),
+                    Err(e) => refused.push(e),
                 }
-            };
-            match decode_plate(&bytes) {
-                Ok(image) => plates.push(OpenPlate {
-                    plate: SourcedPlate {
-                        image,
-                        provenance,
-                        basis: format!("Open Images V4 box {} by {}", row.label, meta.author),
-                        title: id.clone(),
-                    },
-                    bbox: (row.x0, row.y0, row.x1, row.y1),
-                    label: row.label.clone(),
-                }),
-                Err(e) => refused.push(format!("{}: {}", id, e)),
             }
-            // Politeness between file fetches (shared infra).
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            if chunk.is_empty() {
+                continue;
+            }
+            let urls: Vec<String> = chunk
+                .iter()
+                .map(|(_, _, _, p)| p.source_url.clone())
+                .collect();
+            let fetched = super::fetch_many(&urls).await;
+            for ((id, row, meta, provenance), (_, bytes)) in chunk.into_iter().zip(fetched) {
+                if plates.len() >= want {
+                    break;
+                }
+                match bytes {
+                    Err(e) => refused.push(format!("{}: fetch failed: {}", id, e)),
+                    Ok(b) => match decode_plate(&b) {
+                        Ok(image) => plates.push(OpenPlate {
+                            plate: SourcedPlate {
+                                image,
+                                provenance,
+                                basis: format!(
+                                    "Open Images V4 box {} by {}",
+                                    row.label, meta.author
+                                ),
+                                title: id.clone(),
+                            },
+                            bbox: (row.x0, row.y0, row.x1, row.y1),
+                            label: row.label.clone(),
+                        }),
+                        Err(e) => refused.push(format!("{}: {}", id, e)),
+                    },
+                }
+            }
         }
         (plates, refused)
     }
@@ -1020,6 +1256,35 @@ pub mod openimages {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn engine_buckets_hosts() {
+        assert_eq!(
+            host_of("https://upload.wikimedia.org/x.jpg"),
+            "upload.wikimedia.org"
+        );
+        assert_eq!(host_of("http://a.b/c?d=e"), "a.b");
+        assert_eq!(host_of("https://EXAMPLE.org/"), "example.org");
+        assert_eq!(host_of("notaurl"), "notaurl");
+    }
+
+    #[test]
+    fn engine_cache_keys_are_opaque_and_stable() {
+        let a = cache_key("https://example.org/a.jpg");
+        assert_eq!(a.len(), 64);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(a, cache_key("https://example.org/a.jpg"));
+        assert_ne!(a, cache_key("https://example.org/b.jpg"));
+    }
+
+    #[tokio::test]
+    async fn engine_empty_fetch_is_empty() {
+        // No URLs, no network: the bulk path must be a no-op.
+        let out = fetch_many(&[]).await;
+        assert!(out.is_empty());
+        let out = fetch_many_text(&[]).await;
+        assert!(out.is_empty());
+    }
 
     #[test]
     fn provenance_requires_all_three_fields() {
