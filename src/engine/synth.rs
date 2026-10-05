@@ -126,7 +126,7 @@ pub fn eye_debug(head: &Image) -> String {
             let bigr = aa.max(ba) as f64 / aa.min(ba).max(1) as f64;
             let gate = if dy > side * EYE_LEVEL_FRAC {
                 format!("level dy={:.1}", dy)
-            } else if dx < side * 0.15 || dx > side * 0.6 {
+            } else if dx < side * 0.12 || dx > side * 0.5 {
                 format!("separation dx={:.1}", dx)
             } else if bigr > 3.0 {
                 format!("size ratio {:.1}", bigr)
@@ -158,8 +158,14 @@ pub fn eye_debug(head: &Image) -> String {
 /// half, roughly level, sanely separated, symmetric about the
 /// vertical center. Pupils, lashes, and brows all read dark against
 /// skin; the PAIR geometry is the landmark, never any single blob.
-/// Brows satisfy the same geometry as eyes at a nearby height — both
-/// pin vertical scale, so either lock aligns; the docs say so.
+/// Separation is anatomically gated: human inter-eye distance runs
+/// ~0.3 of head width, and the head square always contains the whole
+/// blob it was built around, so implied ratios outside [0.12, 0.50]
+/// of the side cannot be eyes — nostrils below, ears and hair masses
+/// above. Measured donor ratios confirmed the upper bound (locked
+/// junk clustered at 0.55+). Brows satisfy the same geometry as eyes
+/// at a nearby height — both pin vertical scale, so either lock
+/// aligns; the docs say so.
 /// Returns the two blob centers, left first.
 pub fn eye_pair(head: &Image) -> Option<EyePair> {
     let (w, h) = (head.width, head.height);
@@ -198,7 +204,7 @@ pub fn eye_pair(head: &Image) -> Option<EyePair> {
             };
             let dx = (r.0 - l.0).abs();
             let dy = (r.1 - l.1).abs();
-            if dy > side * EYE_LEVEL_FRAC || dx < side * 0.15 || dx > side * 0.6 {
+            if dy > side * EYE_LEVEL_FRAC || dx < side * 0.12 || dx > side * 0.5 {
                 continue;
             }
             let big = aa.max(ba) as f64;
