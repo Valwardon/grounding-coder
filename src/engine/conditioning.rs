@@ -36,67 +36,69 @@ pub struct PoseCond {
     pub donor_count: usize,
 }
 
-/// Framing truth: measured subject fill + camera convention. Shot
-/// descriptions ("medium-long", "eye-level") derive from fill
-/// fractions through fixed bands — stated below, never felt.
+/// Framing truth: measured subject fill and nothing else. There
+/// is no shot vocabulary here — "medium-long" and "close-up" are
+/// programmed judgments, not measurements. Consumers that want words
+/// can band the number themselves and own the banding; truth carries
+/// the fraction or the gap.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CompositionCond {
     /// Subject height as a fraction of frame height, when measured.
     pub subject_fill: Option<f64>,
-    /// Banded shot description, deterministic from fill.
-    pub shot: String,
 }
 
 impl CompositionCond {
     pub fn from_fill(fill: Option<f64>) -> Self {
-        let shot = match fill {
-            Some(f) if f >= 0.7 => "close-up",
-            Some(f) if f >= 0.4 => "medium shot",
-            Some(f) if f >= 0.15 => "medium-long shot",
-            Some(_) => "wide shot",
-            None => "unconstrained",
-        }
-        .to_string();
-        CompositionCond {
-            subject_fill: fill,
-            shot,
+        CompositionCond { subject_fill: fill }
+    }
+
+    /// Gap description when unmeasured: the unknown, stated.
+    pub fn gap(&self) -> Option<String> {
+        if self.subject_fill.is_none() {
+            Some("framing unmeasured — acquire a subject plate".to_string())
+        } else {
+            None
         }
     }
 }
 
-/// Light truth: measured backdrop palette + quality. Quality words
-/// come from measured spread (low spread = diffuse/even, high =
-/// directional/contrasty) — vocabulary from arithmetic, not taste.
+/// Light truth: measured backdrop palette plus the measured spread
+/// between its bands. No quality words — "diffuse" and
+/// "directional" are programmed judgments. The spread number is the
+/// measurement; its meaning belongs to whoever researched lighting,
+/// not to this struct.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LightCond {
     pub top: Option<(u8, u8, u8)>,
     pub bottom: Option<(u8, u8, u8)>,
-    pub quality: String,
+    /// Mean per-channel distance between bands, when both measured.
+    pub spread: Option<f64>,
 }
 
 impl LightCond {
     pub fn from_palette(top: Option<(u8, u8, u8)>, bottom: Option<(u8, u8, u8)>) -> Self {
         let spread = match (top, bottom) {
-            (Some(t), Some(b)) => {
+            (Some(t), Some(b)) => Some(
                 ((t.0 as i32 - b.0 as i32).abs()
                     + (t.1 as i32 - b.1 as i32).abs()
                     + (t.2 as i32 - b.2 as i32).abs()) as f64
-                    / 3.0
-            }
-            _ => -1.0,
+                    / 3.0,
+            ),
+            _ => None,
         };
-        let quality = if spread < 0.0 {
-            "unmeasured"
-        } else if spread < 25.0 {
-            "diffuse daylight"
-        } else {
-            "directional light"
-        }
-        .to_string();
         LightCond {
             top,
             bottom,
-            quality,
+            spread,
+        }
+    }
+
+    /// Gap description when unmeasured: the unknown, stated.
+    pub fn gap(&self) -> Option<String> {
+        if self.spread.is_none() {
+            Some("lighting unmeasured — acquire backdrop plates".to_string())
+        } else {
+            None
         }
     }
 }
@@ -256,18 +258,29 @@ mod tests {
     }
 
     #[test]
-    fn bands_derive_from_arithmetic() {
-        assert_eq!(CompositionCond::from_fill(Some(0.8)).shot, "close-up");
+    fn numbers_travel_gaps_described() {
+        // Measured: the numbers ride along, no words attached.
+        let c = CompositionCond::from_fill(Some(0.37));
+        assert_eq!(c.subject_fill, Some(0.37));
+        assert!(c.gap().is_none());
+        let l = LightCond::from_palette(Some((143, 124, 99)), Some((120, 110, 95)));
+        assert!(l.spread.is_some());
+        // Unmeasured: the unknown is described, never defaulted.
         assert_eq!(
-            CompositionCond::from_fill(Some(0.37)).shot,
-            "medium-long shot"
+            CompositionCond::from_fill(None).gap().as_deref(),
+            Some("framing unmeasured — acquire a subject plate")
         );
-        assert_eq!(CompositionCond::from_fill(None).shot, "unconstrained");
         assert_eq!(
-            LightCond::from_palette(Some((143, 124, 99)), Some((120, 110, 95))).quality,
-            "diffuse daylight"
+            LightCond::from_palette(None, None).gap().as_deref(),
+            Some("lighting unmeasured — acquire backdrop plates")
         );
-        assert_eq!(LightCond::from_palette(None, None).quality, "unmeasured");
+        // Partial (one band): still a gap — half a palette measures
+        // nothing about light.
+        assert!(
+            LightCond::from_palette(Some((1, 2, 3)), None)
+                .gap()
+                .is_some()
+        );
     }
 
     #[test]
