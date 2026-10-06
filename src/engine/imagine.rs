@@ -488,12 +488,74 @@ fn is_people_word(w: &str) -> bool {
     matches!(w, "man" | "woman" | "human" | "person" | "people")
 }
 
-/// Multi-subject assembly: one provenance-passing Commons plate per
-/// noun (first hit, deterministic newest-first order), mounted whole
-/// per relation over a stated gradient. Whole plates, stated twice:
-/// without per-subject ground boxes there is no honest cutout, so
-/// frames mount entire. Needs all nouns plated or refuses naming
-/// the missing one. Returns the photo log plus evidence words.
+/// Best sane OpenImages box: full-frame boxes reframe the whole
+/// photo (nothing learned), edge-cropped boxes bleed, and
+/// name-titled plates name an identified person — automatic selection
+/// skips them (logged) while the library keeps them listed. Sample
+/// curation stays human either way. Shared by the single and multi
+/// paths so both rank identically.
+fn rank_openimages(
+    oi_plates: &[super::plates::openimages::OpenPlate],
+    log: &mut Vec<String>,
+) -> Option<usize> {
+    let mut ranked: Vec<(usize, f64)> = oi_plates
+        .iter()
+        .enumerate()
+        .filter_map(|(i, hit)| {
+            let area = (hit.bbox.2 - hit.bbox.0) * (hit.bbox.3 - hit.bbox.1);
+            if area > 0.9 {
+                return None;
+            }
+            // Portrait convention, not full containment: headroom
+            // plus both sides must clear the edge; the bottom may
+            // crop (half-body portraits cut at the legs routinely).
+            // Skin-path margins stay stricter (it can't see heads).
+            let worst = hit.bbox.0.min(hit.bbox.1).min(1.0 - hit.bbox.2);
+            if worst < 0.03 {
+                log.push(format!(
+                    "skipped edge-cropped box {:?} ({:.3} margin)",
+                    hit.bbox, worst
+                ));
+                return None;
+            }
+            if looks_like_person_name(&hit.plate.provenance.author) {
+                log.push(format!(
+                    "skipped name-titled plate: {:?}",
+                    hit.plate.provenance.author
+                ));
+                return None;
+            }
+            Some((i, area))
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.first().map(|(i, _)| *i)
+}
+
+/// Crop a ground-truth box with margin for mounting: expand 25%
+/// each side (boxes arrive tight; heads need headroom), clamp to the
+/// frame.
+fn crop_box(plate: &Image, bbox: (f64, f64, f64, f64)) -> Image {
+    let (pw, ph) = (plate.width as f64, plate.height as f64);
+    let bw = (bbox.2 - bbox.0).max(0.01);
+    let bh = (bbox.3 - bbox.1).max(0.01);
+    let x0 = ((bbox.0 - bw * 0.25) * pw).clamp(0.0, pw - 1.0) as u32;
+    let y0 = ((bbox.1 - bh * 0.25) * ph).clamp(0.0, ph - 1.0) as u32;
+    let x1 = ((bbox.2 + bw * 0.25) * pw).clamp(0.0, pw - 1.0) as u32;
+    let y1 = ((bbox.3 + bh * 0.25) * ph).clamp(0.0, ph - 1.0) as u32;
+    if x1 <= x0 || y1 <= y0 {
+        return plate.clone();
+    }
+    plate.crop(x0, y0, x1 - x0 + 1, y1 - y0 + 1)
+}
+
+/// Multi-subject assembly: people nouns come from OpenImages
+/// ground-truth boxes (a karyotype chart must never answer for a
+/// human — measured live), every other noun from the first
+/// provenance-passing Commons plate (deterministic newest-first
+/// order). Box crops mount precise; whole plates mount stated.
+/// Needs all nouns plated or refuses naming the missing one.
+/// Returns the photo log plus evidence words.
 async fn attempt_multi(
     nouns: &[String],
     relation: super::compose::AssemblyRelation,
@@ -502,13 +564,36 @@ async fn attempt_multi(
 ) -> (Result<(Image, Vec<String>), Vec<String>>, Vec<String>) {
     let mut log = Vec::new();
     let mut evidence = Vec::new();
-    let mut mounted: Vec<super::plates::SourcedPlate> = Vec::new();
+    let mut mounted: Vec<(Image, String)> = Vec::new();
+    let oi_cache = std::path::Path::new(".grounding/openimages");
     for noun in nouns.iter().take(2) {
-        let query = if is_people_word(noun) {
-            format!("{} portrait", noun)
-        } else {
-            format!("{} photograph", noun)
-        };
+        if is_people_word(noun) {
+            let query = format!("{} portrait", noun);
+            log.push(format!("multi: query {:?}", query));
+            evidence.extend(evidence_words(&query));
+            let (oi_plates, oi_refused) =
+                super::plates::openimages::search_openimages(oi_cache, &query, 10).await;
+            for r in &oi_refused {
+                log.push(format!("multi openimages refused: {}", r));
+            }
+            match rank_openimages(&oi_plates, &mut log) {
+                Some(idx) => {
+                    let hit = &oi_plates[idx];
+                    log.push(format!(
+                        "multi: {} <- openimages box {} by {}",
+                        noun, hit.label, hit.plate.provenance.author
+                    ));
+                    evidence.extend(evidence_words(&hit.plate.title));
+                    mounted.push((crop_box(&hit.plate.image, hit.bbox), noun.clone()));
+                }
+                None => {
+                    log.push(format!("multi: no box for {:?} — cannot mount", noun));
+                    return (Err(log), evidence);
+                }
+            }
+            continue;
+        }
+        let query = format!("{} photograph", noun);
         log.push(format!("multi: query {:?}", query));
         evidence.extend(evidence_words(&query));
         let (plates, refused) = super::plates::source_plates(&query, 3).await;
@@ -519,7 +604,7 @@ async fn attempt_multi(
             Some(p) => {
                 evidence.extend(evidence_words(&p.title));
                 log.push(format!("multi: {} <- {}", noun, p.provenance.page_url));
-                mounted.push(p);
+                mounted.push((p.image, noun.clone()));
             }
             None => {
                 log.push(format!("multi: no plate for {:?} — cannot mount", noun));
@@ -531,13 +616,15 @@ async fn attempt_multi(
         log.push("multi: fewer than two subjects mounted — refusing".to_string());
         return (Err(log), evidence);
     }
+    let (a_img, a_label) = &mounted[0];
+    let (b_img, b_label) = &mounted[1];
     let a = super::compose::MountedSubject {
-        image: &mounted[0].image,
-        label: "subject-a",
+        image: a_img,
+        label: a_label,
     };
     let b = super::compose::MountedSubject {
-        image: &mounted[1].image,
-        label: "subject-b",
+        image: b_img,
+        label: b_label,
     };
     match super::compose::assemble_two(&a, &b, relation, None, width, height) {
         Ok((img, alog)) => {
@@ -774,44 +861,10 @@ async fn attempt(
         log.push(format!("openimages refused: {}", r));
     }
     log.push(format!("openimages: {} plate(s)", oi_plates.len()));
-    // Best sane box wins, not the first hit: full-frame boxes
-    // reframe the whole photo (nothing learned), and name-titled
-    // plates name an identified person — automatic selection skips
-    // them (logged) while the library keeps them listed. Sample
-    // curation stays human either way.
-    let mut ranked: Vec<(usize, f64)> = oi_plates
-        .iter()
-        .enumerate()
-        .filter_map(|(i, hit)| {
-            let area = (hit.bbox.2 - hit.bbox.0) * (hit.bbox.3 - hit.bbox.1);
-            if area > 0.9 {
-                return None;
-            }
-            // Portrait convention, not full containment: headroom
-            // plus both sides must clear the edge; the bottom may
-            // crop (half-body portraits cut at the legs routinely).
-            // Skin-path margins stay stricter (it can't see heads).
-            let worst = hit.bbox.0.min(hit.bbox.1).min(1.0 - hit.bbox.2);
-            if worst < 0.03 {
-                log.push(format!(
-                    "skipped edge-cropped box {:?} ({:.3} margin)",
-                    hit.bbox, worst
-                ));
-                return None;
-            }
-            if looks_like_person_name(&hit.plate.provenance.author) {
-                log.push(format!(
-                    "skipped name-titled plate: {:?}",
-                    hit.plate.provenance.author
-                ));
-                return None;
-            }
-            Some((i, area))
-        })
-        .collect();
-    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    if let Some((oi_idx, _)) = ranked.first() {
-        let hit = &oi_plates[*oi_idx];
+    // Best sane box wins — same ranker as the multi path.
+    let ranked_best = rank_openimages(&oi_plates, &mut log);
+    if let Some(oi_idx) = ranked_best {
+        let hit = &oi_plates[oi_idx];
         log.push(format!(
             "path: openimages box {} by {}",
             hit.label, hit.plate.provenance.author
