@@ -129,6 +129,86 @@ impl HumanGenome {
         base.blendshape(&deltas, self.smile)
     }
 
+    /// Genome from measured truth: eye spacing maps from observed
+    /// donor ratios into morph space by min-max normalization OVER
+    /// THIS REQUEST'S DONORS — no programmed anatomical range. One
+    /// distinct value (or none usable) lands mid-morph, stated. Skin
+    /// tone rides along when measured. Every value carries whether it
+    /// was measured or defaulted, plus the receipt line.
+    pub fn from_measured(eye_ratios: &[f64], skin: Option<Rgb>, donors: usize) -> (Self, String) {
+        let morph_of = |r: f64, vals: &[f64]| {
+            let lo = vals.iter().cloned().fold(f64::INFINITY, f64::min);
+            let hi = vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            if !lo.is_finite() || hi <= lo {
+                0.5
+            } else {
+                ((r - lo) / (hi - lo)).clamp(0.0, 1.0)
+            }
+        };
+        let eye_spacing = if eye_ratios.is_empty() {
+            0.5
+        } else {
+            let mut v = eye_ratios.to_vec();
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            morph_of(v[v.len() / 2], eye_ratios)
+        };
+        let eye_evidence = if eye_ratios.len() >= 2 {
+            PropertyEvidence::Researched(format!("{} donor eye locks", eye_ratios.len()))
+        } else {
+            PropertyEvidence::Stylistic("mid-morph: fewer than 2 distinct locks".to_string())
+        };
+        let (tone, tone_note) = match skin {
+            Some(c) => (c, "measured tone"),
+            None => (Rgb::new(200, 150, 115), "default tone (unmeasured)"),
+        };
+        let genome = HumanGenome {
+            age_years: 32,
+            skin_tone: tone,
+            hair_color: Rgb::new(60, 38, 24),
+            cranial_width: GenomeParam {
+                value: 0.5,
+                evidence: PropertyEvidence::Stylistic("renderer default".to_string()),
+            },
+            jaw_width: GenomeParam {
+                value: 0.5,
+                evidence: PropertyEvidence::Stylistic("renderer default".to_string()),
+            },
+            cheek_projection: GenomeParam {
+                value: 0.5,
+                evidence: PropertyEvidence::Stylistic("renderer default".to_string()),
+            },
+            nose_length: GenomeParam {
+                value: 0.5,
+                evidence: PropertyEvidence::Stylistic("renderer default".to_string()),
+            },
+            nose_width: GenomeParam {
+                value: 0.5,
+                evidence: PropertyEvidence::Stylistic("renderer default".to_string()),
+            },
+            eye_spacing: GenomeParam {
+                value: eye_spacing,
+                evidence: eye_evidence,
+            },
+            lip_fullness: GenomeParam {
+                value: 0.5,
+                evidence: PropertyEvidence::Stylistic("renderer default".to_string()),
+            },
+            chin_projection: GenomeParam {
+                value: 0.5,
+                evidence: PropertyEvidence::Stylistic("renderer default".to_string()),
+            },
+            smile: 0.0,
+        };
+        let receipt = format!(
+            "genome from measured truth: eye_spacing morph {:.3} ({} locks), {}; donors {}",
+            eye_spacing,
+            eye_ratios.len(),
+            tone_note,
+            donors
+        );
+        (genome, receipt)
+    }
+
     /// Human-readable inspection: every property, value, evidence.
     /// The engine (and editors) read people through this, never
     /// through struct internals.
@@ -240,5 +320,38 @@ mod tests {
         // 3 header lines + 8 morphs + smile.
         assert_eq!(desc.len(), 12, "{:?}", desc);
         assert!(desc.iter().all(|l| l.contains('[') || l.contains(':')));
+    }
+
+    #[test]
+    fn genome_grows_from_measured_ratios() {
+        // Donor eye ratios in: morph comes out normalized, evidence
+        // researched, receipt names the lock count.
+        let (g, receipt) = HumanGenome::from_measured(
+            &[0.24, 0.31, 0.29, 0.35, 0.27],
+            Some(Rgb::new(200, 150, 115)),
+            5,
+        );
+        assert!((0.0..=1.0).contains(&g.eye_spacing.value));
+        assert!(matches!(
+            g.eye_spacing.evidence,
+            PropertyEvidence::Researched(_)
+        ));
+        assert_eq!(g.skin_tone, Rgb::new(200, 150, 115));
+        assert!(receipt.contains("5"), "{}", receipt);
+        // Same inputs twice: same genome (deterministic).
+        let (g2, _) = HumanGenome::from_measured(
+            &[0.24, 0.31, 0.29, 0.35, 0.27],
+            Some(Rgb::new(200, 150, 115)),
+            5,
+        );
+        assert_eq!(g.eye_spacing.value, g2.eye_spacing.value);
+        // Nothing measured: mid-morph, stated — never invented.
+        let (g3, receipt3) = HumanGenome::from_measured(&[], None, 0);
+        assert_eq!(g3.eye_spacing.value, 0.5);
+        assert!(matches!(
+            g3.eye_spacing.evidence,
+            PropertyEvidence::Stylistic(_)
+        ));
+        assert!(receipt3.contains("(0 locks)"), "{}", receipt3);
     }
 }

@@ -428,9 +428,221 @@ fn finish_from_frame_margin(
     Ok((out, log))
 }
 
+/// Spatial relation between two photographic subjects. Positions are
+/// compositional choices stated in canvas fractions — never claimed
+/// as measured poses. Beside splits the frame; InLap seats B small
+/// and low-center over A (a lap is where laps are).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssemblyRelation {
+    Beside,
+    InLap,
+}
+
+/// One mounted subject: whole-plate photograph plus provenance name.
+/// Whole plates, stated: without per-subject ground boxes there is
+/// no honest cutout, so each photo arrives entire and the relation
+/// places the frames, never invented silhouettes.
+pub struct MountedSubject<'a> {
+    pub image: &'a Image,
+    pub label: &'a str,
+}
+
+/// Assembly receipt: sources in mount order, placements, ops.
+#[derive(Debug, Clone)]
+pub struct AssemblyLog {
+    pub sources: Vec<String>,
+    pub placements: Vec<String>,
+    pub background: String,
+    pub ops: Vec<String>,
+}
+
+fn rect_mask(out_w: u32, out_h: u32, ox: u32, oy: u32, sw: u32, sh: u32) -> Vec<bool> {
+    let mut mask = vec![false; (out_w * out_h) as usize];
+    for y in oy..(oy + sh).min(out_h) {
+        for x in ox..(ox + sw).min(out_w) {
+            mask[(y * out_w + x) as usize] = true;
+        }
+    }
+    mask
+}
+
+fn fit_inside(img: &Image, max_w: u32, max_h: u32) -> Image {
+    let fit = (max_h as f64 / img.height.max(1) as f64)
+        .min(max_w as f64 / img.width.max(1) as f64)
+        .min(4.0);
+    let sw = ((img.width as f64 * fit).round() as u32).max(1);
+    let sh = ((img.height as f64 * fit).round() as u32).max(1);
+    img.resize_smooth(sw, sh)
+}
+
+/// Mount two whole-plate subjects on one backdrop per relation.
+/// Deterministic: same inputs, same pixels (fixed-seed grain).
+/// Refuses tiny canvases rather than stacking slivers.
+pub fn assemble_two(
+    a: &MountedSubject,
+    b: &MountedSubject,
+    relation: AssemblyRelation,
+    backdrop_plate: Option<(&Image, &str)>,
+    out_w: u32,
+    out_h: u32,
+) -> Result<(Image, AssemblyLog), String> {
+    if out_w < 32 || out_h < 32 {
+        return Err("canvas too small to mount two subjects — refusing".to_string());
+    }
+    let mut ops = vec![format!(
+        "relation {:?}: {} + {} (whole plates, stated)",
+        relation, a.label, b.label
+    )];
+    // Layout in canvas fractions (stated compositional choices).
+    let (aw, ah, bw, bh, ax, ay, bx, by) = match relation {
+        AssemblyRelation::Beside => {
+            let (aw, ah) = (out_w / 2, out_h * 88 / 100);
+            let (bw, bh) = (out_w / 2, out_h * 88 / 100);
+            (
+                aw,
+                ah,
+                bw,
+                bh,
+                0,
+                out_h * 6 / 100,
+                out_w / 2,
+                out_h * 6 / 100,
+            )
+        }
+        AssemblyRelation::InLap => {
+            let (aw, ah) = (out_w, out_h * 88 / 100);
+            let (bw, bh) = (out_w, out_h * 45 / 100);
+            (
+                aw,
+                ah,
+                bw,
+                bh,
+                0,
+                out_h * 6 / 100,
+                0,
+                out_h.saturating_sub(out_h * 45 / 100 + out_h * 6 / 100),
+            )
+        }
+    };
+    let mut fa = fit_inside(a.image, aw.max(1), ah.max(1));
+    let mut fb = fit_inside(b.image, bw.max(1), bh.max(1));
+    // Center each fitted photo inside its frame slot.
+    let aox = ax + aw.saturating_sub(fa.width) / 2;
+    let aoy = ay + ah.saturating_sub(fa.height) / 2;
+    let box_ = bx + bw.saturating_sub(fb.width) / 2;
+    let boy = by + bh.saturating_sub(fb.height) / 2;
+    ops.push(format!(
+        "fit A {}x{} at ({},{}) + B {}x{} at ({},{}) keep-aspect",
+        fa.width, fa.height, aox, aoy, fb.width, fb.height, box_, boy
+    ));
+    let feather_r = (out_w / 160).max(2);
+    let (backdrop, background_note) = match backdrop_plate {
+        Some((bg_img, bg_name)) => (
+            bg_img.resize_smooth(out_w, out_h),
+            format!("sourced backdrop {}", bg_name),
+        ),
+        None => (
+            studio_backdrop(out_w, out_h, Rgb::new(72, 72, 82), Rgb::new(28, 28, 34)),
+            "studio gradient".to_string(),
+        ),
+    };
+    let bg_mean = backdrop.mean_brightness();
+    let lift_a = fa.match_luma(bg_mean);
+    let lift_b = fb.match_luma(bg_mean);
+    // Mount order: A first, B over A (lap-sitter rides on top).
+    let mut fg = Image::blank(out_w, out_h, Rgb::new(0, 0, 0));
+    fg.overlay(&fa, aox, aoy);
+    let alpha_a = Image::feather(
+        &rect_mask(out_w, out_h, aox, aoy, fa.width, fa.height),
+        out_w,
+        out_h,
+        feather_r,
+    );
+    let mut mounted = Image::composite(&fg, &backdrop, &alpha_a)?;
+    let mut fg2 = Image::blank(out_w, out_h, Rgb::new(0, 0, 0));
+    fg2.overlay(&fb, box_, boy);
+    let alpha_b = Image::feather(
+        &rect_mask(out_w, out_h, box_, boy, fb.width, fb.height),
+        out_w,
+        out_h,
+        feather_r,
+    );
+    mounted = Image::composite(&fg2, &mounted, &alpha_b)?;
+    // Contact shadow under the lower subject grounds the mount.
+    let feet_y = (boy + fb.height).min(out_h);
+    let shadow = Image::contact_shadow(out_w, out_h, (box_, feet_y, box_ + fb.width, feet_y), 0.35);
+    mounted.apply_shadow(&shadow);
+    mounted.grain(0xC0FFEE, 4);
+    mounted.vignette(0.22);
+    ops.push(format!(
+        "feather r{}, luma lifts {:+.1}/{:+.1}, contact shadow, grain, vignette",
+        feather_r, lift_a, lift_b
+    ));
+    Ok((
+        mounted,
+        AssemblyLog {
+            sources: vec![a.label.to_string(), b.label.to_string()],
+            placements: vec![
+                format!("A at ({},{}) {}x{}", aox, aoy, fa.width, fa.height),
+                format!("B at ({},{}) {}x{}", box_, boy, fb.width, fb.height),
+            ],
+            background: background_note,
+            ops,
+        },
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn flat_plate(r: u8, g: u8, b: u8) -> Image {
+        Image::blank(120, 100, Rgb::new(r, g, b))
+    }
+
+    #[test]
+    fn assembly_mounts_two_plates_per_relation() {
+        let blue = flat_plate(60, 80, 200);
+        let green = flat_plate(40, 160, 60);
+        let a = MountedSubject {
+            image: &blue,
+            label: "a-test",
+        };
+        let b = MountedSubject {
+            image: &green,
+            label: "b-test",
+        };
+        // Beside: left reads A-blue, right reads B-green.
+        let (img, log) =
+            assemble_two(&a, &b, AssemblyRelation::Beside, None, 64, 48).expect("beside assembles");
+        assert_eq!((img.width, img.height), (64, 48));
+        let left = img.get(4, 24).unwrap();
+        let right = img.get(59, 24).unwrap();
+        assert!(left.b > left.g, "left must read A {:?}", left);
+        assert!(right.g > right.b, "right must read B {:?}", right);
+        assert_eq!(
+            log.sources,
+            vec!["a-test".to_string(), "b-test".to_string()]
+        );
+        // InLap: top reads A (host), low-center reads B (sitter).
+        let (img2, log2) =
+            assemble_two(&a, &b, AssemblyRelation::InLap, None, 64, 48).expect("inlap assembles");
+        let top = img2.get(32, 5).unwrap();
+        let lap = img2.get(32, 40).unwrap();
+        assert!(top.b > top.g, "top must read host A {:?}", top);
+        assert!(lap.g > lap.b, "low-center must read sitter B {:?}", lap);
+        assert!(log2.ops[0].contains("InLap"), "{:?}", log2.ops);
+        // Deterministic: same inputs, same bytes.
+        let (img3, _) =
+            assemble_two(&a, &b, AssemblyRelation::Beside, None, 64, 48).expect("reassembles");
+        for y in (0..48).step_by(5) {
+            for x in (0..64).step_by(5) {
+                assert_eq!(img.get(x, y), img3.get(x, y));
+            }
+        }
+        // Tiny canvas refuses instead of stacking slivers.
+        assert!(assemble_two(&a, &b, AssemblyRelation::Beside, None, 16, 16).is_err());
+    }
 
     fn skin_patch() -> Image {
         // Skin rect on a blue field: the only skin in the frame.

@@ -28,6 +28,16 @@
       "researched": false
     },
     {
+      "note": "no researched model yet — canon/default construction",
+      "requirement": "object:straw_3",
+      "researched": false
+    },
+    {
+      "note": "unresolved at assembly — not rendered",
+      "requirement": "open: straw_3 (straw): no placement rule — needs evidence",
+      "researched": false
+    },
+    {
       "note": "unresolved at assembly — not rendered",
       "requirement": "open: salute hand 0.55m from head — pose misses",
       "researched": false
