@@ -356,3 +356,33 @@ fn elephant_crossing_river_parses_generically() {
             .collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn cat_sitting_in_lap_parses_with_roles() {
+    // Two subjects (human + unclassified cat), the cat as actor
+    // (doer precedes deed), sitting in the lap object. Nothing
+    // programmed about cats — all three nouns are research orders.
+    let spec = parse_scene("Cat sitting in human's lap.");
+    assert_eq!(spec.subjects.len(), 2);
+    assert!(spec.subjects.iter().any(|s| s.stype == "human"));
+    assert!(spec.subjects.iter().any(|s| s.stype == "cat"));
+    assert_eq!(spec.actions.len(), 1);
+    assert_eq!(spec.actions[0].atype, "sit");
+    assert_eq!(spec.actions[0].actor, "cat");
+    assert_eq!(spec.actions[0].target.as_deref(), Some("lap"));
+    assert!(spec.objects.iter().any(|o| o.otype == "lap"));
+
+    let plan = plan_research(&spec);
+    assert!(
+        plan.iter().any(|q| q
+            .queries
+            .iter()
+            .any(|s| s.contains("cat") && s.contains("anatomy"))),
+        "cat anatomy query missing"
+    );
+    assert!(
+        plan.iter()
+            .any(|q| q.queries.iter().any(|s| s.contains("sitting"))),
+        "sitting query missing"
+    );
+}

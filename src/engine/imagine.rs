@@ -48,8 +48,16 @@ pub struct Brief {
 }
 
 pub fn parse_brief(prose: &str) -> Brief {
+    // Whole-token matching (never substrings): "human" contains
+    // "man" as characters but is not a man, and that bleed once sent
+    // a cat prompt down the man-portrait path. Verbs match base and
+    // -ing forms explicitly; props match singulars and plurals.
     let lower = prose.to_lowercase();
-    let has = |w: &str| lower.contains(w);
+    let tokens: Vec<&str> = lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    let has = |w: &str| tokens.contains(&w);
     let subject = if has("woman") || has("female") || has("lady") || has("girl") {
         SubjectKind::Woman
     } else if has("man") || has("male") || has("gentleman") || has("boy") {
@@ -59,20 +67,22 @@ pub fn parse_brief(prose: &str) -> Brief {
     };
     let pose = if has("peace") {
         "peace sign".to_string()
-    } else if has("salut") {
+    } else if has("salute") || has("salutes") || has("saluting") || has("saluted") {
         "saluting".to_string()
-    } else if has("cross") {
+    } else if has("cross") || has("crosses") || has("crossing") || has("crossed") {
         "crossing".to_string()
-    } else if has("wav") {
+    } else if has("sit") || has("sits") || has("sitting") || has("sat") {
+        "sitting".to_string()
+    } else if has("wave") || has("waves") || has("waving") || has("waved") {
         "waving".to_string()
     } else {
         "standing".to_string()
     };
     let mut props = Vec::new();
-    if has("rose") || has("flower") || has("bouquet") {
+    if has("rose") || has("roses") || has("flower") || has("flowers") || has("bouquet") {
         props.push(PropKind::Roses);
     }
-    if has("flag") {
+    if has("flag") || has("flags") {
         props.push(PropKind::Flag);
     }
     Brief {
@@ -353,7 +363,10 @@ pub fn build_subject_query(
     if generic {
         return match place {
             Some(p) => format!("{} {}", subject_word, p),
-            None => format!("{} wildlife photograph", subject_word),
+            // No pose words, no habitat words: the noun photographs
+            // itself. ("Wildlife" editorializing was wrong for laps,
+            // laps, and living rooms — removed.)
+            None => format!("{} photograph", subject_word),
         };
     }
     let mut query = if brief.pose != "standing" {
@@ -406,28 +419,19 @@ pub async fn imagine(
     // Subject query follows the ask (pose/subject/props words feed
     // research now); backdrop query seeks a place — or the named prop.
     // Unclassified subjects come from the scene parse (researched,
-    // never guessed): the brief only knows people by keyword.
-    let is_generic = matches!(brief.subject, SubjectKind::Person)
-        && !prose.to_lowercase().contains("person")
-        && !prose.to_lowercase().contains("human")
-        && !prose.to_lowercase().contains("people");
-    let subject_word: String = match brief.subject {
-        SubjectKind::Woman => "woman".to_string(),
-        SubjectKind::Man => "man".to_string(),
-        SubjectKind::Person => {
-            if is_generic {
-                super::scene_intent::parse_scene(prose)
-                    .subjects
-                    .first()
-                    .map(|s| s.stype.clone())
-                    .filter(|s| !matches!(s.as_str(), "man" | "woman" | "human"))
-                    .unwrap_or_else(|| "person".to_string())
-            } else {
-                "person".to_string()
-            }
-        }
+    // never guessed): a Person brief with a non-human scene subject
+    // researches that noun. The brief only knows people by keyword.
+    let scene_word = super::scene_intent::parse_scene(prose)
+        .subjects
+        .into_iter()
+        .find(|s| !matches!(s.stype.as_str(), "man" | "woman" | "human"))
+        .map(|s| s.stype);
+    let (subject_word, generic) = match (&brief.subject, scene_word) {
+        (SubjectKind::Woman, _) => ("woman".to_string(), false),
+        (SubjectKind::Man, _) => ("man".to_string(), false),
+        (SubjectKind::Person, Some(w)) => (w, true),
+        (SubjectKind::Person, None) => ("person".to_string(), false),
     };
-    let generic = subject_word != "woman" && subject_word != "man" && subject_word != "person";
     let place = place_word(prose);
     let query = sanitize_search_query(&build_subject_query(&brief, &subject_word, generic, place));
     log.push(format!("research: query {:?}", query));
@@ -668,6 +672,8 @@ mod tests {
         assert_eq!(b.pose, "crossing");
         let b = parse_brief("person waving");
         assert_eq!(b.pose, "waving");
+        let b = parse_brief("cat sitting in human's lap");
+        assert_eq!(b.pose, "sitting");
     }
 
     #[test]
@@ -681,7 +687,7 @@ mod tests {
         );
         assert_eq!(
             build_subject_query(&b, "elephant", true, None),
-            "elephant wildlife photograph"
+            "elephant photograph"
         );
         // People keep pose-portraits.
         let w = parse_brief("woman waving");

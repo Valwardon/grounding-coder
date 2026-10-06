@@ -288,7 +288,16 @@ async fn picture_fallback_evidence(
                 break;
             }
             let need = (per - have) as u32;
-            if src == "openimages" {
+            // OpenImages is a people-only index: only human subject
+            // requirements sweep it. A cat requirement answered with
+            // Woman boxes would be a false candidate set — Commons
+            // serves every other subject through the same gates.
+            let people_subject = matches!(req.category, super::evidence::Category::Subject)
+                && matches!(
+                    req.concept.as_str(),
+                    "man" | "woman" | "human" | "person" | "people"
+                );
+            if src == "openimages" && people_subject {
                 let cache = out_dir.join(".oicache");
                 let (found, refused) =
                     super::plates::openimages::search_openimages(&cache, q, need).await;
@@ -462,6 +471,8 @@ mod tests {
         // Still out: action-less scenes and code tasks.
         assert!(!is_picture_request("An elephant."));
         assert!(!is_picture_request("A tower out of glass."));
+        // The sitter precedes the seat: a picture request.
+        assert!(is_picture_request("Cat sitting in human's lap."));
     }
 
     #[test]

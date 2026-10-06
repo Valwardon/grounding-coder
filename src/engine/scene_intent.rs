@@ -64,6 +64,10 @@ const LEXICON: &[(&str, &str)] = &[
     ("waves", "wave"),
     ("waved", "wave"),
     ("waving", "wave"),
+    ("sit", "sit"),
+    ("sits", "sit"),
+    ("sitting", "sit"),
+    ("sat", "sit"),
     ("cross", "cross"),
     ("crosses", "cross"),
     ("crossed", "cross"),
@@ -121,6 +125,7 @@ const ONTOLOGY: &[(&str, ConceptKind, &[&str])] = &[
     ("woman", ConceptKind::Human, &["proportions", "photograph"]),
     ("human", ConceptKind::Human, &["proportions", "photograph"]),
     ("salute", ConceptKind::Action, &["pose-reference", "joints"]),
+    ("sit", ConceptKind::Action, &["pose-reference", "seat"]),
     ("cross", ConceptKind::Action, &["motion-reference", "place"]),
     (
         "wave",
@@ -257,40 +262,77 @@ pub fn parse_scene(prose: &str) -> SceneSpec {
             attributes,
         });
     }
-    // Material edge FIRST (Wikidata `material-used` analogue): "X made
-    // of Y" binds ANY Y to X's material slot via the understander's
+    // Material edge (Wikidata `material-used` analogue): "X made of
+    // Y" binds ANY Y to X's material slot via the understander's
     // deterministic grammar — no material is ever a scene object.
+    // Needed before role assignment below (edge words belong
+    // elsewhere, never as subjects or objects).
     let material_edge = super::understand::extract_material(prose);
-    // Generic subject (open vocabulary): with no known human, the
-    // first unknown content word becomes a research-candidate subject
-    // ("elephant crossing a river" → elephant). Doctrine: the parser
-    // proposes, research disposes — an unclassified noun is a work
-    // order for the knowledge graph, never a silent drop and never a
-    // programmed classification. Skipped: stopwords, known concepts,
-    // material-edge markers and edge words (they belong elsewhere).
-    if subjects.is_empty() {
-        let edge_markers = ["made", "out", "from", "built", "constructed"];
-        let edge_words: Vec<&str> = material_edge
-            .as_ref()
-            .map(|(b, m)| vec![b.as_str(), m.as_str()])
-            .unwrap_or_default();
-        if let Some(word) = folded.iter().find(|w| {
-            !STOPWORDS.contains(&w.as_str())
-                && concept_of(w).is_none()
-                && !edge_markers.contains(&w.as_str())
-                && !edge_words.contains(&w.as_str())
-                && w.len() > 2
-        }) {
-            subjects.push(Subject {
-                stype: word.clone(),
-                attributes: vec!["unclassified".to_string()],
-            });
+    // Open vocabulary role assignment: unknown content words take
+    // roles by POSITION relative to the first action verb — before
+    // it they are subject candidates ("cat sitting…", "elephant
+    // crossing…"), after it object candidates ("…in human's lap").
+    // With no verb at all, unknowns are object candidates only (never
+    // phantom subjects for verbless prose like "do the thing").
+    // Doctrine: the parser proposes, research disposes — an
+    // unclassified noun is a work order for the knowledge graph,
+    // never a silent drop and never a programmed classification.
+    let edge_markers = ["made", "out", "from", "built", "constructed"];
+    let edge_words: Vec<&str> = material_edge
+        .as_ref()
+        .map(|(b, m)| vec![b.as_str(), m.as_str()])
+        .unwrap_or_default();
+    let unknown_content = |w: &String| {
+        !STOPWORDS.contains(&w.as_str())
+            && concept_of(w).is_none()
+            && !edge_markers.contains(&w.as_str())
+            && !edge_words.contains(&w.as_str())
+            && w.len() > 2
+    };
+    let verb_at = folded.iter().position(|w| {
+        concept_of(w).is_some_and(|c| kind_of(c).is_some_and(|k| k == ConceptKind::Action))
+    });
+    let mut generic_subjects: Vec<String> = Vec::new();
+    let mut generic_objects: Vec<String> = Vec::new();
+    for (i, w) in folded.iter().enumerate() {
+        if !unknown_content(w) || generic_subjects.contains(w) || generic_objects.contains(w) {
+            continue;
+        }
+        match verb_at {
+            Some(v) if i < v => generic_subjects.push(w.clone()),
+            Some(_) => generic_objects.push(w.clone()),
+            None => generic_objects.push(w.clone()),
         }
     }
-    let actor = subjects
-        .first()
-        .map(|s| s.stype.clone())
-        .unwrap_or_else(|| "subject".to_string());
+    for word in &generic_subjects {
+        subjects.push(Subject {
+            stype: word.clone(),
+            attributes: vec!["unclassified".to_string()],
+        });
+    }
+    // Actor: nearest subject before the verb (the doer precedes the
+    // deed: "cat sitting" → cat), else the first subject.
+    let actor = match verb_at {
+        Some(v) => {
+            let folded_subjects: Vec<&String> = folded[..v]
+                .iter()
+                .filter(|w| {
+                    subjects
+                        .iter()
+                        .any(|s| &s.stype == *w || s.attributes.iter().any(|a| a == *w))
+                })
+                .collect();
+            folded_subjects
+                .last()
+                .map(|w| w.to_string())
+                .or_else(|| subjects.first().map(|s| s.stype.clone()))
+                .unwrap_or_else(|| "subject".to_string())
+        }
+        None => subjects
+            .first()
+            .map(|s| s.stype.clone())
+            .unwrap_or_else(|| "subject".to_string()),
+    };
 
     // Objects: wearable / fabric / place concepts in prose order.
     let mut objects: Vec<SceneObject> = Vec::new();
@@ -319,6 +361,21 @@ pub fn parse_scene(prose: &str) -> SceneSpec {
             }
             _ => {}
         }
+    }
+
+    // Generic objects (open vocabulary): post-verb unknown nouns
+    // become research-candidate objects ("…in human's lap" → lap).
+    // Same doctrine as generic subjects: proposed, never classified.
+    for word in &generic_objects {
+        counter += 1;
+        objects.push(SceneObject {
+            id: format!("{}_{}", word, counter),
+            otype: word.clone(),
+            attributes: vec!["unclassified".to_string()],
+            state: Vec::new(),
+            worn_by: None,
+            material: None,
+        });
     }
 
     // Bind the material edge onto the matching object — or onto a
@@ -409,6 +466,20 @@ pub fn parse_scene(prose: &str) -> SceneSpec {
             atype: "stand".to_string(),
             actor: actor.clone(),
             target: place,
+            object: None,
+            ambiguous: false,
+        });
+    }
+    if has("sit") {
+        // "sitting in/on X" sits in the named object or place, if any.
+        let seat = objects.first().map(|o| o.otype.clone());
+        if seat.is_none() {
+            unresolved.push("sit: no seat named — needs evidence".to_string());
+        }
+        actions.push(SceneAction {
+            atype: "sit".to_string(),
+            actor: actor.clone(),
+            target: seat,
             object: None,
             ambiguous: false,
         });
@@ -566,6 +637,17 @@ pub fn plan_research(spec: &SceneSpec) -> Vec<ResearchQuery> {
                 requirement: format!("action: stand {}", a.target.as_deref().unwrap_or("nowhere")),
                 queries: vec!["standing full-body pose reference".to_string()],
                 capability: "articulated-pose",
+            }),
+            // Sitting is photographed posture, not articulated joints:
+            // a real seated photo needs no rig, so the montage
+            // capability (supported) consumes it, honestly stated.
+            "sit" => out.push(ResearchQuery {
+                requirement: format!("action: sit {}", a.target.as_deref().unwrap_or("nowhere")),
+                queries: vec![
+                    "sitting pose reference".to_string(),
+                    "seated figure photograph".to_string(),
+                ],
+                capability: "photo-montage",
             }),
             "peace_sign" => out.push(ResearchQuery {
                 requirement: "action: peace_sign".to_string(),
