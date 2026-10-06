@@ -43,6 +43,7 @@ pub mod symbols;
 pub mod synth;
 pub mod synthesize;
 pub mod tasks;
+pub mod taxon;
 pub mod truth;
 pub mod understand;
 pub mod unknown;
