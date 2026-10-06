@@ -35,6 +35,7 @@ pub mod research;
 pub mod restore;
 pub mod scene;
 pub mod scene_intent;
+pub mod seek;
 pub mod self_model;
 pub mod skeleton;
 pub mod studio;
