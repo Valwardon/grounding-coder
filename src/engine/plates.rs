@@ -951,11 +951,15 @@ pub mod openimages {
     pub const BOY: &str = "/m/01bl7v";
 
     /// One annotated person: the plate plus its box as fractions.
+    /// `total_boxes` counts every annotated box on the source image
+    /// (all labels, not just the target): crowded scenes rank below
+    /// clean portraits when the caller prefers simplicity.
     #[derive(Debug, Clone)]
     pub struct OpenPlate {
         pub plate: SourcedPlate,
         pub bbox: (f64, f64, f64, f64),
         pub label: String,
+        pub total_boxes: usize,
     }
 
     /// Query words to target/excluded label sets. "man" has no
@@ -1110,9 +1114,13 @@ pub mod openimages {
         };
         let (targets, excluded) = labels_for(query);
         // Pass 1 (boxes): target rows per image + excluded image set.
+        // Every row also counts toward its image's total (all labels):
+        // crowded scenes are measurable without knowing any label's
+        // meaning.
         let mut hits: std::collections::HashMap<String, Vec<BoxRow>> =
             std::collections::HashMap::new();
         let mut banned: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut totals: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         let bbox_text = match std::fs::read_to_string(&bbox_path) {
             Ok(t) => t,
             Err(e) => {
@@ -1124,6 +1132,7 @@ pub mod openimages {
             let Some(row) = parse_box_row(line) else {
                 continue;
             };
+            *totals.entry(row.image.clone()).or_insert(0) += 1;
             if excluded.contains(&row.label.as_str()) {
                 banned.insert(row.image.clone());
             }
@@ -1237,6 +1246,7 @@ pub mod openimages {
                             },
                             bbox: (row.x0, row.y0, row.x1, row.y1),
                             label: row.label.clone(),
+                            total_boxes: totals.get(&id).copied().unwrap_or(1),
                         }),
                         Err(e) => refused.push(format!("{}: {}", id, e)),
                     },

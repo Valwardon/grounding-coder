@@ -492,13 +492,17 @@ fn is_people_word(w: &str) -> bool {
 /// photo (nothing learned), edge-cropped boxes bleed, and
 /// name-titled plates name an identified person — automatic selection
 /// skips them (logged) while the library keeps them listed. Sample
-/// curation stays human either way. Shared by the single and multi
-/// paths so both rank identically.
+/// curation stays human either way. With `prefer_simple`, images with
+/// fewer annotated boxes rank first (a clean portrait over a crowded
+/// scene — box counts, never label meanings); ties and the default
+/// path rank by box area. Shared by the single and multi paths so
+/// both rank identically.
 fn rank_openimages(
     oi_plates: &[super::plates::openimages::OpenPlate],
     log: &mut Vec<String>,
+    prefer_simple: bool,
 ) -> Option<usize> {
-    let mut ranked: Vec<(usize, f64)> = oi_plates
+    let mut ranked: Vec<(usize, usize, f64)> = oi_plates
         .iter()
         .enumerate()
         .filter_map(|(i, hit)| {
@@ -525,11 +529,18 @@ fn rank_openimages(
                 ));
                 return None;
             }
-            Some((i, area))
+            Some((i, hit.total_boxes, area))
         })
         .collect();
-    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    ranked.first().map(|(i, _)| *i)
+    ranked.sort_by(|a, b| {
+        if prefer_simple {
+            a.1.cmp(&b.1)
+                .then(b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal))
+        } else {
+            b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal)
+        }
+    });
+    ranked.first().map(|(i, _, _)| *i)
 }
 
 /// Crop a ground-truth box with margin for mounting: expand 25%
@@ -576,7 +587,7 @@ async fn attempt_multi(
             for r in &oi_refused {
                 log.push(format!("multi openimages refused: {}", r));
             }
-            match rank_openimages(&oi_plates, &mut log) {
+            match rank_openimages(&oi_plates, &mut log, true) {
                 Some(idx) => {
                     let hit = &oi_plates[idx];
                     log.push(format!(
@@ -861,8 +872,9 @@ async fn attempt(
         log.push(format!("openimages refused: {}", r));
     }
     log.push(format!("openimages: {} plate(s)", oi_plates.len()));
-    // Best sane box wins — same ranker as the multi path.
-    let ranked_best = rank_openimages(&oi_plates, &mut log);
+    // Best sane box wins — same ranker as the multi path (default
+    // area order; multi asks for simplicity first).
+    let ranked_best = rank_openimages(&oi_plates, &mut log, false);
     if let Some(oi_idx) = ranked_best {
         let hit = &oi_plates[oi_idx];
         log.push(format!(
@@ -1035,6 +1047,34 @@ mod tests {
         assert_eq!(b.pose, "waving");
         let b = parse_brief("cat sitting in human's lap");
         assert_eq!(b.pose, "sitting");
+    }
+
+    #[test]
+    fn ranker_prefers_simplicity_only_when_asked() {
+        use super::super::plates::openimages::OpenPlate;
+        // Crowded scene with the bigger box vs clean portrait with a
+        // smaller one: default takes area, simplicity takes the portrait.
+        let mk = |box_: (f64, f64, f64, f64), total: usize| OpenPlate {
+            plate: SourcedPlate {
+                image: Image::blank(100, 100, Rgb::new(10, 10, 10)),
+                provenance: PlateProvenance {
+                    source_url: "s".to_string(),
+                    page_url: "s".to_string(),
+                    author: "plain author".to_string(),
+                    license: "t".to_string(),
+                },
+                basis: "t".to_string(),
+                title: "t".to_string(),
+            },
+            bbox: box_,
+            label: "x".to_string(),
+            total_boxes: total,
+        };
+        let plates = vec![mk((0.1, 0.1, 0.8, 0.8), 24), mk((0.2, 0.2, 0.6, 0.6), 2)];
+        let mut log = Vec::new();
+        assert_eq!(rank_openimages(&plates, &mut log, false), Some(0));
+        assert_eq!(rank_openimages(&plates, &mut log, true), Some(1));
+        assert!(log.is_empty(), "clean plates log nothing: {:?}", log);
     }
 
     #[test]
