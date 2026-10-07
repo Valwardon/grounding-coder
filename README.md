@@ -139,26 +139,29 @@ Oracle verify (compiler / tests / parser per language)
   decode via the `image` crate, BMP plus manifest carrying the
   license basis for audit. (`src/engine/plates.rs`, `gc plate`;
   first plate in `samples/plates/` with full provenance)
-- **Photographic portraits from plates** — classical segmentation
-  (skin locus + luminance floor, morphology, largest blob with a
-  compactness gate), keep-aspect framing on a studio backdrop,
-  feathered edges, matched finish. Refuses implausible masks with
-  the reason instead of compositing furniture. Every output pixel
-  traces to its source plate via the op log.
-  (`src/engine/compose.rs`, `gc compose`;
-  `samples/photo-composite-640x800.bmp` from a CC0 plate)
+- **Plates as research material, never montage** — reference
+  photographs are measured (skin-tone medians, framing, backdrop
+  palettes, ground-truth person boxes as tone/proportion donors),
+  then a fresh image is rendered from those numbers. No donor
+  pixel reaches the output; every requirement carries a
+  researched-or-defaulted receipt that names ROM-table seeds for
+  what live plates have not taught yet.
+  (`src/engine/imagine.rs`, `gc imagine`;
+  `samples/fresh-proof-640x480.bmp` from six banked plates)
 - **Queryable anatomy, no vectors** — a researched partonomy graph
   (bones, vessels, relations: part-of, articulates, supplied-by)
   answers "vessels near the distal phalanges" by graph walk, with
   Gray's Anatomy citations; joint ROM tables validate poses instead
   of imagining them, with hair and physique notes alongside.
   (`src/engine/anatomy.rs`)
-- **Imagine** — one command from prose to photo: brief, reference
-  research across Commons, web search, and Open Images (adult-
-  filtered ground-truth boxes), palette/composition study, then a
-  two-source montage of real people in real places. Refuses rather
-  than meshing block figures. (`src/engine/imagine.rs`,
-  `gc imagine`; samples in `samples/`)
+- **Imagine** — one command from prose to photo: intent research
+  (intent → research plan → classified subjects → structural
+  questions on skeleton, skin, hair), reference research across
+  Commons, web search, and Open Images (adult-filtered boxes as
+  measurement donors), palette/composition study, then fresh
+  construction from the measurements. (`src/engine/imagine.rs`,
+  `src/engine/intent_research.rs`, `gc imagine`;
+  samples in `samples/`)
 - **Family restoration** — dust and scratch detection with
   classical operators, Laplacian inpainting, full defect reports.
   Your photos edit with no refusal path anywhere.
@@ -254,7 +257,7 @@ Oracle verify (compiler / tests / parser per language)
 
 | Suite | Tests | What it proves |
 |---|---|---|
-| lib (unit) | 166 | recipes, ranker (importance-weighted), catalog, pathfind, parsers, manifests, guards, families, understander (slot satisfaction, vector synonyms, kind synonyms, material relations), scene-intent IR (lexicon, spec, planner, capabilities), disposition, web research, knowledge lifecycle (consolidation, evidence tiers), compiler probes, deterministic vision (pixels, film finish, masks, compositing, collages, roses, shadows, photo-first, ground-truth boxes, inpainting, restoration), plate sourcing + provenance (Commons, web search, Open Images), backend affordances, imagine trajectory, movement knowledge, genome humans (mesh, morphs, evidence, figures, type schemas) |
+| lib (unit) | 166 | recipes, ranker (importance-weighted), catalog, pathfind, parsers, manifests, guards, families, understander (slot satisfaction, vector synonyms, kind synonyms, material relations), scene-intent IR (lexicon, spec, planner, capabilities), disposition, web research, knowledge lifecycle (consolidation, evidence tiers), compiler probes, deterministic vision (pixels, film finish, masks, roses, shadows, ground-truth boxes, inpainting, restoration), plate sourcing + provenance (Commons, web search, Open Images), research-intent IR (subjects, seeks, structural questions), backend affordances, fresh-construction trajectory, movement knowledge, genome humans (mesh, morphs, evidence, figures, type schemas) |
 | `intent_benchmark` | 13 | happy path, typo tolerance, head-noun kind rule, typo-verbs-never-names, vague/ambiguous refusal, destructive block (even fully specified), contradiction ask, multi-intent split, unknown-concept curiosity |
 | `messy_intent` | 10 | kind synonyms (webpage→page), plurals, typo'd kinds with verbatim names, verb inflections, visual verbs (imagine→create), material relations (macaroni-hat research plan), glossary, destructive-still-blocks |
 | `photo_gate` | 6 | visual-prose routing (imagine/render/draw→create Ask), genome-waver human pixels, demo-world receipt + sky/ground pixel samples, byte-identical re-renders; photos commit under `samples/` |

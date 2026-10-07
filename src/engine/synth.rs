@@ -1,11 +1,9 @@
 //! True synthesis: novel faces from aggregates, never a copy.
 //!
-//! The montage path reframes a real person's photo — honestly a stock
-//! image with a new backdrop, not a generated image. This module is
-//! the other road: N face regions align (translation/scale only) and
-//! collapse to a per-pixel MEDIAN, then measured per-pixel variation
-//! drives seeded detail. Every output pixel is statistics, no donor
-//! pixel is copied.
+//! There is no montage path: N face regions align (translation/scale
+//! only) and collapse to a per-pixel MEDIAN, then measured
+//! per-pixel variation drives seeded detail. Every output pixel is
+//! statistics, no donor pixel is copied.
 //!
 //! Honesty contract, stated upfront:
 //! - Alignment is crude (head-height heuristic + resize, no landmark

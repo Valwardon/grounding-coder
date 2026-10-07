@@ -739,14 +739,13 @@ fn meta_property(html: &str, prop: &str) -> Option<String> {
 
 fn attr_value(tag: &str, attr: &str) -> Option<String> {
     for quote in ['"', '\''] {
-        for key in [format!("{}={}", attr, quote)] {
-            if let Some(pos) = tag.find(&key) {
-                let after = &tag[pos + key.len()..];
-                let end = after.find(quote).unwrap_or(after.len());
-                let v = after[..end].trim().to_string();
-                if !v.is_empty() {
-                    return Some(v);
-                }
+        let key = format!("{}={}", attr, quote);
+        if let Some(pos) = tag.find(&key) {
+            let after = &tag[pos + key.len()..];
+            let end = after.find(quote).unwrap_or(after.len());
+            let v = after[..end].trim().to_string();
+            if !v.is_empty() {
+                return Some(v);
             }
         }
     }

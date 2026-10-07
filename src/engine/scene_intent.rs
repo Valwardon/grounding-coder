@@ -56,6 +56,45 @@ const LEXICON: &[(&str, &str)] = &[
     ("humans", "human"),
     ("person", "human"),
     ("people", "human"),
+    ("kid", "human"),
+    ("kids", "human"),
+    ("child", "human"),
+    ("children", "human"),
+    ("cat", "cat"),
+    ("cats", "cat"),
+    ("dog", "dog"),
+    ("dogs", "dog"),
+    ("elephant", "elephant"),
+    ("elephants", "elephant"),
+    ("horse", "horse"),
+    ("horses", "horse"),
+    ("bird", "bird"),
+    ("birds", "bird"),
+    ("fish", "fish"),
+    ("lion", "lion"),
+    ("lions", "lion"),
+    ("tiger", "tiger"),
+    ("tigers", "tiger"),
+    ("bear", "bear"),
+    ("bears", "bear"),
+    ("car", "car"),
+    ("cars", "car"),
+    ("tree", "tree"),
+    ("trees", "tree"),
+    ("house", "house"),
+    ("houses", "house"),
+    ("cake", "cake"),
+    ("jetski", "jetski"),
+    ("lake", "lake"),
+    ("lakes", "lake"),
+    ("ocean", "ocean"),
+    ("forest", "forest"),
+    ("forests", "forest"),
+    ("desert", "desert"),
+    ("deserts", "desert"),
+    ("sky", "sky"),
+    ("beach", "beach"),
+    ("beaches", "beach"),
     ("salute", "salute"),
     ("salutes", "salute"),
     ("saluting", "salute"),
@@ -111,6 +150,9 @@ const PHRASES: &[(&[&str], &str)] = &[
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConceptKind {
     Human,
+    Fauna,
+    Flora,
+    Thing,
     Action,
     Wearable,
     Fabric,
@@ -124,6 +166,26 @@ const ONTOLOGY: &[(&str, ConceptKind, &[&str])] = &[
     ("man", ConceptKind::Human, &["proportions", "photograph"]),
     ("woman", ConceptKind::Human, &["proportions", "photograph"]),
     ("human", ConceptKind::Human, &["proportions", "photograph"]),
+    ("cat", ConceptKind::Fauna, &["anatomy", "photograph"]),
+    ("dog", ConceptKind::Fauna, &["anatomy", "photograph"]),
+    ("elephant", ConceptKind::Fauna, &["anatomy", "photograph"]),
+    ("horse", ConceptKind::Fauna, &["anatomy", "photograph"]),
+    ("bird", ConceptKind::Fauna, &["anatomy", "photograph"]),
+    ("fish", ConceptKind::Fauna, &["anatomy", "photograph"]),
+    ("lion", ConceptKind::Fauna, &["anatomy", "photograph"]),
+    ("tiger", ConceptKind::Fauna, &["anatomy", "photograph"]),
+    ("bear", ConceptKind::Fauna, &["anatomy", "photograph"]),
+    ("tree", ConceptKind::Flora, &["silhouette", "photograph"]),
+    ("car", ConceptKind::Thing, &["silhouette", "photograph"]),
+    ("house", ConceptKind::Thing, &["silhouette", "photograph"]),
+    ("cake", ConceptKind::Thing, &["silhouette", "photograph"]),
+    ("jetski", ConceptKind::Thing, &["silhouette", "photograph"]),
+    ("lake", ConceptKind::Place, &["photograph"]),
+    ("ocean", ConceptKind::Place, &["photograph"]),
+    ("forest", ConceptKind::Place, &["photograph"]),
+    ("desert", ConceptKind::Place, &["photograph"]),
+    ("sky", ConceptKind::Place, &["photograph"]),
+    ("beach", ConceptKind::Place, &["photograph"]),
     ("salute", ConceptKind::Action, &["pose-reference", "joints"]),
     ("sit", ConceptKind::Action, &["pose-reference", "seat"]),
     ("cross", ConceptKind::Action, &["motion-reference", "place"]),
@@ -243,24 +305,60 @@ pub fn parse_scene(prose: &str) -> SceneSpec {
     let folded = fold_phrases(&tokens(prose));
     let concepts: Vec<&str> = folded.iter().filter_map(|w| concept_of(w)).collect();
 
-    // Subject: first human concept; sibling human words refine it
-    // ("human woman" → human + [woman]).
-    let subject_at = concepts
-        .iter()
-        .position(|c| kind_of(c).is_some_and(|k| k == ConceptKind::Human));
+    // Subject: first human, fauna, thing, or flora concept; sibling
+    // subject words refine it ("human woman" → human + [woman]).
+    // Non-human subjects (cat, car, tree, …) are first-class
+    // subjects for research — the parser proposes, research
+    // disposes. Wearables/places stay objects, never subjects.
+    let subject_at = concepts.iter().position(|c| {
+        kind_of(c).is_some_and(|k| {
+            k == ConceptKind::Human
+                || k == ConceptKind::Fauna
+                || k == ConceptKind::Thing
+                || k == ConceptKind::Flora
+        })
+    });
     let mut subjects = Vec::new();
     if let Some(si) = subject_at {
+        // Sibling subject words refine the primary ("human woman")
+        // when adjacent; separated by an action verb they are
+        // COMPANION subjects ("cat sitting in human's lap" — the
+        // human is researched too, never folded away as a modifier).
+        let action_at: Vec<usize> = concepts
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| kind_of(c).is_some_and(|k| k == ConceptKind::Action))
+            .map(|(i, _)| i)
+            .collect();
+        let separated = |a: usize, b: usize| {
+            let (lo, hi) = if a < b { (a, b) } else { (b, a) };
+            action_at.iter().any(|v| *v > lo && *v < hi)
+        };
         let mut attributes = Vec::new();
+        let mut companions: Vec<String> = Vec::new();
         for (i, c) in concepts.iter().enumerate() {
-            if i != si && kind_of(c).is_some_and(|k| k == ConceptKind::Human) && *c != concepts[si]
+            if i != si
+                && kind_of(c).is_some_and(|k| k == ConceptKind::Human || k == ConceptKind::Fauna)
+                && *c != concepts[si]
+                && !companions.iter().any(|s| s == c)
             {
-                attributes.push(c.to_string());
+                if separated(i, si) {
+                    companions.push(c.to_string());
+                } else {
+                    attributes.push(c.to_string());
+                }
             }
         }
         subjects.push(Subject {
             stype: concepts[si].to_string(),
             attributes,
         });
+        for comp in companions {
+            subjects.push(Subject {
+                stype: comp,
+                attributes: Vec::new(),
+            });
+        }
     }
     // Material edge (Wikidata `material-used` analogue): "X made of
     // Y" binds ANY Y to X's material slot via the understander's
@@ -334,9 +432,15 @@ pub fn parse_scene(prose: &str) -> SceneSpec {
             .unwrap_or_else(|| "subject".to_string()),
     };
 
-    // Objects: wearable / fabric / place concepts in prose order.
+    // Objects: wearable / fabric / place concepts in prose order,
+    // plus thing/flora concepts NOT already taken as the subject
+    // (a "car crossing" is a subject; a "man beside a car" keeps
+    // the car as an object). Fauna concepts are subjects, never
+    // objects.
+    let subject_concept: Option<String> = subject_at.map(|si| concepts[si].to_string());
     let mut objects: Vec<SceneObject> = Vec::new();
     let mut counter = 0u32;
+    let mut subject_skipped = false;
     for c in &concepts {
         match kind_of(c) {
             Some(ConceptKind::Wearable) | Some(ConceptKind::Fabric) | Some(ConceptKind::Place) => {
@@ -359,10 +463,58 @@ pub fn parse_scene(prose: &str) -> SceneSpec {
                 }
                 objects.push(obj);
             }
+            Some(ConceptKind::Thing) | Some(ConceptKind::Flora) => {
+                // Taken as the subject already? Then it is not also
+                // an object. Otherwise it is a research-candidate
+                // object ("a man beside a car").
+                if !subject_skipped && subject_concept.as_deref() == Some(*c) {
+                    subject_skipped = true;
+                    continue;
+                }
+                counter += 1;
+                objects.push(SceneObject {
+                    id: format!("{}_{}", c, counter),
+                    otype: c.to_string(),
+                    attributes: Vec::new(),
+                    state: Vec::new(),
+                    worn_by: None,
+                    material: None,
+                });
+            }
             _ => {}
         }
     }
 
+    // Adjective materials: an unknown content word immediately
+    // before a wearable/fabric object names what it is made of
+    // ("straw hat", "silk flag") — grammar, not a word list: ANY
+    // substance binds here, and the material never becomes a scene
+    // object of its own. (The "made of" edge below handles the
+    // explicit form; this handles the attributive form.)
+    let mut adjective_materials: Vec<(String, String)> = Vec::new();
+    {
+        let articles = ["a", "an", "the"];
+        let is_wearable_fabric = |w: &String| {
+            concept_of(w).is_some_and(|c| {
+                kind_of(c).is_some_and(|k| k == ConceptKind::Wearable || k == ConceptKind::Fabric)
+            })
+        };
+        for (i, w) in folded.iter().enumerate() {
+            if !is_wearable_fabric(w) || i == 0 {
+                continue;
+            }
+            // Walk back past articles to the candidate substance.
+            let mut j = i - 1;
+            while j > 0 && articles.contains(&folded[j].as_str()) {
+                j -= 1;
+            }
+            let cand = &folded[j];
+            if unknown_content(cand) && generic_objects.contains(cand) {
+                adjective_materials.push((cand.clone(), w.clone()));
+            }
+        }
+    }
+    generic_objects.retain(|w| !adjective_materials.iter().any(|(m, _)| m == w));
     // Generic objects (open vocabulary): post-verb unknown nouns
     // become research-candidate objects ("…in human's lap" → lap).
     // Same doctrine as generic subjects: proposed, never classified.
@@ -376,6 +528,17 @@ pub fn parse_scene(prose: &str) -> SceneSpec {
             worn_by: None,
             material: None,
         });
+    }
+    // Bind adjective materials onto their objects (research queries
+    // attach downstream through the standard material path).
+    for (mat, obj_word) in &adjective_materials {
+        if let Some(obj) = objects.iter_mut().find(|o| {
+            o.otype == *obj_word
+                && o.material.is_none()
+                && !o.attributes.contains(&"unclassified".to_string())
+        }) {
+            obj.material = Some(mat.clone());
+        }
     }
 
     // Bind the material edge onto the matching object — or onto a
@@ -579,19 +742,50 @@ pub fn plan_research(spec: &SceneSpec) -> Vec<ResearchQuery> {
         } else {
             format!("{} {}", s.attributes.join(" "), s.stype)
         };
-        // Known humans research through the human path; unclassified
-        // subjects research through anatomy — body plan, proportions,
-        // and photographs of the thing itself, for the knowledge graph
-        // to resolve, never for the parser to guess.
+        // Humans research through the human path; fauna through
+        // comparative anatomy (skeleton, proportions, photographs of
+        // the animal itself); flora/things through silhouette and
+        // reference photographs. Unclassified leftovers research
+        // through anatomy for the knowledge graph to resolve, never
+        // for the parser to guess.
         let is_human = matches!(s.stype.as_str(), "man" | "woman" | "human");
+        let is_fauna = matches!(
+            s.stype.as_str(),
+            "cat" | "dog" | "elephant" | "horse" | "bird" | "fish" | "lion" | "tiger" | "bear"
+        );
+        let is_flora_thing = matches!(
+            s.stype.as_str(),
+            "tree" | "car" | "house" | "cake" | "jetski"
+        );
         if is_human {
             out.push(ResearchQuery {
                 requirement: format!("subject: {}", label),
                 queries: vec![
                     format!("human {} proportions reference", label),
                     format!("human {} photograph", label),
+                    format!("human {} skeleton reference", label),
+                    format!("human {} skin hair reference", label),
                 ],
                 capability: "photographic-subject",
+            });
+        } else if is_fauna {
+            out.push(ResearchQuery {
+                requirement: format!("subject: {}", s.stype),
+                queries: vec![
+                    format!("{} anatomy reference", s.stype),
+                    format!("{} skeleton proportions reference", s.stype),
+                    format!("{} photograph", s.stype),
+                ],
+                capability: "photographic-subject",
+            });
+        } else if is_flora_thing {
+            out.push(ResearchQuery {
+                requirement: format!("subject: {}", s.stype),
+                queries: vec![
+                    format!("{} silhouette reference", s.stype),
+                    format!("{} photograph", s.stype),
+                ],
+                capability: "photo-asset",
             });
         } else {
             out.push(ResearchQuery {
@@ -638,25 +832,25 @@ pub fn plan_research(spec: &SceneSpec) -> Vec<ResearchQuery> {
                 queries: vec!["standing full-body pose reference".to_string()],
                 capability: "articulated-pose",
             }),
-            // Sitting is photographed posture, not articulated joints:
-            // a real seated photo needs no rig, so the montage
-            // capability (supported) consumes it, honestly stated.
+            // Sitting is researched posture, not articulated joints:
+            // measured seated donors drive fresh construction — no
+            // rig, no montage, honestly stated.
             "sit" => out.push(ResearchQuery {
                 requirement: format!("action: sit {}", a.target.as_deref().unwrap_or("nowhere")),
                 queries: vec![
                     "sitting pose reference".to_string(),
                     "seated figure photograph".to_string(),
                 ],
-                capability: "photo-montage",
+                capability: "fresh-construction",
             }),
             "peace_sign" => out.push(ResearchQuery {
                 requirement: "action: peace_sign".to_string(),
                 queries: vec!["peace sign hand pose reference".to_string()],
                 capability: "articulated-pose",
             }),
-            // Crossing is photographed motion, not articulated joints:
-            // a real crossing photo needs no rig, so the montage
-            // capability (supported) consumes it, honestly stated.
+            // Crossing is researched motion, not articulated joints:
+            // measured crossing donors drive fresh construction — no
+            // rig, no montage, honestly stated.
             "cross" => out.push(ResearchQuery {
                 requirement: format!("action: cross {}", a.target.as_deref().unwrap_or("nowhere")),
                 queries: vec![
@@ -666,7 +860,7 @@ pub fn plan_research(spec: &SceneSpec) -> Vec<ResearchQuery> {
                     ),
                     "crossing motion reference".to_string(),
                 ],
-                capability: "photo-montage",
+                capability: "fresh-construction",
             }),
             _ => {}
         }
@@ -730,29 +924,30 @@ pub fn plan_research(spec: &SceneSpec) -> Vec<ResearchQuery> {
 }
 
 /// Engine capability registry: what the renderer can actually do.
-/// `true` = photographic paths that exist (plates + compose +
-/// montage). `false` = honestly missing — the matcher names the gap
-/// instead of the engine substituting a block figure.
+/// `true` = research-measurement + fresh-construction paths that
+/// exist (plates teach numbers, the raytracer makes pixels).
+/// `false` = honestly missing — the matcher names the gap instead
+/// of the engine substituting a block figure.
 const CAPABILITIES: &[(&str, bool, &str)] = &[
     (
         "photographic-subject",
         true,
-        "plates + compose: real people from researched photos",
+        "plates as research: measured tone/proportion donors, fresh render",
     ),
     (
         "photographic-place",
         true,
-        "plates: real places from researched photos",
+        "plates as research: measured palette donors, rendered backdrop",
     ),
     (
-        "photo-montage",
+        "fresh-construction",
         true,
-        "two-source montage of real pixels, never procedural",
+        "all pixels rendered from researched measurements, never copied",
     ),
     (
         "photo-asset",
         true,
-        "researched photographic assets with provenance",
+        "researched structural measurements with provenance",
     ),
     (
         "articulated-pose",

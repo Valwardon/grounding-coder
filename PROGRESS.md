@@ -1,5 +1,34 @@
 # Grounding Coder — Progress
 
+## v0.25.18 — Plates research-only, intent research pipeline (2026-10-07)
+
+- Montage deleted, not deprecated: `engine/compose.rs`, the `gc
+  compose` command, and every cut-and-paste path (subject scoring,
+  box mounting, two-source assembly) are gone. `imagine` and chat
+  `picture` render fresh from measured donors only — plates answer
+  structural questions (skin tone, framing, palette) with numbers,
+  never pixels. Receipts name ROM-table seeds vs researched.
+- `engine/intent_research.rs`: intent → research intent → research
+  subjects → structural Q&A (skeleton/skin/hair/proportions), wired
+  into every `imagine` round and logged. `seek` intents now route
+  through `fresh-construction`, not `photo-montage`.
+- `scene_intent`: fauna/flora/thing vocabulary (cat/dog/elephant/
+  car/tree/…), companion subjects across verbs ("cat … human's
+  lap" keeps both), attributive materials ("straw hat" binds straw
+  as material — grammar, any substance; fixed a HEAD-broken
+  walkthrough test asserting clean placement).
+- Provenance honesty: `pose_learn::researched_examples_for`
+  (empty today — seeds are not research), `anatomy` table
+  provenance + re-verification gaps, per-render pose receipt rows.
+- Samples: stale montage/network products deleted; proof
+  `samples/fresh-proof-640x480.bmp` (+ receipt) rendered from 6
+  banked plates (5 measured, skin median researched).
+- 254 lib + full integration green except pre-existing
+  `kotlin_rng_synthesized_compiled_and_run` (no kotlinc/network in
+  this sandbox); `cargo check --all-targets`, clippy zero warnings,
+  fmt clean. Pre-existing `assembly_commits_diagram` HEAD failure
+  fixed by the material grammar.
+
 ## v0.25.17 — Self-model: grounded, turned inward (2026-10-03)
 
 - `engine/self_model.rs`: capability table (8 rows: what each

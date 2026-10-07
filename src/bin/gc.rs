@@ -84,25 +84,10 @@ enum Commands {
         #[arg(long, default_value_t = 640)]
         max_dim: u32,
     },
-    /// Compose a photographic portrait from a sourced plate: segment
-    /// the subject, frame them on a studio backdrop, finish the photo.
-    /// The op log prints; refusals (no subject) exit nonzero.
-    Compose {
-        /// Source plate BMP (plus its provenance manifest beside it)
-        plate: String,
-        /// Output BMP path
-        #[arg(short, long, default_value = "portrait.bmp")]
-        out: String,
-        /// Output width
-        #[arg(long, default_value_t = 960)]
-        width: u32,
-        /// Output height
-        #[arg(long, default_value_t = 1200)]
-        height: u32,
-    },
     /// Imagine a photo from prose: parse the brief, research
-    /// references, study them, build fresh pixels. One command, full
-    /// receipts at every step.
+    /// references as structural knowledge only, study them, render
+    /// fresh pixels. One command, full receipts at every step.
+    /// No montage: plates never contribute pixels.
     Imagine {
         /// What to picture ("man holding peace sign")
         prompt: String,
@@ -827,48 +812,6 @@ fn main() {
                     }
                 }
             }
-            Commands::Compose {
-                plate,
-                out,
-                width,
-                height,
-            } => {
-                use grounding_coder::engine::{compose, vision::Image};
-                let plate_img = match Image::load_bmp(std::path::Path::new(&plate)) {
-                    Ok(img) => img,
-                    Err(e) => {
-                        eprintln!("COMPOSE FAILED: cannot load plate: {}", e);
-                        std::process::exit(1);
-                    }
-                };
-                match compose::compose_portrait(
-                    &plate_img,
-                    &plate,
-                    width.clamp(16, 1920),
-                    height.clamp(16, 1920),
-                ) {
-                    Ok((img, log)) => {
-                        println!(
-                            "subject: bbox {:?}, {:.3} of frame",
-                            log.subject_bbox, log.subject_fraction
-                        );
-                        for op in &log.ops {
-                            println!("  op: {}", op);
-                        }
-                        match img.save_bmp(std::path::Path::new(&out)) {
-                            Ok(()) => println!("composed {} ({}x{})", out, img.width, img.height),
-                            Err(e) => {
-                                eprintln!("COMPOSE FAILED: {}", e);
-                                std::process::exit(1);
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("COMPOSE REFUSED: {}", e);
-                        std::process::exit(2);
-                    }
-                }
-            }
             Commands::Imagine {
                 prompt,
                 out,
@@ -894,7 +837,7 @@ fn main() {
                         for line in &log {
                             println!("imagine: {}", line);
                         }
-                        eprintln!("IMAGINE REFUSED: no complete photographic subject");
+                        eprintln!("IMAGINE REFUSED: fresh construction refused (see log)");
                         std::process::exit(2);
                     }
                 }

@@ -168,6 +168,43 @@ fn any_material_binds_generically() {
 }
 
 #[test]
+fn attributive_material_binds_without_object() {
+    // "straw hat": the substance is the hat's material, never a
+    // scene object of its own. Grammar, not a word list — any
+    // substance in attributive position binds the same way.
+    for (prose, material) in [
+        ("A man wearing a straw hat.", "straw"),
+        ("A woman waving a silk flag.", "silk"),
+    ] {
+        let spec = parse_scene(prose);
+        assert!(
+            spec.objects.iter().all(|o| o.otype != material),
+            "{}: {:?}",
+            prose,
+            spec.objects
+        );
+        let obj = spec
+            .objects
+            .iter()
+            .find(|o| o.material.as_deref() == Some(material))
+            .expect("material-bearing object");
+        assert!(
+            obj.otype == "hat" || obj.otype == "flag",
+            "{}: {:?}",
+            prose,
+            obj
+        );
+        let plan = plan_research(&spec);
+        assert!(
+            plan.iter()
+                .any(|q| q.queries.iter().any(|s| s.contains(material))),
+            "{}: no material query",
+            prose
+        );
+    }
+}
+
+#[test]
 fn waving_flag_disambiguates_by_object() {
     let spec = parse_scene("Man waving an American flag.");
     assert_eq!(spec.actions.len(), 1);
@@ -341,9 +378,9 @@ fn elephant_crossing_river_parses_generically() {
             .any(|q| q.queries.iter().any(|s| s.contains("river"))),
         "river query missing"
     );
-    // Photographic paths cover all three requirements: the subject
-    // photographs, the crossing photographs (no joints needed for a
-    // montage), the river photographs. Nothing names a missing
+    // Fresh-construction paths cover all three requirements: the
+    // subject photographs, the crossing photographs (measured donors,
+    // rendered fresh), the river photographs. Nothing names a missing
     // capability here — segmentation quality is a later measurement,
     // not a parse-time verdict.
     let verdicts = match_capabilities(&plan);

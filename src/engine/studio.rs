@@ -729,6 +729,27 @@ pub fn create_image_with(
             note: "unresolved at assembly — not rendered".to_string(),
         });
     }
+    // Pose provenance: ROM-table seeds are encoded answers, not
+    // research — the receipt says which drove this render.
+    {
+        let n_seed = super::pose_learn::examples_for(base).len();
+        let n_res = super::pose_learn::researched_examples_for(base).len();
+        receipt.push(ReqStatus {
+            requirement: format!("pose: {}", base),
+            researched: n_res > 0,
+            note: if n_res > 0 {
+                format!(
+                    "researched '{}' representative ({} measured examples)",
+                    base, n_res
+                )
+            } else {
+                format!(
+                    "ROM-table seed pose '{}' ({} seeds, 0 researched) — acquire pose plates",
+                    base, n_seed
+                )
+            },
+        });
+    }
     // Refinement trajectory joins the receipt: the denoising steps,
     // measured, that produced the rendered pose.
     for s in &refine_trail {

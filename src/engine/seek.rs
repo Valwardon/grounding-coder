@@ -125,7 +125,7 @@ pub fn intents_for_plan(
             "photographic-subject" if people_subject => &[Source::OpenImages, Source::Commons],
             "photographic-subject" => &[Source::Commons, Source::Web],
             "photographic-place" | "photo-asset" => &[Source::Commons, Source::Web],
-            "photo-montage" => &[Source::Web, Source::Commons],
+            "fresh-construction" => &[Source::Web, Source::Commons],
             _ => &[Source::Commons],
         };
         for source in sources {

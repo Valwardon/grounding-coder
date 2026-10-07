@@ -2,11 +2,12 @@
 //!
 //! When chat receives a picture request (human subject + poseable
 //! action), it comes HERE — not to code tasks. The pipeline parses
-//! the scene, chooses its own sources (people from adult-filtered
+//! the scene, researches its own sources (people from adult-filtered
 //! OpenImages, places/objects/materials from Commons — the user
-//! never names a source), collects evidence with every gate
-//! enforced, derives whatever models sufficiency allows, and
-//! constructs with the rest receipted as defaults.
+//! never names a source), measures the plates as structural
+//! knowledge only (skin tone, framing, palette — never pixels),
+//! and renders a fresh image from those numbers with the rest
+//! receipted as defaults. No montage path exists.
 //!
 //! No step is skippable and no step is hand-driven: this is the
 //! function the app's chat box calls.
@@ -203,10 +204,9 @@ async fn picture_from_prompt_dim(
     max_dim: u32,
 ) -> Result<PictureOutcome, String> {
     std::fs::create_dir_all(out_dir).map_err(|e| format!("cannot create dir: {}", e))?;
-    // Photo-first: per-request training, narrow scope. Try to composite
-    // real people over real places (grounded pixels, never noise) before
-    // spending budget on statistical evidence + procedural fallback.
-    // Only what this prompt needs: subject + pose + backdrop.
+    // Fresh-only: per-request training, narrow scope. Research what
+    // this prompt needs (subject + pose + backdrop) as structural
+    // measurements, then render fresh pixels — never a montage.
     match super::imagine::imagine(prompt, 640, 800).await {
         Ok((img, ilog)) => {
             let image_path = out_dir.join("picture.bmp");
@@ -214,16 +214,18 @@ async fn picture_from_prompt_dim(
                 .map_err(|e| format!("cannot save picture: {}", e))?;
             let receipt_path = out_dir.join("picture.json");
             let mut reply = vec![
-                "I see a picture request — researching photos for this prompt now.".to_string(),
+                "I see a picture request — researching structure for this prompt now.".to_string(),
             ];
             for l in &ilog {
                 reply.push(format!("research: {}", l));
             }
-            reply.push("path: photographic montage (real people, real place)".to_string());
+            reply.push(
+                "path: fresh construction (researched measurements, rendered pixels)".to_string(),
+            );
             reply.push(format!("Done — picture at {}", image_path.display()));
             let body = serde_json::json!({
                 "prompt": prompt,
-                "path": "photographic-montage",
+                "path": "fresh-construction",
                 "reply": reply,
                 "log": ilog,
             });
@@ -239,14 +241,15 @@ async fn picture_from_prompt_dim(
             })
         }
         Err(ilog) => {
-            // Montage refused — keep its trail for the receipt, then fall
-            // through to evidence + procedural maquette (honestly labeled).
+            // Fresh construction refused — keep its trail for the
+            // receipt, then fall through to evidence + construction
+            // with per-requirement models (honestly labeled).
             let mut reply = vec![format!(
-                "Photo montage refused ({} step(s)) — falling back to evidence + construction.",
+                "Fresh construction refused ({} step(s)) — falling back to evidence + construction.",
                 ilog.len()
             )];
             for l in &ilog {
-                reply.push(format!("montage: {}", l));
+                reply.push(format!("research: {}", l));
             }
             picture_fallback_evidence(prompt, out_dir, per_req, max_dim, reply).await
         }

@@ -503,6 +503,39 @@ pub fn joint_table() -> Vec<JointMotion> {
     ]
 }
 
+/// Where the ROM table comes from: pinned research (AAOS goniometry
+/// via Wikipedia's Range-of-motion lineage), baked in so validation
+/// works offline. Pinned is not live: re-verification means fetching
+/// the cited source per joint and diffing these ranges — the query
+/// strings below are that work order, and any drift must update the
+/// table with its new citation, never silently.
+pub fn table_provenance() -> Vec<(String, String, String)> {
+    joint_table()
+        .into_iter()
+        .map(|j| {
+            (
+                j.joint.clone(),
+                j.source.clone(),
+                format!("{} range of motion goniometry reference", j.joint),
+            )
+        })
+        .collect()
+}
+
+/// Research gaps behind the pinned table: every joint range needs a
+/// live re-read before it counts as researched rather than pinned.
+pub fn research_gaps() -> Vec<String> {
+    joint_table()
+        .into_iter()
+        .map(|j| {
+            format!(
+                "re-verify '{}' ROM {:?} against {}",
+                j.joint, j.rom, j.source
+            )
+        })
+        .collect()
+}
+
 /// Is this joint angle anatomically possible? Unknown joints refuse
 /// (no data is not a yes); out-of-range refuses with the range.
 /// Pure, total, tested.

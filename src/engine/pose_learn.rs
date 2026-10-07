@@ -233,7 +233,11 @@ impl HumanPose {
 
 /// Validated example records per action — the learnable registry.
 /// Unknown actions yield nothing (no examples is not a guess).
-/// Each record cites its ROM-table source.
+/// Each record cites its source. TODAY every record is a
+/// `"rom-table:…"` seed (ROM-validated named poses and their
+/// validated variants) — photo-researched examples ingest through
+/// the same gate when fine-joint extraction lands, and
+/// [`researched_examples_for`] separates the two provenances.
 pub fn examples_for(action: &str) -> Vec<PoseExample> {
     let mut out = Vec::new();
     let mut add = |name: String, pose: Pose, source: String| {
@@ -338,6 +342,18 @@ pub fn examples_for(action: &str) -> Vec<PoseExample> {
         _ => {}
     }
     out
+}
+
+/// Photo-researched examples only: records whose source is NOT a
+/// `"rom-table:…"` seed. Empty today — fine-joint extraction from
+/// photographs is honestly unimplemented, so no researched pose
+/// example exists yet. Representatives built from seeds are seeds;
+/// this function is the honest gate downstream checks.
+pub fn researched_examples_for(action: &str) -> Vec<PoseExample> {
+    examples_for(action)
+        .into_iter()
+        .filter(|ex| !ex.source.starts_with("rom-table:"))
+        .collect()
 }
 
 #[cfg(test)]
