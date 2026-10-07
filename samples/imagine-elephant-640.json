@@ -1,0 +1,9 @@
+{
+ "prompt": "an elephant crossing a river",
+ "path": "sourced-photograph",
+ "author": "Basile Morin",
+ "license": "CC BY-SA 4.0",
+ "page_url": "https://commons.wikimedia.org/wiki/File:Front_view_of_an_Asian_elephant_walking_in_Tad_Lo_river_at_golden_hour,_Bolaven_Plateau,_Laos.jpg",
+ "file": "samples/imagine-elephant-640.bmp",
+ "note": "round 2 queried crossing+elephant and hit a road sign (Taufik, in trail only); round 1 (elephant river) stood and delivered a real river crossing. Pose-word rule now bars pose+noun queries for generic subjects."
+}

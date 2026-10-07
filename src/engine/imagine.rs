@@ -243,11 +243,10 @@ pub fn build_subject_query(
             None => format!("{} photograph", subject_word),
         };
     }
-    let mut query = if brief.pose != "standing" {
-        format!("{} {} portrait", brief.pose, subject_word)
-    } else {
-        format!("{} portrait", subject_word)
-    };
+    // The pose word always rides along ("standing man portrait"):
+    // it is the prompt's own word shaping search, identical machinery
+    // for every pose and every subject.
+    let mut query = format!("{} {} portrait", brief.pose, subject_word);
     if brief.props.contains(&PropKind::Roses) {
         query = format!("{} with roses", query);
     }
@@ -312,11 +311,20 @@ pub fn verify_coverage(spec: &super::scene_intent::SceneSpec, evidence: &[String
 }
 
 /// Refined queries from coverage gaps: action gaps pair the pose
-/// with the subject ("sitting cat"), subject gaps re-ask the noun
-/// as a photograph, object gaps ask the object. Capped at three,
-/// deduped, deterministic — the funded second round asks exactly
-/// what the first round failed to show.
-pub fn gap_queries(gaps: &[String], subject_word: &str, pose: &str) -> Vec<String> {
+/// with the subject for people ("sitting cat" finds sitters), but
+/// NEVER for generic subjects — pose words drift search into road
+/// signs and game wikis (measured live: "crossing elephant" won a
+/// road sign). Generic actions re-ask noun + place instead. Subject
+/// gaps re-ask the noun as a photograph, object gaps ask the object.
+/// Capped at three, deduped, deterministic — the funded second round
+/// asks exactly what the first round failed to show.
+pub fn gap_queries(
+    gaps: &[String],
+    subject_word: &str,
+    pose: &str,
+    generic: bool,
+    place: Option<&str>,
+) -> Vec<String> {
     let mut out = Vec::new();
     for g in gaps {
         if out.len() >= 3 {
@@ -324,7 +332,12 @@ pub fn gap_queries(gaps: &[String], subject_word: &str, pose: &str) -> Vec<Strin
         }
         if let Some(action) = g.strip_prefix("action:") {
             let _ = action;
-            let q = if pose != "standing" {
+            let q = if generic {
+                match place {
+                    Some(p) => format!("{} {}", subject_word, p),
+                    None => format!("{} photograph", subject_word),
+                }
+            } else if pose != "standing" {
                 format!("{} {}", pose, subject_word)
             } else {
                 format!("{} photograph", subject_word)
@@ -446,7 +459,7 @@ pub async fn imagine(
         };
     }
     // Round 2, funded by the gaps round 1 left open.
-    let gq = gap_queries(&g1, &subject_word, &brief.pose);
+    let gq = gap_queries(&g1, &subject_word, &brief.pose, generic, place);
     log.push(format!("round 2 (gaps reach further): queries {:?}", gq));
     let (o2, e2) = attempt(
         prose,
@@ -769,16 +782,25 @@ mod tests {
         assert!(gaps.iter().any(|g| g.contains("lap")), "{:?}", gaps);
         assert!(gaps.iter().any(|g| g.contains("sit")), "{:?}", gaps);
         assert!(!gaps.iter().any(|g| g.contains("cat")), "{:?}", gaps);
-        // Refined queries pair the pose with the subject, capped.
-        let qs = gap_queries(&gaps, "cat", "sitting");
+        // People pair pose + subject; generic subjects re-ask noun
+        // (+ place), never the pose word that harvests road signs.
+        let qs = gap_queries(&gaps, "cat", "sitting", true, None);
         assert!(qs.len() <= 3 && !qs.is_empty());
         assert!(
             qs.iter()
-                .any(|q| q.contains("sitting") && q.contains("cat")),
+                .any(|q| q.contains("cat") && !q.contains("sitting")),
             "{:?}",
             qs
         );
         assert!(qs.iter().any(|q| q.contains("human")), "{:?}", qs);
+        let people = gap_queries(&gaps, "woman", "sitting", false, None);
+        assert!(
+            people
+                .iter()
+                .any(|q| q.contains("sitting") && q.contains("woman")),
+            "{:?}",
+            people
+        );
     }
 
     fn titled_plate(title: &str, w: u32, h: u32) -> SourcedPlate {
