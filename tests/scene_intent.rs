@@ -80,8 +80,8 @@ fn woman_peace_sign_attributes_and_queries() {
         plan.iter().any(|q| q
             .queries
             .iter()
-            .any(|s| s.contains("woman") && s.contains("photograph"))),
-        "woman photo query missing"
+            .any(|s| s.contains("human") && s.contains("photograph"))),
+        "human photo query missing"
     );
 }
 
@@ -370,19 +370,18 @@ fn elephant_crossing_river_parses_generically() {
         plan.iter().any(|q| q
             .queries
             .iter()
-            .any(|s| s.contains("elephant") && s.contains("anatomy"))),
-        "elephant anatomy query missing"
+            .any(|s| s.contains("elephant") && s.contains("photograph"))),
+        "elephant photograph query missing"
     );
     assert!(
         plan.iter()
             .any(|q| q.queries.iter().any(|s| s.contains("river"))),
         "river query missing"
     );
-    // Fresh-construction paths cover all three requirements: the
-    // subject photographs, the crossing photographs (measured donors,
-    // rendered fresh), the river photographs. Nothing names a missing
-    // capability here — segmentation quality is a later measurement,
-    // not a parse-time verdict.
+    // Sourced-photograph paths cover all three requirements: the
+    // subject photographs, the crossing photographs, the river
+    // photographs. Nothing names a missing capability here — match
+    // quality is a research outcome, not a parse-time verdict.
     let verdicts = match_capabilities(&plan);
     assert!(
         verdicts.iter().all(|v| v.supported),
@@ -414,8 +413,8 @@ fn cat_sitting_in_lap_parses_with_roles() {
         plan.iter().any(|q| q
             .queries
             .iter()
-            .any(|s| s.contains("cat") && s.contains("anatomy"))),
-        "cat anatomy query missing"
+            .any(|s| s.contains("cat") && s.contains("photograph"))),
+        "cat photograph query missing"
     );
     assert!(
         plan.iter()

@@ -85,9 +85,9 @@ enum Commands {
         max_dim: u32,
     },
     /// Imagine a photo from prose: research the intent, study
-    /// licensed plates, synthesize one novel figure from their
-    /// median. Brand-new pixels with donor provenance — never a
-    /// donor copy, never a montage, never a rendered mesh.
+    /// licensed plates, deliver the best match's own bytes with
+    /// provenance. The product is a sourced photograph, honestly
+    /// labeled — never generated, never rendered.
     Imagine {
         /// What to picture ("man holding peace sign")
         prompt: String,
@@ -812,10 +812,8 @@ fn main() {
                             println!("imagine: {}", line);
                         }
                         println!(
-                            "imagine: synthesized from {} donors (sharpness {:.4}, novelty {:.4})",
-                            photo.donors.len(),
-                            photo.sharpness,
-                            photo.min_novelty
+                            "imagine: sourced photograph by {} ({})",
+                            photo.author, photo.license
                         );
                         match photo.image.save_bmp(std::path::Path::new(&out)) {
                             Ok(()) => println!(

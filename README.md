@@ -139,14 +139,12 @@ Oracle verify (compiler / tests / parser per language)
   decode via the `image` crate, BMP plus manifest carrying the
   license basis for audit. (`src/engine/plates.rs`, `gc plate`;
   first plate in `samples/plates/` with full provenance)
-- **Plates as research material, never montage** — reference
-  photographs are measured, person crops box-align
-  (translation/scale only), and the crops collapse to a per-pixel
-  median with seeded detail bounded by measured deviation. No donor
-  pixel reaches the output and no mesh is rendered; novelty against
-  every donor is asserted on the receipt.
-  (`src/engine/synth.rs`, `src/engine/imagine.rs`, `gc imagine`;
-  `samples/synth-proof-192x256.bmp` from 22 licensed donors)
+- **Plates as research material, never montage** — licensed
+  photographs are researched for any subject through one generic
+  path, ranked by title overlap, and the winner's own bytes are
+  delivered labeled a sourced photograph. No per-subject code
+  anywhere: no montage, no meshes, no synthesis, no extractors.
+  (`src/engine/imagine.rs`, `gc imagine`)
 - **Queryable anatomy, no vectors** — a researched partonomy graph
   (bones, vessels, relations: part-of, articulates, supplied-by)
   answers "vessels near the distal phalanges" by graph walk, with
@@ -154,11 +152,10 @@ Oracle verify (compiler / tests / parser per language)
   of imagining them, with hair and physique notes alongside.
   (`src/engine/anatomy.rs`)
 - **Imagine** — one command from prose to photo: intent research
-  (intent → research plan → classified subjects → structural
-  questions on pose, skin, hair), reference research across
-  Commons, web search, and Open Images (adult-filtered boxes as
-  synthesis donors), palette/composition study, then statistical
-  synthesis of one novel figure. (`src/engine/imagine.rs`,
+  (intent → research plan → subjects → generic questions),
+  reference research across Commons, web search, and Open Images
+  through one subject-agnostic path, then title-overlap ranking
+  and delivery with provenance. (`src/engine/imagine.rs`,
   `src/engine/intent_research.rs`, `gc imagine`;
   samples in `samples/`)
 - **Family restoration** — dust and scratch detection with

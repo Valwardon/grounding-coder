@@ -2,50 +2,15 @@
 //!
 //! The chat picture path used to jump from prose straight to pixels.
 //! This module is the missing middle: given prose, state WHAT the
-//! intent is, WHAT research would satisfy it, WHICH subjects need
-//! researching, and WHICH structural questions plates must answer
-//! (pose, skin, hair, proportions — never pixels). Plates are
-//! research material: they answer questions with numbers, and fresh
-//! construction renders from those numbers.
+//! intent is, WHAT research would satisfy it, and WHICH subjects
+//! need researching. Every subject gets the SAME generic questions
+//! regardless of what it is — person, animal, or thing are research
+//! problems, never code branches.
 //!
 //! Pure and offline: same prose, same bundle. Live fetching happens
 //! downstream in `imagine::attempt`, driven by these intents.
 
 use super::scene_intent::{self, ResearchQuery, SceneSpec};
-
-/// What kind of subject research must resolve.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SubjectClass {
-    Person,
-    Animal,
-    Flora,
-    Thing,
-    Unknown,
-}
-
-impl SubjectClass {
-    pub fn of(stype: &str) -> Self {
-        match stype {
-            "man" | "woman" | "human" => SubjectClass::Person,
-            "cat" | "dog" | "elephant" | "horse" | "bird" | "fish" | "lion" | "tiger" | "bear" => {
-                SubjectClass::Animal
-            }
-            "tree" => SubjectClass::Flora,
-            "car" | "house" | "cake" | "jetski" => SubjectClass::Thing,
-            _ => SubjectClass::Unknown,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            SubjectClass::Person => "person",
-            SubjectClass::Animal => "animal",
-            SubjectClass::Flora => "flora",
-            SubjectClass::Thing => "thing",
-            SubjectClass::Unknown => "unknown",
-        }
-    }
-}
 
 /// One structural question plates must answer with measurements.
 /// `answered` is true when the research bundle already carries a
@@ -69,11 +34,13 @@ pub struct IntentResearch {
     pub plan: Vec<ResearchQuery>,
     /// Where each requirement should be looked up.
     pub seeks: Vec<super::seek::SeekIntent>,
-    /// Each subject with its research class.
-    pub subjects: Vec<(String, SubjectClass)>,
-    /// Structural questions for plates (pose, skin, hair…).
+    /// Each subject to research (plain nouns — no classes).
+    pub subjects: Vec<String>,
+    /// Structural questions for plates (pose, appearance…).
     pub structural: Vec<StructuralQuestion>,
-    /// True when at least one human subject needs a poseable action.
+    /// True when a human subject is present: the people-only index
+    /// (OpenImages) joins the source sweep. Source plumbing, not a
+    /// subject branch — the questions stay identical either way.
     pub people_subject: bool,
 }
 
@@ -88,86 +55,29 @@ pub fn research_intent(prose: &str) -> IntentResearch {
             || s.attributes.iter().any(|a| a == "woman" || a == "man")
     });
     let seeks = super::seek::intents_for_plan(&plan, people_subject);
-    let subjects: Vec<(String, SubjectClass)> = spec
-        .subjects
-        .iter()
-        .map(|s| (s.stype.clone(), SubjectClass::of(&s.stype)))
-        .collect();
+    let subjects: Vec<String> = spec.subjects.iter().map(|s| s.stype.clone()).collect();
 
     // Structural questions: what research must resolve before a
-    // photograph can be selected for this scene. Nothing here is
-    // answered from encoded body knowledge — anatomy lives in
-    // research (plates, oracle definitions), never in tables.
-    // Pose questions resolve through pose-reference plates;
-    // proportions through measured plates; skin through plate-study
-    // medians downstream; hair stays a named gap until research
-    // measures it.
+    // photograph can be selected for this scene. One generic set
+    // per action and per subject — identical for person, animal, or
+    // thing. What nouns MEAN is research's problem; the code never
+    // branches on it.
     let mut structural = Vec::new();
     for a in &spec.actions {
         structural.push(StructuralQuestion {
             question: format!("which photographs show '{}'?", a.atype),
-            topic: "pose",
+            topic: "action",
             answered: false,
-            detail: format!(
-                "acquire '{}' pose-reference plates for this prompt",
-                a.atype
-            ),
+            detail: format!("acquire '{}' photographs for this prompt", a.atype),
         });
     }
-    for (stype, class) in &subjects {
-        match class {
-            SubjectClass::Person => {
-                structural.push(StructuralQuestion {
-                    question: format!("which photographs show '{}'?", stype),
-                    topic: "proportions",
-                    answered: false,
-                    detail: "acquire proportion-measurable plates for this prompt".to_string(),
-                });
-                structural.push(StructuralQuestion {
-                    question: format!("what skin tones do '{}' plates measure?", stype),
-                    topic: "skin",
-                    answered: false,
-                    detail: "acquire plate-study median tone for this prompt".to_string(),
-                });
-                structural.push(StructuralQuestion {
-                    question: format!("which photographs show '{}' hair clearly?", stype),
-                    topic: "hair",
-                    answered: false,
-                    detail: "hair structure unmeasured — needs hair research".to_string(),
-                });
-            }
-            SubjectClass::Animal => {
-                structural.push(StructuralQuestion {
-                    question: format!("which photographs show '{}' anatomy?", stype),
-                    topic: "pose",
-                    answered: false,
-                    detail: format!("acquire '{}' anatomy references for this prompt", stype),
-                });
-                structural.push(StructuralQuestion {
-                    question: format!("what coat tones do '{}' plates measure?", stype),
-                    topic: "skin",
-                    answered: false,
-                    detail: "acquire plate-study palette for this prompt".to_string(),
-                });
-            }
-            SubjectClass::Flora | SubjectClass::Thing => {
-                structural.push(StructuralQuestion {
-                    question: format!("which photographs show '{}'?", stype),
-                    topic: "proportions",
-                    answered: false,
-                    detail: format!("acquire '{}' silhouette references", stype),
-                });
-            }
-            SubjectClass::Unknown => {
-                structural.push(StructuralQuestion {
-                    question: format!("what is '{}'?", stype),
-                    topic: "identity",
-                    answered: false,
-                    detail: "unclassified subject — research must resolve before delivery"
-                        .to_string(),
-                });
-            }
-        }
+    for stype in &subjects {
+        structural.push(StructuralQuestion {
+            question: format!("which photographs show '{}'?", stype),
+            topic: "subject",
+            answered: false,
+            detail: format!("acquire '{}' photographs for this prompt", stype),
+        });
     }
 
     IntentResearch {
@@ -191,8 +101,8 @@ pub fn log_lines(ir: &IntentResearch) -> Vec<String> {
         ir.spec.objects.len(),
         ir.spec.confidence
     ));
-    for (stype, class) in &ir.subjects {
-        out.push(format!("research subject: {} [{}]", stype, class.as_str()));
+    for stype in &ir.subjects {
+        out.push(format!("research subject: {}", stype));
     }
     for q in &ir.plan {
         out.push(format!(
@@ -227,20 +137,14 @@ mod tests {
     #[test]
     fn intent_names_subjects_and_questions() {
         let ir = research_intent("A man standing on a mountain.");
-        assert!(
-            ir.subjects
-                .iter()
-                .any(|(s, c)| s == "man" && *c == SubjectClass::Person)
-        );
+        assert!(ir.subjects.iter().any(|s| s == "man"), "{:?}", ir.subjects);
         assert!(ir.people_subject);
         assert!(!ir.plan.is_empty());
         assert!(!ir.seeks.is_empty());
-        // Structural questions name pose, skin, and hair — all gaps
-        // until research answers them; nothing answered from tables.
+        // Generic questions, all gaps until research answers them.
         let topics: Vec<&str> = ir.structural.iter().map(|q| q.topic).collect();
-        assert!(topics.contains(&"pose"), "{:?}", topics);
-        assert!(topics.contains(&"skin"), "{:?}", topics);
-        assert!(topics.contains(&"hair"), "{:?}", topics);
+        assert!(topics.contains(&"action"), "{:?}", topics);
+        assert!(topics.contains(&"subject"), "{:?}", topics);
         assert!(
             ir.structural.iter().all(|q| !q.answered),
             "nothing is answered before research: {:?}",
@@ -249,36 +153,41 @@ mod tests {
     }
 
     #[test]
-    fn animal_subjects_research_anatomy() {
+    fn animal_subjects_research_generically() {
+        // No animal rows encoded: the open-vocabulary fallback names
+        // the subject, the generic arm researches it.
         let ir = research_intent("An elephant crossing a river.");
         assert!(
-            ir.subjects
-                .iter()
-                .any(|(s, c)| s == "elephant" && *c == SubjectClass::Animal),
+            ir.subjects.iter().any(|s| s == "elephant"),
             "{:?}",
             ir.subjects
         );
         assert!(!ir.people_subject);
         assert!(
             ir.plan.iter().any(|q| q.requirement.contains("elephant")
-                && q.queries.iter().any(|s| s.contains("anatomy"))),
+                && q.queries.iter().any(|s| s.contains("elephant"))),
             "{:?}",
             ir.plan
         );
-        // No human hair questions for an elephant scene.
-        assert!(
-            !ir.structural.iter().any(|q| q.topic == "hair"),
-            "{:?}",
-            ir.structural
+        // Same question shape as a person scene — no animal branch.
+        let man = research_intent("A man standing on a mountain.");
+        let topics_a: Vec<&str> = ir.structural.iter().map(|q| q.topic).collect();
+        let topics_b: Vec<&str> = man.structural.iter().map(|q| q.topic).collect();
+        assert_eq!(
+            topics_a, topics_b,
+            "question shape must not vary by subject"
         );
     }
 
     #[test]
     fn multi_subjects_all_researched() {
         let ir = research_intent("Cat sitting in human's lap.");
-        let names: Vec<&str> = ir.subjects.iter().map(|(s, _)| s.as_str()).collect();
-        assert!(names.contains(&"cat"), "{:?}", names);
-        assert!(names.contains(&"human"), "{:?}", names);
+        assert!(ir.subjects.iter().any(|s| s == "cat"), "{:?}", ir.subjects);
+        assert!(
+            ir.subjects.iter().any(|s| s == "human"),
+            "{:?}",
+            ir.subjects
+        );
         assert!(
             ir.seeks.iter().any(|s| s.closes_gap.contains("cat")),
             "{:?}",
@@ -293,6 +202,6 @@ mod tests {
         assert_eq!(a, b);
         assert!(a.iter().any(|l| l.starts_with("intent:")));
         assert!(a.iter().any(|l| l.starts_with("research subject:")));
-        assert!(a.iter().any(|l| l.starts_with("structural [pose]:")));
+        assert!(a.iter().any(|l| l.starts_with("structural [subject]:")));
     }
 }

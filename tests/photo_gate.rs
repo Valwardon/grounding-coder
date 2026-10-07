@@ -1,23 +1,23 @@
 //! Photo gate: every build proves, with real pixels, that the loop
 //! holds end to end — messy prose routes to the right action,
-//! researched donors synthesize a novel figure, and scenes render
-//! as worlds.
+//! researched plates deliver a licensed photograph, and scenes
+//! render as worlds.
 //!
 //! Three questions, three answers, all offline and deterministic:
 //!   1. Does it understand the action? Visual verbs (`imagine`,
 //!      `render`, `draw`) reach the create frame with a confidence
 //!      receipt — Ask with curiosity, never a vacuous Block or a
 //!      blind Execute.
-//!   2. Is the human photo brand-new? Eight synthetic donors median
-//!      into a novel figure: novelty asserted above zero, sharpness
-//!      measured, donor bytes nowhere in the product.
+//!   2. Is the delivered photo the researched one? Titled synthetic
+//!      plates rank by title overlap and the winner's own bytes come
+//!      back with provenance — labeled sourced, never generated.
 //!   3. What about scene? The demo world renders sky/tower/ground
 //!      with sky up top and ground below (pixel-sampled, not assumed).
 //!
 //! The scene photo commits under `samples/` next to its JSON receipt —
 //! the photo IS the test output, not a promise of one.
 use grounding_coder::engine::{
-    imagine::{parse_brief, synthesize_from_plates},
+    imagine::{deliver_from_plates, parse_brief},
     plates::{PlateProvenance, SourcedPlate},
     scene::{self, demo_scene},
     understand::{self, Disposition},
@@ -28,11 +28,9 @@ use std::collections::HashMap;
 const W: u32 = 320;
 const H: u32 = 240;
 
-fn donor(skin: Rgb) -> SourcedPlate {
-    let mut img = Image::blank(120, 160, Rgb::new(60, 80, 120));
-    img.draw_disc(60, 70, 28, skin);
+fn donor(title: &str) -> SourcedPlate {
     SourcedPlate {
-        image: img,
+        image: Image::blank(120, 160, Rgb::new(60, 80, 120)),
         provenance: PlateProvenance {
             source_url: "synthetic".to_string(),
             page_url: "synthetic".to_string(),
@@ -40,7 +38,7 @@ fn donor(skin: Rgb) -> SourcedPlate {
             license: "test".to_string(),
         },
         basis: "test".to_string(),
-        title: "test".to_string(),
+        title: title.to_string(),
     }
 }
 
@@ -111,51 +109,28 @@ fn photo_prose_routes_draw_waver_to_create_ask() {
     assert_eq!(d, Disposition::Ask);
 }
 
-// --- 2. Is the human photo brand-new? ---
+// --- 2. Is the delivered photo the researched one? ---
 
 #[test]
-fn synthesis_makes_novel_figure_not_a_copy() {
-    // Eight synthetic donors (alternating close tones) synthesize
-    // one novel figure: every product pixel is statistics, novelty
-    // is asserted, and the product matches no donor's bytes.
-    let donors: Vec<SourcedPlate> = (0..8)
-        .map(|i| {
-            donor(if i % 2 == 0 {
-                Rgb::new(200, 150, 115)
-            } else {
-                Rgb::new(205, 155, 120)
-            })
-        })
-        .collect();
+fn delivery_returns_researched_bytes_with_provenance() {
+    // Titled synthetic plates: the title matching the prompt wins,
+    // its own bytes come back with provenance, labeled sourced.
+    let donors = vec![donor("desert dunes"), donor("standing man portrait")];
     let brief = parse_brief("a man standing");
-    let (photo, log) = synthesize_from_plates(&brief, &donors, &[]).expect("synthesizes");
-    assert_eq!(photo.donors.len(), 8);
-    assert!(photo.min_novelty > 0.0, "product must differ from donors");
-    assert!(photo.sharpness >= 0.0);
+    let (photo, log) = deliver_from_plates(&brief, &donors).expect("delivers");
+    assert_eq!(photo.title, "standing man portrait");
+    assert_eq!(photo.author, "test");
     assert!(
-        log.iter().any(|l| l.contains("brand-new pixels")),
+        log.iter()
+            .any(|l| l.contains("sourced photograph, not generated")),
         "{:?}",
         log
     );
-    // Product bytes are no donor's bytes (sampled comparison).
-    for (i, d) in donors.iter().enumerate() {
-        let mut same = 0usize;
-        let mut total = 0usize;
-        for y in (0..photo.image.height.min(d.image.height)).step_by(5) {
-            for x in (0..photo.image.width.min(d.image.width)).step_by(5) {
-                total += 1;
-                if photo.image.get(x, y) == d.image.get(x, y) {
-                    same += 1;
-                }
-            }
-        }
-        assert!(
-            (same as f64) < (total as f64) * 0.99,
-            "donor {} copied: {}/{} match",
-            i,
-            same,
-            total
-        );
+    // Product bytes are the winner's own bytes.
+    let winner = &donors[photo.plate_index];
+    assert_eq!(winner.title, photo.title);
+    for (x, y) in [(10, 10), (60, 70), (100, 140)] {
+        assert_eq!(photo.image.get(x, y), winner.image.get(x, y));
     }
 }
 

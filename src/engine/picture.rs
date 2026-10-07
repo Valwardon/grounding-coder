@@ -2,10 +2,10 @@
 //!
 //! When chat receives a picture request (human subject + poseable
 //! action), it comes HERE — not to code tasks. The pipeline
-//! researches licensed photographs for the prompt and synthesizes
-//! one novel figure from their median. The product is brand-new
-//! pixels with donor provenance — never a donor copy, never a
-//! montage, never a rendered mesh.
+//! researches licensed photographs for the prompt, ranks them by
+//! title overlap, and delivers the winner's own bytes with
+//! provenance. The product is a sourced photograph, honestly
+//! labeled — never generated, never a montage, never rendered.
 //!
 //! No step is skippable and no step is hand-driven: this is the
 //! function the app's chat box calls.
@@ -73,8 +73,8 @@ pub async fn picture_from_prompt(
 ) -> Result<PictureOutcome, String> {
     let _ = per_req;
     std::fs::create_dir_all(out_dir).map_err(|e| format!("cannot create dir: {}", e))?;
-    // Synthesis-only: research what this prompt needs, synthesize
-    // one novel figure from the licensed donors' median.
+    // Sourced-only: research what this prompt needs, rank the
+    // licensed candidates, deliver the winner's own bytes.
     match super::imagine::imagine(prompt, 640, 800).await {
         Ok((photo, ilog)) => {
             let image_path = out_dir.join("picture.bmp");
@@ -91,16 +91,17 @@ pub async fn picture_from_prompt(
                 reply.push(format!("research: {}", l));
             }
             reply.push(
-                "path: synthesized photograph (brand-new pixels from donor statistics)".to_string(),
+                "path: sourced photograph (real photo, delivered as-is with provenance)"
+                    .to_string(),
             );
             reply.push(format!("Done — picture at {}", image_path.display()));
             let body = serde_json::json!({
                 "prompt": prompt,
-                "path": "synthesized-photograph",
-                "donors": photo.donors,
-                "donor_provenance": photo.donor_provenance,
-                "sharpness": photo.sharpness,
-                "min_novelty": photo.min_novelty,
+                "path": "sourced-photograph",
+                "author": photo.author,
+                "license": photo.license,
+                "page_url": photo.page_url,
+                "title": photo.title,
                 "reply": reply,
                 "log": ilog,
             });

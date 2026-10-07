@@ -60,41 +60,6 @@ const LEXICON: &[(&str, &str)] = &[
     ("kids", "human"),
     ("child", "human"),
     ("children", "human"),
-    ("cat", "cat"),
-    ("cats", "cat"),
-    ("dog", "dog"),
-    ("dogs", "dog"),
-    ("elephant", "elephant"),
-    ("elephants", "elephant"),
-    ("horse", "horse"),
-    ("horses", "horse"),
-    ("bird", "bird"),
-    ("birds", "bird"),
-    ("fish", "fish"),
-    ("lion", "lion"),
-    ("lions", "lion"),
-    ("tiger", "tiger"),
-    ("tigers", "tiger"),
-    ("bear", "bear"),
-    ("bears", "bear"),
-    ("car", "car"),
-    ("cars", "car"),
-    ("tree", "tree"),
-    ("trees", "tree"),
-    ("house", "house"),
-    ("houses", "house"),
-    ("cake", "cake"),
-    ("jetski", "jetski"),
-    ("lake", "lake"),
-    ("lakes", "lake"),
-    ("ocean", "ocean"),
-    ("forest", "forest"),
-    ("forests", "forest"),
-    ("desert", "desert"),
-    ("deserts", "desert"),
-    ("sky", "sky"),
-    ("beach", "beach"),
-    ("beaches", "beach"),
     ("salute", "salute"),
     ("salutes", "salute"),
     ("saluting", "salute"),
@@ -150,9 +115,6 @@ const PHRASES: &[(&[&str], &str)] = &[
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConceptKind {
     Human,
-    Fauna,
-    Flora,
-    Thing,
     Action,
     Wearable,
     Fabric,
@@ -166,26 +128,6 @@ const ONTOLOGY: &[(&str, ConceptKind, &[&str])] = &[
     ("man", ConceptKind::Human, &["proportions", "photograph"]),
     ("woman", ConceptKind::Human, &["proportions", "photograph"]),
     ("human", ConceptKind::Human, &["proportions", "photograph"]),
-    ("cat", ConceptKind::Fauna, &["anatomy", "photograph"]),
-    ("dog", ConceptKind::Fauna, &["anatomy", "photograph"]),
-    ("elephant", ConceptKind::Fauna, &["anatomy", "photograph"]),
-    ("horse", ConceptKind::Fauna, &["anatomy", "photograph"]),
-    ("bird", ConceptKind::Fauna, &["anatomy", "photograph"]),
-    ("fish", ConceptKind::Fauna, &["anatomy", "photograph"]),
-    ("lion", ConceptKind::Fauna, &["anatomy", "photograph"]),
-    ("tiger", ConceptKind::Fauna, &["anatomy", "photograph"]),
-    ("bear", ConceptKind::Fauna, &["anatomy", "photograph"]),
-    ("tree", ConceptKind::Flora, &["silhouette", "photograph"]),
-    ("car", ConceptKind::Thing, &["silhouette", "photograph"]),
-    ("house", ConceptKind::Thing, &["silhouette", "photograph"]),
-    ("cake", ConceptKind::Thing, &["silhouette", "photograph"]),
-    ("jetski", ConceptKind::Thing, &["silhouette", "photograph"]),
-    ("lake", ConceptKind::Place, &["photograph"]),
-    ("ocean", ConceptKind::Place, &["photograph"]),
-    ("forest", ConceptKind::Place, &["photograph"]),
-    ("desert", ConceptKind::Place, &["photograph"]),
-    ("sky", ConceptKind::Place, &["photograph"]),
-    ("beach", ConceptKind::Place, &["photograph"]),
     ("salute", ConceptKind::Action, &["pose-reference", "joints"]),
     ("sit", ConceptKind::Action, &["pose-reference", "seat"]),
     ("cross", ConceptKind::Action, &["motion-reference", "place"]),
@@ -305,25 +247,18 @@ pub fn parse_scene(prose: &str) -> SceneSpec {
     let folded = fold_phrases(&tokens(prose));
     let concepts: Vec<&str> = folded.iter().filter_map(|w| concept_of(w)).collect();
 
-    // Subject: first human, fauna, thing, or flora concept; sibling
-    // subject words refine it ("human woman" → human + [woman]).
-    // Non-human subjects (cat, car, tree, …) are first-class
-    // subjects for research — the parser proposes, research
-    // disposes. Wearables/places stay objects, never subjects.
-    let subject_at = concepts.iter().position(|c| {
-        kind_of(c).is_some_and(|k| {
-            k == ConceptKind::Human
-                || k == ConceptKind::Fauna
-                || k == ConceptKind::Thing
-                || k == ConceptKind::Flora
-        })
-    });
+    // Subject: first human concept; non-human subjects arrive
+    // through the open-vocabulary fallback below (position relative
+    // to the verb) — no noun is encoded, research resolves them.
+    // Wearables/places stay objects, never subjects.
+    let subject_at = concepts
+        .iter()
+        .position(|c| kind_of(c).is_some_and(|k| k == ConceptKind::Human));
     let mut subjects = Vec::new();
     if let Some(si) = subject_at {
-        // Sibling subject words refine the primary ("human woman")
+        // Sibling human words refine the primary ("human woman")
         // when adjacent; separated by an action verb they are
-        // COMPANION subjects ("cat sitting in human's lap" — the
-        // human is researched too, never folded away as a modifier).
+        // companions, never folded away as modifiers.
         let action_at: Vec<usize> = concepts
             .iter()
             .enumerate()
@@ -338,7 +273,7 @@ pub fn parse_scene(prose: &str) -> SceneSpec {
         let mut companions: Vec<String> = Vec::new();
         for (i, c) in concepts.iter().enumerate() {
             if i != si
-                && kind_of(c).is_some_and(|k| k == ConceptKind::Human || k == ConceptKind::Fauna)
+                && kind_of(c).is_some_and(|k| k == ConceptKind::Human)
                 && *c != concepts[si]
                 && !companions.iter().any(|s| s == c)
             {
@@ -432,15 +367,11 @@ pub fn parse_scene(prose: &str) -> SceneSpec {
             .unwrap_or_else(|| "subject".to_string()),
     };
 
-    // Objects: wearable / fabric / place concepts in prose order,
-    // plus thing/flora concepts NOT already taken as the subject
-    // (a "car crossing" is a subject; a "man beside a car" keeps
-    // the car as an object). Fauna concepts are subjects, never
-    // objects.
-    let subject_concept: Option<String> = subject_at.map(|si| concepts[si].to_string());
+    // Objects: wearable / fabric / place concepts in prose order.
+    // Every other noun rides the open-vocabulary fallback below —
+    // no noun is encoded, research resolves them.
     let mut objects: Vec<SceneObject> = Vec::new();
     let mut counter = 0u32;
-    let mut subject_skipped = false;
     for c in &concepts {
         match kind_of(c) {
             Some(ConceptKind::Wearable) | Some(ConceptKind::Fabric) | Some(ConceptKind::Place) => {
@@ -462,24 +393,6 @@ pub fn parse_scene(prose: &str) -> SceneSpec {
                     obj.attributes.push("american".to_string());
                 }
                 objects.push(obj);
-            }
-            Some(ConceptKind::Thing) | Some(ConceptKind::Flora) => {
-                // Taken as the subject already? Then it is not also
-                // an object. Otherwise it is a research-candidate
-                // object ("a man beside a car").
-                if !subject_skipped && subject_concept.as_deref() == Some(*c) {
-                    subject_skipped = true;
-                    continue;
-                }
-                counter += 1;
-                objects.push(SceneObject {
-                    id: format!("{}_{}", c, counter),
-                    otype: c.to_string(),
-                    attributes: Vec::new(),
-                    state: Vec::new(),
-                    worn_by: None,
-                    material: None,
-                });
             }
             _ => {}
         }
@@ -737,67 +650,19 @@ pub struct ResearchQuery {
 pub fn plan_research(spec: &SceneSpec) -> Vec<ResearchQuery> {
     let mut out = Vec::new();
     for s in &spec.subjects {
-        let label = if s.attributes.is_empty() {
-            s.stype.clone()
-        } else {
-            format!("{} {}", s.attributes.join(" "), s.stype)
-        };
-        // Humans research through the human path; fauna through
-        // comparative anatomy (skeleton, proportions, photographs of
-        // the animal itself); flora/things through silhouette and
-        // reference photographs. Unclassified leftovers research
-        // through anatomy for the knowledge graph to resolve, never
-        // for the parser to guess.
-        let is_human = matches!(s.stype.as_str(), "man" | "woman" | "human");
-        let is_fauna = matches!(
-            s.stype.as_str(),
-            "cat" | "dog" | "elephant" | "horse" | "bird" | "fish" | "lion" | "tiger" | "bear"
-        );
-        let is_flora_thing = matches!(
-            s.stype.as_str(),
-            "tree" | "car" | "house" | "cake" | "jetski"
-        );
-        if is_human {
-            out.push(ResearchQuery {
-                requirement: format!("subject: {}", label),
-                queries: vec![
-                    format!("human {} proportions reference", label),
-                    format!("human {} photograph", label),
-                    format!("human {} skeleton reference", label),
-                    format!("human {} skin hair reference", label),
-                ],
-                capability: "photographic-subject",
-            });
-        } else if is_fauna {
-            out.push(ResearchQuery {
-                requirement: format!("subject: {}", s.stype),
-                queries: vec![
-                    format!("{} anatomy reference", s.stype),
-                    format!("{} skeleton proportions reference", s.stype),
-                    format!("{} photograph", s.stype),
-                ],
-                capability: "photographic-subject",
-            });
-        } else if is_flora_thing {
-            out.push(ResearchQuery {
-                requirement: format!("subject: {}", s.stype),
-                queries: vec![
-                    format!("{} silhouette reference", s.stype),
-                    format!("{} photograph", s.stype),
-                ],
-                capability: "photo-asset",
-            });
-        } else {
-            out.push(ResearchQuery {
-                requirement: format!("subject: {}", s.stype),
-                queries: vec![
-                    format!("{} anatomy reference", s.stype),
-                    format!("{} body proportions reference", s.stype),
-                    format!("{} photograph", s.stype),
-                ],
-                capability: "photographic-subject",
-            });
-        }
+        // One generic arm for every subject, human or not: the
+        // subject's own words plus a photograph query. No per-subject
+        // branches — research resolves what the noun means, the
+        // planner never encodes it. (People-source routing happens
+        // downstream by source, not here.)
+        out.push(ResearchQuery {
+            requirement: format!("subject: {}", s.stype),
+            queries: vec![
+                format!("{} photograph", s.stype),
+                format!("{} reference", s.stype),
+            ],
+            capability: "photographic-subject",
+        });
     }
     for a in &spec.actions {
         match a.atype.as_str() {

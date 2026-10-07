@@ -24,7 +24,6 @@ pub mod scene_intent;
 pub mod seek;
 pub mod self_model;
 pub mod symbols;
-pub mod synth;
 pub mod synthesize;
 pub mod tasks;
 pub mod understand;
