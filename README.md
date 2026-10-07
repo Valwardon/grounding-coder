@@ -140,14 +140,13 @@ Oracle verify (compiler / tests / parser per language)
   license basis for audit. (`src/engine/plates.rs`, `gc plate`;
   first plate in `samples/plates/` with full provenance)
 - **Plates as research material, never montage** — reference
-  photographs are measured (skin-tone medians, framing, backdrop
-  palettes, ground-truth person boxes as tone/proportion donors),
-  then a fresh image is rendered from those numbers. No donor
-  pixel reaches the output; every requirement carries a
-  researched-or-defaulted receipt that names ROM-table seeds for
-  what live plates have not taught yet.
-  (`src/engine/imagine.rs`, `gc imagine`;
-  `samples/fresh-proof-640x480.bmp` from six banked plates)
+  photographs are measured, person crops box-align
+  (translation/scale only), and the crops collapse to a per-pixel
+  median with seeded detail bounded by measured deviation. No donor
+  pixel reaches the output and no mesh is rendered; novelty against
+  every donor is asserted on the receipt.
+  (`src/engine/synth.rs`, `src/engine/imagine.rs`, `gc imagine`;
+  `samples/synth-proof-192x256.bmp` from 22 licensed donors)
 - **Queryable anatomy, no vectors** — a researched partonomy graph
   (bones, vessels, relations: part-of, articulates, supplied-by)
   answers "vessels near the distal phalanges" by graph walk, with
@@ -156,10 +155,10 @@ Oracle verify (compiler / tests / parser per language)
   (`src/engine/anatomy.rs`)
 - **Imagine** — one command from prose to photo: intent research
   (intent → research plan → classified subjects → structural
-  questions on skeleton, skin, hair), reference research across
+  questions on pose, skin, hair), reference research across
   Commons, web search, and Open Images (adult-filtered boxes as
-  measurement donors), palette/composition study, then fresh
-  construction from the measurements. (`src/engine/imagine.rs`,
+  synthesis donors), palette/composition study, then statistical
+  synthesis of one novel figure. (`src/engine/imagine.rs`,
   `src/engine/intent_research.rs`, `gc imagine`;
   samples in `samples/`)
 - **Family restoration** — dust and scratch detection with

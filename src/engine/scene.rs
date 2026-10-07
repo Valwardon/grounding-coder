@@ -436,63 +436,6 @@ fn intersect(shape: &Shape, origin: Vec3, dir: Vec3) -> Option<Hit> {
     }
 }
 
-/// The studied canon: adult body proportions as fractions of
-/// standing height, after the 7.5-heads artistic canon (head ≈ 1/7.5
-/// of stature, arm span ≈ stature). These are claims with sources
-/// ([`ANATOMY_SOURCES`]), not magic numbers — [`study_anatomy`]
-/// renders a figure built from them and measures the photo to check.
-/// See "Body proportions" and "Human body" on Wikipedia.
-#[derive(Debug, Clone)]
-pub struct BodyPlan {
-    /// Head height / stature (≈1/7.5).
-    pub head_h: f64,
-    /// Hip joint height / stature (≈1/2).
-    pub hip_y: f64,
-    /// Shoulder line height / stature.
-    pub shoulder_y: f64,
-    /// Shoulder half-width / stature.
-    pub shoulder_half: f64,
-    /// Hip half-width / stature.
-    pub hip_half: f64,
-    /// Shoulder→wrist length / stature. Fingertips (not wrists) set
-    /// the span: shoulder_half + arm_len + finger_len ≈ 1/2.
-    pub arm_len: f64,
-    /// Wrist→fingertip length / stature, from the anatomy graph.
-    pub finger_len: f64,
-    /// Wrist→thumb-tip length / stature.
-    pub thumb_len: f64,
-    /// Torso half-width / stature.
-    pub torso_half: f64,
-    /// Limb radii / stature.
-    pub leg_r: f64,
-    pub arm_r: f64,
-}
-
-impl BodyPlan {
-    pub fn canon() -> Self {
-        BodyPlan {
-            head_h: 0.133,
-            hip_y: 0.50,
-            shoulder_y: 0.815,
-            shoulder_half: 0.125,
-            hip_half: 0.095,
-            arm_len: 0.29,
-            finger_len: 0.085,
-            thumb_len: 0.055,
-            torso_half: 0.13,
-            leg_r: 0.055,
-            arm_r: 0.045,
-        }
-    }
-}
-
-/// Where the canon came from. The curiosity loop researches these;
-/// the study verifies the geometry built from them.
-pub const ANATOMY_SOURCES: &[&str] = &[
-    "https://en.wikipedia.org/wiki/Body_proportions",
-    "https://en.wikipedia.org/wiki/Human_body",
-];
-
 /// One rose: stem capsule, two leaves, bloom of center + petal
 /// ring. Materials rose-stem/leaf/bloom, all receipt-addressable.
 pub fn rose(base: Vec3, height: f64, bloom_color: Rgb) -> Vec<Shape> {
@@ -866,21 +809,12 @@ pub fn render_labels(scene: &Scene) -> (Image, Vec<usize>, Vec<String>) {
     render_core(scene)
 }
 
-/// REMOVED: the render-measure study built figures from the canon
-/// and measured its own renders (self-consistency, not validation).
-/// Canon bodies are gone; people come from researched photographs.
-/// The measurement machinery (render_labels, masks) stays for
-/// measuring real plates — that validation is future work.
-/// The research half of the anatomy curiosity: look up the published
-/// canon on verified sources. The returned summary seeds the store's
-/// provenance; the study verifies the geometry. Needs the network —
-/// the dream loop calls this, tests don't.
-pub async fn research_anatomy(oracle: &mut super::research::ResearchOracle) -> Option<String> {
-    oracle
-        .research_word("human body proportions")
-        .await
-        .map(|def| format!("{} [{}]", def.summary, def.source_url))
-}
+// REMOVED: the render-measure study built figures from the canon
+// and measured its own renders (self-consistency, not validation).
+// Canon bodies are gone with the whole anatomy root — no BodyPlan,
+// no proportion tables, no body research hooks. Body knowledge
+// lives in researched photographs, never in this renderer, which
+// builds worlds (tower, ground, sky, props) and nothing else.
 
 #[cfg(test)]
 mod tests {

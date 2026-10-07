@@ -1,28 +1,28 @@
 //! One command from prose to photo: imagine.
 //!
 //! ```text
-//! prose → brief → research references → study them → build fresh
+//! prose → intent → research → rank → deliver
 //! ```
 //!
-//! The loop the user asked for: a request like "man holding peace
-//! sign" is parsed to a brief, reference plates are sourced as
-//! RESEARCH MATERIAL ONLY, the references are MEASURED (skin tone,
-//! backdrop palette, framing — medians across plates, robust to
-//! outliers), and a fresh figure is rendered from those measurements.
-//! Every pixel of the output is rendered, never copied: references
-//! teach palette and composition through numbers, the raytracer makes
-//! the photo. No montage path exists — plates never contribute pixels,
-//! only structural knowledge (skeleton pose, skin, hair, cloth).
+//! Brand-new photos from research — never a donor's bytes, never
+//! a rendered mesh. Researched plates are measured, person crops
+//! are box-aligned (translation/scale only), and the crops collapse
+//! to a per-pixel MEDIAN with seeded detail bounded by measured
+//! deviation. Every output pixel is statistics; novelty against
+//! every donor is asserted, blur is carried on the receipt. No
+//! montage, no claymation, no copying.
 //!
-//! Degradation is honest: with no usable references the build falls
-//! back to defaults and the log says so. Hair is not measured in v1
-//! (no reliable classical cue) — the log states the default used.
+//! Refusal is honest: with too few usable donors the command refuses
+//! with the shortfall instead of averaging strangers thinly — and
+//! the receipt states plainly that classical alignment blur is not
+//! yet photographer-indistinguishable.
+
 use super::plates::SourcedPlate;
 use super::vision::{Image, Rgb};
 
 /// Who stands in the photo. Subjects come from researched
 /// photographs with complete provenance — no likenesses generated,
-/// no minors composited, by construction of the pipeline.
+/// no minors delivered, by construction of the pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubjectKind {
     Man,
@@ -30,7 +30,7 @@ pub enum SubjectKind {
     Person,
 }
 
-/// Procedural props the builder knows how to grow.
+/// Props shape research queries, never geometry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PropKind {
     Roses,
@@ -39,8 +39,7 @@ pub enum PropKind {
 
 /// The parsed request: deterministic keyword scan, stated limits —
 /// no grammar beyond "contains the word". Subject, pose, and props
-/// shape RESEARCH queries now, not geometry: people come from
-/// photographs, never from meshes.
+/// shape RESEARCH queries, never pixels.
 #[derive(Debug, Clone)]
 pub struct Brief {
     pub subject: SubjectKind,
@@ -96,7 +95,8 @@ pub fn parse_brief(prose: &str) -> Brief {
 }
 
 /// What the references taught, per channel as medians. None means
-/// "no usable reference" — the builder falls back to defaults.
+/// "no usable reference" — ranking degrades to size order and the
+/// log says so.
 #[derive(Debug, Clone)]
 pub struct Study {
     pub skin: Option<Rgb>,
@@ -143,6 +143,7 @@ fn median_channel(mut vs: Vec<u8>) -> Option<u8> {
 /// Measure reference plates: skin tone from the largest cleaned skin
 /// blob's mean color, backdrop from the top/bottom bands' dominant
 /// colors, framing from the subject bbox. Median across plates.
+/// Measurements describe the donors — never pixels for output.
 pub fn study_references(plates: &[SourcedPlate]) -> Study {
     let mut skins_r = Vec::new();
     let mut skins_g = Vec::new();
@@ -232,14 +233,14 @@ pub fn study_references(plates: &[SourcedPlate]) -> Study {
 
 /// A bare personal name as author-or-title ("Firstname Lastname",
 /// optional trailing number, nothing else): evidence of an
-/// identified subject. Automatic selection skips these — compositing
-/// strangers is the job; named individuals are a human decision.
+/// identified subject. Selection skips these — delivering strangers
+/// is the job; named individuals are a human decision.
 pub fn looks_like_person_name(s: &str) -> bool {
     // Author strings glue photographer credit and photo title with
     // commas ("lifrita lifi,Christina Hendricks 3"). Only segments
     // AFTER the first can be the title: a lone "John Smith" reads as
     // photographer credit (legitimate), while a trailing bare name
-    // reads as subject identity (automatic selection skips it).
+    // reads as subject identity (selection skips it).
     // Single-segment strings therefore pass — residual misses stay
     // visible in the logged author string for human curation.
     let segments: Vec<&str> = s.split(',').collect();
@@ -258,29 +259,104 @@ pub fn looks_like_person_name(s: &str) -> bool {
     })
 }
 
-/// Fresh construction from already-sourced plates (no network):
-/// measure the donors (skin tone, backdrop palette, framing medians),
-/// then render a new image from those numbers. Pure over its inputs —
-/// the offline-testable core. Plates contribute measurements only;
-/// no donor pixel reaches the output.
-pub fn imagine_from_plates(
+/// Ground-truth donor box: plate index plus fractional person box.
+pub type DonorBox = (usize, (f64, f64, f64, f64));
+
+/// Person box of one plate as fractions: measured skin-blob bbox
+/// over frame dims. `None` when no measurable subject (wash,
+/// speckle, or too small) — synthesis skips it, never guesses one.
+fn person_box_frac(img: &Image) -> Option<(f64, f64, f64, f64)> {
+    let (w, h) = (img.width, img.height);
+    if w < 32 || h < 32 {
+        return None;
+    }
+    let frame_area = (w * h) as f64;
+    let cleaned = Image::morph_close(&Image::morph_open(&img.skin_mask(), w, h, 2), w, h, 2);
+    let blobs = Image::all_blobs(&cleaned, w, h, (frame_area * 0.002) as usize);
+    let (bx0, by0, bx1, by1, area, _parts) = Image::assemble_subject(&blobs, w, h, 0.06)?;
+    let fraction = area as f64 / frame_area;
+    if fraction > 0.6 || fraction < 0.001 {
+        return None;
+    }
+    Some((
+        bx0 as f64 / w as f64,
+        by0 as f64 / h as f64,
+        (bx1 + 1) as f64 / w as f64,
+        (by1 + 1) as f64 / h as f64,
+    ))
+}
+
+/// A synthesized photograph: brand-new pixels computed from
+/// researched donors, plus the receipt that proves it. No donor
+/// pixel is copied; novelty against every donor is asserted.
+#[derive(Debug, Clone)]
+pub struct SynthPhoto {
+    pub image: Image,
+    /// Donor plate indices behind the pixels.
+    pub donors: Vec<usize>,
+    /// Provenance lines (author + license + page) per donor.
+    pub donor_provenance: Vec<String>,
+    /// Sharpness proxy (higher = crisper; pose-mixed medians score low).
+    pub sharpness: f64,
+    /// Minimum distance to any donor (0 = copy — must never be).
+    pub min_novelty: f64,
+    /// Why skipped inputs were skipped.
+    pub refused: Vec<String>,
+}
+
+/// Synthesize from already-sourced plates (no network): extract
+/// person donors (ground-truth boxes where given, measured skin-blob
+/// boxes otherwise), synthesize one novel figure from their median.
+/// Pure over its inputs — the offline-testable core. Refuses (naming
+/// the shortfall) below the donor gate.
+pub fn synthesize_from_plates(
     brief: &Brief,
     plates: &[SourcedPlate],
-    bg_plates: &[SourcedPlate],
-    width: u32,
-    height: u32,
-) -> Result<(Image, Vec<String>), String> {
-    let _ = width;
-    let _ = height;
+    oi_boxes: &[DonorBox],
+) -> Result<(SynthPhoto, Vec<String>), String> {
     let mut log = vec![format!(
         "brief: {:?} {:?} {:?}",
         brief.subject, brief.pose, brief.props
     )];
     log.push(format!(
-        "research-only: {} subject plate(s), {} backdrop plate(s) — measuring, never copying",
+        "research-only: {} plate(s) + {} box(es) — synthesizing, never copying",
         plates.len(),
-        bg_plates.len()
+        oi_boxes.len()
     ));
+    // Donor extraction: name-titled plates excluded (identified
+    // people are a human decision); ground-truth boxes win wherever
+    // given, measured skin-blob boxes otherwise; unmeasurable plates
+    // skipped with reasons.
+    let mut refused: Vec<String> = Vec::new();
+    let mut cand_imgs: Vec<Image> = Vec::new();
+    let mut cand_boxes: Vec<(f64, f64, f64, f64)> = Vec::new();
+    let mut cand_ids: Vec<usize> = Vec::new();
+    let mut cand_gt: Vec<bool> = Vec::new();
+    for (i, p) in plates.iter().enumerate() {
+        if looks_like_person_name(&p.provenance.author) {
+            refused.push(format!(
+                "plate {}: name-titled ({:?})",
+                i, p.provenance.author
+            ));
+            continue;
+        }
+        if let Some((_, bbox)) = oi_boxes.iter().find(|(pi, _)| *pi == i) {
+            cand_imgs.push(p.image.clone());
+            cand_boxes.push(*bbox);
+            cand_ids.push(i);
+            cand_gt.push(true);
+        } else {
+            match person_box_frac(&p.image) {
+                Some(m) => {
+                    cand_imgs.push(p.image.clone());
+                    cand_boxes.push(m);
+                    cand_ids.push(i);
+                    cand_gt.push(false);
+                }
+                None => refused.push(format!("plate {}: no measurable person — skipped", i)),
+            }
+        }
+    }
     let study = study_references(plates);
     for n in &study.notes {
         log.push(format!("study: {}", n));
@@ -291,36 +367,60 @@ pub fn imagine_from_plates(
     if let Some(f) = study.subject_fill {
         log.push(format!("study: fill {:.2}", f));
     }
-    let bg_study = study_references(bg_plates);
-    if let Some(t) = bg_study.backdrop_top {
-        log.push(format!("study: backdrop top {:?}", t));
+    let n_gt = cand_gt.iter().filter(|g| **g).count();
+    log.push(format!(
+        "donors: {} measurable person(s) ({} ground-truth boxes), {} refused",
+        cand_imgs.len(),
+        n_gt,
+        refused.len()
+    ));
+    for r in &refused {
+        log.push(format!("donor refused: {}", r));
     }
-    // Fresh construction from the measurements: researched skin
-    // palette when the study supports it, stated defaults otherwise.
-    // Proportions ride the measured rig; the receipt says which.
-    let skin = study.skin.map(|c| {
-        (
-            c,
-            format!(
-                "researched: median tone over {} plate(s)",
-                study.plates_used
-            ),
-        )
-    });
-    if skin.is_none() {
-        log.push("study: no measurable skin — skin defaulted, receipted".to_string());
+    let seed: u64 = 0xF00D;
+    match super::synth::synthesize_body(&cand_imgs, &cand_boxes, seed) {
+        Ok((image, slog)) => {
+            for op in &slog.ops {
+                log.push(format!("synth: {}", op));
+            }
+            for r in &slog.refused {
+                log.push(format!("synth refused: {}", r));
+            }
+            // Donor provenance travels into the product receipt.
+            let donor_provenance: Vec<String> = cand_ids
+                .iter()
+                .map(|id| {
+                    let p = &plates[*id];
+                    format!(
+                        "{} | {} | {}",
+                        p.provenance.author, p.provenance.license, p.provenance.page_url
+                    )
+                })
+                .collect();
+            for d in &donor_provenance {
+                log.push(format!("donor: {}", d));
+            }
+            log.push(
+                "product: brand-new pixels from donor statistics — not a donor copy, not a render"
+                    .to_string(),
+            );
+            Ok((
+                SynthPhoto {
+                    image,
+                    donors: cand_ids,
+                    donor_provenance,
+                    sharpness: slog.sharpness,
+                    min_novelty: slog.min_novelty,
+                    refused: slog.refused.clone(),
+                },
+                log,
+            ))
+        }
+        Err(e) => {
+            log.push(format!("refused: {}", e));
+            Err(format!("synthesis refused: {}", e))
+        }
     }
-    let prompt = &brief.raw;
-    let creation = super::studio::create_image_with(prompt, skin, None)
-        .map_err(|e| format!("cannot construct fresh image: {}", e))?;
-    log.push("path: fresh construction (all pixels rendered)".to_string());
-    for r in &creation.receipt {
-        log.push(format!(
-            "receipt: {} researched={} {}",
-            r.requirement, r.researched, r.note
-        ));
-    }
-    Ok((creation.image, log))
 }
 
 /// Place word in prose, if any: backdrops and query anchors come
@@ -468,12 +568,12 @@ fn evidence_words(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// Sane OpenImages boxes for MEASUREMENT: full-frame boxes reframe
+/// Sane OpenImages boxes for synthesis: full-frame boxes reframe
 /// the whole photo (nothing learned), edge-cropped boxes bleed, and
-/// name-titled plates name an identified person — measurement skips
+/// name-titled plates name an identified person — synthesis skips
 /// them (logged) while the library keeps them listed. Returns the
-/// indices of usable donor boxes: their pixels are measured for tone
-/// and proportion, never mounted or copied.
+/// indices of usable donor plates: their crops feed the median,
+/// never the output.
 fn usable_openimages(
     oi_plates: &[super::plates::openimages::OpenPlate],
     log: &mut Vec<String>,
@@ -508,22 +608,20 @@ fn usable_openimages(
     ranked.into_iter().map(|(i, _)| i).collect()
 }
 
-/// The full trajectory: research references for the brief, study
-/// them, render a fresh photo from the measurements. One command,
-/// full receipts. Per-request training, narrow scope: research only
-/// what this prompt needs (subject + pose + props), measure the
-/// plates as structural knowledge (skin tone, framing, palette —
-/// never pixels), then construct fresh — grounded, never from noise,
-/// never a montage.
+/// The full trajectory: research the brief, study the plates,
+/// synthesize one novel figure from their median. One command, full
+/// receipts. Per-request training, narrow scope: research only what
+/// this prompt needs (subject + pose + props) — grounded, never from
+/// noise, never a donor copy, never a render.
 /// Two bounded rounds: round 1 researches the brief; coverage gaps
 /// fund round 2 with refined queries; the round closing more gaps
 /// wins (ties keep round 1). Refusal is never terminal while gaps
 /// name what is missing — the loop only stops at two rounds.
 pub async fn imagine(
     prose: &str,
-    width: u32,
-    height: u32,
-) -> Result<(Image, Vec<String>), Vec<String>> {
+    _width: u32,
+    _height: u32,
+) -> Result<(SynthPhoto, Vec<String>), Vec<String>> {
     let brief = parse_brief(prose);
     let mut log = vec![format!(
         "brief: {:?} {:?} {:?}",
@@ -542,9 +640,8 @@ pub async fn imagine(
         (SubjectKind::Person, None) => ("person".to_string(), false),
     };
     let place = place_word(prose);
-    // All subjects are researched for structural knowledge (tone,
-    // framing, palette); multi-subject scenes research every noun,
-    // never mounting plate pixels.
+    // All subjects are researched for candidacy — the main noun plus
+    // any companions the scene names. Nobody is mounted or rendered.
     let extra_nouns: Vec<String> = scene
         .subjects
         .iter()
@@ -560,8 +657,6 @@ pub async fn imagine(
         place,
         extra_nouns.clone(),
         None,
-        width,
-        height,
     )
     .await;
     let g1 = verify_coverage(&scene, &e1);
@@ -588,8 +683,6 @@ pub async fn imagine(
         place,
         extra_nouns,
         Some(gq),
-        width,
-        height,
     )
     .await;
     let g2 = verify_coverage(&scene, &e2);
@@ -627,13 +720,13 @@ pub async fn imagine(
     }
 }
 
-/// One research round: research every named subject as structural
-/// knowledge (tone, framing, palette), measure the donors, then
-/// render a fresh image from the numbers. Override queries replace
-/// the default subject query (tried in order until plates land).
-/// Returns the outcome plus evidence words for coverage checking.
-/// Round 1 passes None and researches the brief. No montage: plates
-/// never contribute pixels, only answers to structural questions.
+/// One research round: research every named subject as donors,
+/// study them, synthesize one novel figure from their median.
+/// Override queries replace the default subject query (tried in
+/// order until plates land). Returns the outcome plus evidence words
+/// for coverage checking. Round 1 passes None and researches the
+/// brief. No copying, no montage, no rendering: brand-new pixels
+/// from donor statistics, with donor provenance on the receipt.
 #[allow(clippy::too_many_arguments)]
 async fn attempt(
     prose: &str,
@@ -643,22 +736,17 @@ async fn attempt(
     place: Option<&str>,
     extra_nouns: Vec<String>,
     override_queries: Option<Vec<String>>,
-    width: u32,
-    height: u32,
-) -> (Result<(Image, Vec<String>), Vec<String>>, Vec<String>) {
-    let _ = (width, height);
+) -> (Result<(SynthPhoto, Vec<String>), Vec<String>>, Vec<String>) {
     let mut log = Vec::new();
     let mut evidence = Vec::new();
     // Intent first: WHAT the prose asks, WHAT research satisfies it,
-    // WHICH subjects need it, and WHICH structural questions plates
-    // must answer. Fetching below serves these intents.
+    // WHICH subjects need it. Fetching below serves these intents.
     let researched = super::intent_research::research_intent(prose);
     for l in super::intent_research::log_lines(&researched) {
         log.push(l);
     }
-    // Every named subject is researched for structure — the main
-    // noun plus any companions the scene names (cat + human both
-    // teach tone and framing; nobody is mounted).
+    // Every named subject is researched as a candidate — the main
+    // noun plus any companions the scene names. Nobody is rendered.
     let mut all_nouns = vec![subject_word.to_string()];
     for n in &extra_nouns {
         if !all_nouns.contains(n) {
@@ -690,8 +778,7 @@ async fn attempt(
             break;
         }
     }
-    // Companion nouns research their own structure too — each noun's
-    // plates answer tone/framing questions for the fresh build.
+    // Companion nouns research their own candidacy too.
     for noun in all_nouns.iter().skip(1).take(2) {
         let q = format!("{} photograph", noun);
         log.push(format!("research: query {:?}", q));
@@ -722,14 +809,14 @@ async fn attempt(
         evidence.extend(evidence_words(&p.title));
     }
     log.push(format!(
-        "references: {} plate(s) — research material, pixels never copied",
+        "references: {} plate(s) — donors for synthesis, never delivered",
         plates.len()
     ));
     // Open Images is a people-only index (Person/Woman boxes): for
     // non-person subjects it would return strangers' photos as false
-    // donors, so measurement skips it with the reason stated. For
-    // people, sane boxes join the study as tone/proportion donors —
-    // measured, never mounted.
+    // donors, so candidacy skips it with the reason stated. For
+    // people, sane boxes join as donors with their ground-truth
+    // boxes — measured, never delivered.
     let oi_cache = std::path::Path::new(".grounding/openimages");
     let oi_query = sanitize_search_query(prose);
     let (oi_plates, oi_refused) = if generic {
@@ -743,73 +830,26 @@ async fn attempt(
     }
     let usable = usable_openimages(&oi_plates, &mut log);
     log.push(format!(
-        "openimages: {} plate(s), {} usable measurement donor(s)",
+        "openimages: {} plate(s), {} usable donor(s)",
         oi_plates.len(),
         usable.len()
     ));
-    let mut donor_images: Vec<SourcedPlate> = plates;
+    // Ground-truth boxes, indexed against the combined donor list:
+    // OI plates append after the Commons/Web plates.
+    let base = plates.len();
+    let mut all_plates = plates;
+    let mut oi_boxes: Vec<DonorBox> = Vec::new();
     for idx in usable.iter().take(8) {
         let hit = &oi_plates[*idx];
         evidence.extend(evidence_words(&hit.plate.title));
-        donor_images.push(hit.plate.clone());
+        oi_boxes.push((base + oi_boxes.len(), hit.bbox));
+        all_plates.push(hit.plate.clone());
     }
-    // Structural study: skin tone, framing, and backdrop palette as
-    // medians across all donors. These numbers drive fresh
-    // construction; donor pixels are dropped after measuring.
-    let study = study_references(&donor_images);
-    for n in &study.notes {
-        log.push(format!("study: {}", n));
-    }
-    if let Some(s) = study.skin {
-        log.push(format!("study: skin {:?}", s));
-    }
-    if let Some(f) = study.subject_fill {
-        log.push(format!("study: fill {:.2}", f));
-    }
-    // Backdrop palette: the named prop or place when present, else a
-    // generic landscape — researched for color, rendered procedurally.
-    let bg_query = if brief.props.contains(&PropKind::Flag) {
-        "american flag".to_string()
-    } else if let Some(p) = place {
-        format!("{} landscape", p)
-    } else {
-        "landscape".to_string()
-    };
-    let (bg_plates, bg_refused) = super::plates::source_plates_web(&bg_query, 3).await;
-    for r in &bg_refused {
-        log.push(format!("backdrop refused: {}", r));
-    }
-    evidence.extend(evidence_words(&bg_query));
-    for bg in &bg_plates {
-        evidence.extend(evidence_words(&bg.title));
-    }
-    let bg_study = study_references(&bg_plates);
-    if let Some(t) = bg_study.backdrop_top {
-        log.push(format!("study: backdrop palette {:?}", t));
-    }
-    // Fresh construction from researched numbers only.
-    let skin = study.skin.map(|c| {
-        (
-            c,
-            format!(
-                "researched: median tone over {} donor(s)",
-                study.plates_used
-            ),
-        )
-    });
-    if skin.is_none() {
-        log.push("study: no measurable skin — skin defaulted, receipted".to_string());
-    }
-    match super::studio::create_image_with(prose, skin, None) {
-        Ok(creation) => {
-            log.push("path: fresh construction (all pixels rendered)".to_string());
-            for r in &creation.receipt {
-                log.push(format!(
-                    "receipt: {} researched={} {}",
-                    r.requirement, r.researched, r.note
-                ));
-            }
-            (Ok((creation.image, log)), evidence)
+    // Study, then synthesize one novel figure from the donors.
+    match synthesize_from_plates(brief, &all_plates, &oi_boxes) {
+        Ok((photo, mut chain)) => {
+            log.append(&mut chain);
+            (Ok((photo, log)), evidence)
         }
         Err(e) => {
             log.push(format!("refused: {}", e));
@@ -904,8 +944,8 @@ mod tests {
     fn measurement_skips_unusable_boxes() {
         use super::super::plates::openimages::OpenPlate;
         // Full-frame, edge-cropped, and name-titled boxes are skipped
-        // for measurement (logged); clean boxes are usable donors —
-        // measured, never mounted.
+        // for delivery (logged); clean boxes are usable candidates —
+        // delivered as-is, never altered.
         let mk = |box_: (f64, f64, f64, f64), author: &str| OpenPlate {
             plate: SourcedPlate {
                 image: Image::blank(100, 100, Rgb::new(10, 10, 10)),
@@ -1008,58 +1048,83 @@ mod tests {
         assert!((top.r as i32 - 60).abs() <= 8, "{:?}", top);
     }
 
-    #[test]
-    fn from_plates_constructs_fresh() {
-        // Donor plates are measured, then a fresh image is rendered
-        // from the numbers — no montage, no copied pixels.
-        let mk = |img: Image| SourcedPlate {
-            image: img,
-            provenance: PlateProvenance {
-                source_url: "s".to_string(),
-                page_url: "s".to_string(),
-                author: "t".to_string(),
-                license: "t".to_string(),
-            },
-            basis: "t".to_string(),
-            title: "t".to_string(),
-        };
-        let brief = parse_brief("a man standing");
-        let donors = vec![
-            mk(reference_plate(Rgb::new(200, 150, 115), Rgb::new(60, 80, 120)).image),
-            mk(reference_plate(Rgb::new(205, 155, 120), Rgb::new(62, 82, 122)).image),
-        ];
-        let bg = vec![mk(reference_plate(
-            Rgb::new(200, 150, 115),
-            Rgb::new(40, 120, 60),
-        )
-        .image)];
-        let (img, log) =
-            imagine_from_plates(&brief, &donors, &bg, 64, 80).expect("constructs fresh");
-        assert!(img.width > 0 && img.height > 0);
-        assert!(
-            log.iter().any(|l| l.contains("fresh construction")),
-            "{:?}",
-            log
-        );
-        assert!(log.iter().any(|l| l.contains("research-only")), "{:?}", log);
-        assert!(
-            !log.iter().any(|l| l.contains("photographic (plate")),
-            "no montage path: {:?}",
-            log
-        );
-        // With no plates at all: still constructs from stated
-        // defaults (honestly receipted), never a montage, never
-        // donor pixels.
-        let (_, log) = imagine_from_plates(&brief, &[], &[], 64, 80).expect("defaults construct");
-        assert!(log.iter().any(|l| l.contains("defaulted")), "{:?}", log);
+    fn body_donors(n: usize) -> Vec<SourcedPlate> {
+        // Alternating close tones: the median holds, graft noise keeps
+        // novelty above zero, aspect coherence holds (same geometry).
+        (0..n)
+            .map(|i| {
+                let tone = if i % 2 == 0 {
+                    Rgb::new(200, 150, 115)
+                } else {
+                    Rgb::new(205, 155, 120)
+                };
+                reference_plate(tone, Rgb::new(60, 80, 120))
+            })
+            .collect()
     }
 
     #[test]
-    fn study_drives_construction_not_copying() {
-        // The study is the only thing construction sees: medians
-        // across donors, never donor pixels. Two agreeing donors
-        // plus one outlier hold the median; the receipt names the
-        // donor count so the claim stays checkable.
+    fn synthesis_makes_new_pixels_from_donors() {
+        // Eight measured donors in, one novel figure out: canon
+        // dimensions, asserted novelty (not a copy of any donor),
+        // donor provenance on the product, synthesis ops in the log.
+        let donors = body_donors(8);
+        let brief = parse_brief("a man standing");
+        let (photo, log) = synthesize_from_plates(&brief, &donors, &[]).expect("synthesizes");
+        assert_eq!(
+            (photo.image.width, photo.image.height),
+            (crate::engine::synth::BODY_W, crate::engine::synth::BODY_H)
+        );
+        assert_eq!(photo.donors.len(), 8);
+        assert_eq!(photo.donor_provenance.len(), 8);
+        assert!(photo.min_novelty > 0.0, "must not be a copy");
+        assert!(photo.sharpness >= 0.0);
+        assert!(
+            log.iter().any(|l| l.contains("brand-new pixels")),
+            "{:?}",
+            log
+        );
+        assert!(
+            !log.iter().any(|l| l.contains("delivered: plate")),
+            "no delivery path: {:?}",
+            log
+        );
+        // Product pixels differ from every donor crop: novelty is
+        // measured, not claimed.
+        for d in &donors {
+            let mut same = 0usize;
+            let mut total = 0usize;
+            for y in (0..photo.image.height).step_by(7) {
+                for x in (0..photo.image.width).step_by(7) {
+                    // Donors are 120x160; sample the overlapping window.
+                    if x < d.image.width && y < d.image.height {
+                        total += 1;
+                        if photo.image.get(x, y) == d.image.get(x, y) {
+                            same += 1;
+                        }
+                    }
+                }
+            }
+            assert!(
+                (same as f64) < (total as f64) * 0.99,
+                "product copies a donor: {}/{} match",
+                same,
+                total
+            );
+        }
+        // Below the donor gate: honest refusal with the shortfall.
+        let thin = body_donors(3);
+        let err = synthesize_from_plates(&brief, &thin, &[]).expect_err("must refuse");
+        assert!(err.contains("INSUFFICIENT"), "{:?}", err);
+        // With no plates at all: honest refusal, never fabrication.
+        let err = synthesize_from_plates(&brief, &[], &[]).expect_err("must refuse");
+        assert!(err.contains("INSUFFICIENT"), "{:?}", err);
+    }
+
+    #[test]
+    fn study_feeds_synthesis_not_copying() {
+        // The study measures donors; synthesis consumes the crops.
+        // Two agreeing donors plus one outlier hold the median.
         let donors = vec![
             reference_plate(Rgb::new(200, 150, 115), Rgb::new(60, 80, 120)),
             reference_plate(Rgb::new(205, 155, 120), Rgb::new(62, 82, 122)),
@@ -1069,6 +1134,11 @@ mod tests {
         assert_eq!(study.plates_used, 3);
         let skin = study.skin.expect("skin measured");
         assert!((skin.r as i32 - 200).abs() <= 8, "{:?}", skin);
+        // Every synthetic donor yields a measurable person box.
+        for d in &donors {
+            assert!(person_box_frac(&d.image).is_some());
+        }
+        assert!(person_box_frac(&Image::blank(120, 160, Rgb::new(60, 80, 120))).is_none());
     }
 
     #[test]

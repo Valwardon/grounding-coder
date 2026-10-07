@@ -1,34 +1,47 @@
 //! Photo gate: every build proves, with real pixels, that the loop
-//! holds end to end — messy prose routes to the right action, humans
-//! render as humans, and scenes render as worlds.
+//! holds end to end — messy prose routes to the right action,
+//! researched donors synthesize a novel figure, and scenes render
+//! as worlds.
 //!
 //! Three questions, three answers, all offline and deterministic:
 //!   1. Does it understand the action? Visual verbs (`imagine`,
 //!      `render`, `draw`) reach the create frame with a confidence
 //!      receipt — Ask with curiosity, never a vacuous Block or a
 //!      blind Execute.
-//!   2. Does it create humans? The genome waver renders skin, flag,
-//!      and noodle pixels (receipt-measured, thresholds pinned from
-//!      live 320x240 renders with ~50% margin).
+//!   2. Is the human photo brand-new? Eight synthetic donors median
+//!      into a novel figure: novelty asserted above zero, sharpness
+//!      measured, donor bytes nowhere in the product.
 //!   3. What about scene? The demo world renders sky/tower/ground
 //!      with sky up top and ground below (pixel-sampled, not assumed).
 //!
-//! Both photos commit under `samples/` next to their JSON receipts —
+//! The scene photo commits under `samples/` next to its JSON receipt —
 //! the photo IS the test output, not a promise of one.
 use grounding_coder::engine::{
-    figure, human,
+    imagine::{parse_brief, synthesize_from_plates},
+    plates::{PlateProvenance, SourcedPlate},
     scene::{self, demo_scene},
     understand::{self, Disposition},
-    vision::Image,
+    vision::{Image, Rgb},
 };
 use std::collections::HashMap;
 
 const W: u32 = 320;
 const H: u32 = 240;
 
-fn test_genome() -> human::HumanGenome {
-    human::HumanGenome::with_params(35, 0.5, 0.55, 0.5, 0.95, 0.8, 0.5, 0.6, 0.5, 1.0)
-        .expect("test genome validates")
+fn donor(skin: Rgb) -> SourcedPlate {
+    let mut img = Image::blank(120, 160, Rgb::new(60, 80, 120));
+    img.draw_disc(60, 70, 28, skin);
+    SourcedPlate {
+        image: img,
+        provenance: PlateProvenance {
+            source_url: "synthetic".to_string(),
+            page_url: "synthetic".to_string(),
+            author: "test".to_string(),
+            license: "test".to_string(),
+        },
+        basis: "test".to_string(),
+        title: "test".to_string(),
+    }
 }
 
 fn disp(prose: &str) -> (String, Disposition, f64) {
@@ -98,33 +111,52 @@ fn photo_prose_routes_draw_waver_to_create_ask() {
     assert_eq!(d, Disposition::Ask);
 }
 
-// --- 2. Does it create humans? ---
+// --- 2. Is the human photo brand-new? ---
 
 #[test]
-fn figure_renders_human_pixels_and_commits_photo() {
-    let (img, receipt) = scene::render(&figure::waver_scene(W, H, &test_genome()));
-    let m = receipt_map(&receipt);
-    let skin = m.get("skin").copied().unwrap_or(0) + m.get("eye-white").copied().unwrap_or(0);
-    assert!(skin > 600, "face must read, got {:?}", receipt);
-    let red = m.get("flag-red").copied().unwrap_or(0)
-        + m.get("leaf").copied().unwrap_or(0)
-        + m.get("mouth-open").copied().unwrap_or(0);
-    assert!(red > 500, "flag must read, got {:?}", receipt);
-    let white =
-        m.get("flag-white").copied().unwrap_or(0) + m.get("eye-white").copied().unwrap_or(0);
-    assert!(white > 250, "contrast must read, got {:?}", receipt);
-    let noodle: u64 = m.get("noodle").copied().unwrap_or(0);
-    assert!(noodle > 150, "noodle hat must read, got {:?}", receipt);
-
-    // Same finish as `gc figure` (fixed seed: byte-identical every run).
-    let mut finished = img;
-    finished.grade(1.08, 4.0);
-    finished.vignette(0.25);
-    finished.grain(0xF16E, 4);
-    let (bmp, json) = write_photo("photo-gate-figure", &finished, &receipt);
-    let back = check_bmp_file(&bmp);
-    assert!(back.mean_brightness() > 0.1 && back.mean_brightness() < 0.9);
-    assert!(json.exists());
+fn synthesis_makes_novel_figure_not_a_copy() {
+    // Eight synthetic donors (alternating close tones) synthesize
+    // one novel figure: every product pixel is statistics, novelty
+    // is asserted, and the product matches no donor's bytes.
+    let donors: Vec<SourcedPlate> = (0..8)
+        .map(|i| {
+            donor(if i % 2 == 0 {
+                Rgb::new(200, 150, 115)
+            } else {
+                Rgb::new(205, 155, 120)
+            })
+        })
+        .collect();
+    let brief = parse_brief("a man standing");
+    let (photo, log) = synthesize_from_plates(&brief, &donors, &[]).expect("synthesizes");
+    assert_eq!(photo.donors.len(), 8);
+    assert!(photo.min_novelty > 0.0, "product must differ from donors");
+    assert!(photo.sharpness >= 0.0);
+    assert!(
+        log.iter().any(|l| l.contains("brand-new pixels")),
+        "{:?}",
+        log
+    );
+    // Product bytes are no donor's bytes (sampled comparison).
+    for (i, d) in donors.iter().enumerate() {
+        let mut same = 0usize;
+        let mut total = 0usize;
+        for y in (0..photo.image.height.min(d.image.height)).step_by(5) {
+            for x in (0..photo.image.width.min(d.image.width)).step_by(5) {
+                total += 1;
+                if photo.image.get(x, y) == d.image.get(x, y) {
+                    same += 1;
+                }
+            }
+        }
+        assert!(
+            (same as f64) < (total as f64) * 0.99,
+            "donor {} copied: {}/{} match",
+            i,
+            same,
+            total
+        );
+    }
 }
 
 // --- 3. What about scene? ---

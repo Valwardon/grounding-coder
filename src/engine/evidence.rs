@@ -274,27 +274,67 @@ impl Default for EvidenceStore {
     }
 }
 
-/// Feature extraction at ingestion: coarse bands + aspect + tones +
-/// brightness via the classical classifiers. Pure and deterministic.
+/// Feature extraction at ingestion: skin-mask fractions in head /
+/// torso / legs thirds-bands, frame aspect, mean brightness, and
+/// median skin tone — straight off the engine's own vision buffer.
+/// Pure and deterministic. These features rank researched plates for
+/// delivery; they never feed a renderer.
 pub fn features_from_plate(img: &super::vision::Image) -> HashMap<String, f64> {
-    use super::body_measure::{PersonBox, measure_plate};
-    let pb = PersonBox {
-        x0: 0,
-        y0: 0,
-        x1: img.width,
-        y1: img.height,
+    let (w, h) = (img.width, img.height);
+    let mask = img.skin_mask();
+    let band_frac = |y0: u32, y1: u32| -> f64 {
+        if w == 0 || y1 <= y0 {
+            return 0.0;
+        }
+        let mut n = 0u64;
+        let mut total = 0u64;
+        for y in y0..y1.min(h) {
+            for x in 0..w {
+                total += 1;
+                if mask[(y * w + x) as usize] {
+                    n += 1;
+                }
+            }
+        }
+        if total == 0 {
+            0.0
+        } else {
+            n as f64 / total as f64
+        }
     };
-    let m = measure_plate(img, &pb);
     let mut f = HashMap::new();
-    f.insert("skin_head".to_string(), m.skin_head);
-    f.insert("skin_torso".to_string(), m.skin_torso);
-    f.insert("skin_legs".to_string(), m.skin_legs);
-    f.insert("aspect".to_string(), m.aspect);
+    f.insert("skin_head".to_string(), band_frac(0, h / 3));
+    f.insert("skin_torso".to_string(), band_frac(h / 3, 2 * h / 3));
+    f.insert("skin_legs".to_string(), band_frac(2 * h / 3, h));
+    f.insert(
+        "aspect".to_string(),
+        if h == 0 { 0.0 } else { w as f64 / h as f64 },
+    );
     f.insert("brightness".to_string(), img.mean_brightness());
-    if let Some(t) = m.skin_tone {
-        f.insert("tone_r".to_string(), t.r as f64);
-        f.insert("tone_g".to_string(), t.g as f64);
-        f.insert("tone_b".to_string(), t.b as f64);
+    // Median tone over masked pixels only.
+    let mut rs = Vec::new();
+    let mut gs = Vec::new();
+    let mut bs = Vec::new();
+    for y in 0..h {
+        for x in 0..w {
+            if !mask[(y * w + x) as usize] {
+                continue;
+            }
+            if let Some(p) = img.get(x, y) {
+                rs.push(p.r);
+                gs.push(p.g);
+                bs.push(p.b);
+            }
+        }
+    }
+    if !rs.is_empty() {
+        rs.sort_unstable();
+        gs.sort_unstable();
+        bs.sort_unstable();
+        let mid = rs.len() / 2;
+        f.insert("tone_r".to_string(), rs[mid] as f64);
+        f.insert("tone_g".to_string(), gs[mid] as f64);
+        f.insert("tone_b".to_string(), bs[mid] as f64);
     }
     f
 }

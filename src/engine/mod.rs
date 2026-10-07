@@ -1,50 +1,32 @@
 pub mod accel;
-pub mod anatomy;
 pub mod arena;
-pub mod assembly;
-pub mod body_measure;
-pub mod body_oracle;
 pub mod budget;
 pub mod catalog;
-pub mod conditioning;
 pub mod corrector;
-pub mod deform;
 pub mod error;
 pub mod evidence;
 pub mod experiment;
-pub mod figure;
-pub mod human;
 pub mod imagine;
 pub mod intent_research;
 pub mod knowledge;
 pub mod lang;
-pub mod material;
 pub mod mesh;
-pub mod object_model;
 pub mod pathfind;
-pub mod photo;
 pub mod picture;
 pub mod plan;
 pub mod plates;
-pub mod pose_learn;
-pub mod probe;
 pub mod rank;
 pub mod recipes;
-pub mod refine;
 pub mod research;
 pub mod restore;
 pub mod scene;
 pub mod scene_intent;
 pub mod seek;
 pub mod self_model;
-pub mod skeleton;
-pub mod studio;
 pub mod symbols;
 pub mod synth;
 pub mod synthesize;
 pub mod tasks;
-pub mod taxon;
-pub mod truth;
 pub mod understand;
 pub mod unknown;
 pub mod verifier;
@@ -598,67 +580,16 @@ impl CodeBot {
     /// Delivery (GitHub publish) is orthogonal to proof: it runs on every
     /// terminal outcome — including Blocked — and only appends to the
     /// message, never flips success into failure or vice versa.
-    /// Full verification: compiler/tests plus, for picture-flavored
-    /// intents, a rendered probe photo through the photo oracle.
-    /// Goal words (photo/picture/skin/render/image) trigger the
-    /// probe deterministically. Photo diagnostics join the error
-    /// list so the repair loop can act on them like any failure.
+    /// Full verification: compiler/tests through the language
+    /// oracle. Picture requests never reach code verification — chat
+    /// routes them to researched-photograph delivery instead, so no
+    /// rendered probe exists here and none is pretended.
     async fn verify_all(
         &self,
         intent: &StructuredIntent,
     ) -> crate::engine::verifier::VerificationResult {
-        let mut verdict = self.verifier.verify().await;
-        let hay = format!(
-            "{} {}",
-            intent.goal,
-            intent
-                .actions
-                .iter()
-                .map(|a| match a {
-                    crate::engine::tasks::IntentAction::Action { action, .. } => action.clone(),
-                    crate::engine::tasks::IntentAction::Research { topic, .. } => topic.clone(),
-                })
-                .collect::<Vec<_>>()
-                .join(" ")
-        )
-        .to_lowercase();
-        let wants_photo = ["photo", "picture", "skin", "render", "image"]
-            .iter()
-            .any(|w| hay.contains(w));
-        if !wants_photo {
-            return verdict;
-        }
-        // Fixed probe scene: the walkthrough man exercises skin,
-        // features, and attachments deterministically.
-        let probe = "A man saluting, waving an American flag, wearing a straw hat.";
-        match crate::engine::studio::create_image(probe) {
-            Ok(creation) => {
-                for d in crate::engine::photo::verify_photo(
-                    &creation.image,
-                    &crate::engine::photo::PhotoExpect::default(),
-                ) {
-                    verdict.errors.push(crate::engine::photo::to_compile_error(
-                        &d,
-                        &self.project_dir,
-                    ));
-                }
-                verdict.clean = verdict.clean && verdict.errors.is_empty();
-            }
-            Err(e) => {
-                verdict.errors.push(crate::engine::error::CompileError {
-                    code: "PHOTO_NO_FIGURE".to_string(),
-                    message: format!("probe render failed: {}", e),
-                    file: String::new(),
-                    line: 0,
-                    col: 0,
-                    suggestion: None,
-                    source_line: None,
-                    kind: crate::engine::error::ErrorKind::PhotoDefect,
-                });
-                verdict.clean = false;
-            }
-        }
-        verdict
+        let _ = intent;
+        self.verifier.verify().await
     }
 
     pub async fn run_task(&mut self, intent_json: &str) -> Result<AgentOutcome, String> {

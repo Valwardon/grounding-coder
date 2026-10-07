@@ -1,5 +1,26 @@
 # Grounding Coder — Progress
 
+## v0.25.19 — Anatomy root deleted, statistical synthesis only (2026-10-07)
+
+- Deleted outright (20 files): anatomy, body_measure, skeleton,
+  pose_learn, body_oracle (+assets/oracle), assembly, object_model,
+  material, deform, refine, studio, figure, human, truth,
+  conditioning, taxon, probe, photo + their tests, examples, and
+  samples. No BodyPlan/canon/ROM/genome/mesh-human anywhere.
+  `scene.rs` lost BodyPlan/ANATOMY_SOURCES/research_anatomy —
+  the renderer builds worlds only.
+- Photos now come from ONE root: researched plates → box-aligned
+  person crops → per-pixel median + deviation-bounded graft
+  (`synth::synthesize_body`, same contract as faces: donor gate,
+  novelty asserted, blur receipted). `imagine`/`picture`/`gc
+  imagine` run research → synthesize → refuse-below-gate.
+- Baselines, viewed and receipted: `synth-proof-192x256.bmp`
+  (22 donors, sharpness 0.1098, novelty 0.1658) and
+  `synth-face-proof-96x128.bmp` (12 eye-locked of 25, sharpness
+  0.0951) — blurry median-ghosts, honestly measured. Classical
+  box-alignment blur is the ceiling; photographer-indistinguishable
+  needs landmark-level alignment or a generative model (named gap).
+
 ## v0.25.18 — Plates research-only, intent research pipeline (2026-10-07)
 
 - Montage deleted, not deprecated: `engine/compose.rs`, the `gc

@@ -4,7 +4,7 @@
 //! This module is the missing middle: given prose, state WHAT the
 //! intent is, WHAT research would satisfy it, WHICH subjects need
 //! researching, and WHICH structural questions plates must answer
-//! (skeleton, skin, hair, proportions — never pixels). Plates are
+//! (pose, skin, hair, proportions — never pixels). Plates are
 //! research material: they answer questions with numbers, and fresh
 //! construction renders from those numbers.
 //!
@@ -71,7 +71,7 @@ pub struct IntentResearch {
     pub seeks: Vec<super::seek::SeekIntent>,
     /// Each subject with its research class.
     pub subjects: Vec<(String, SubjectClass)>,
-    /// Structural questions for plates (skeleton, skin, hair…).
+    /// Structural questions for plates (pose, skin, hair…).
     pub structural: Vec<StructuralQuestion>,
     /// True when at least one human subject needs a poseable action.
     pub people_subject: bool,
@@ -94,74 +94,57 @@ pub fn research_intent(prose: &str) -> IntentResearch {
         .map(|s| (s.stype.clone(), SubjectClass::of(&s.stype)))
         .collect();
 
-    // Structural questions: what must be known to render this scene
-    // fresh. Pose questions resolve through learned representatives
-    // (ROM library); proportions through the measured rig; skin
-    // through plate-study medians downstream; hair stays a named gap
-    // until a hair extractor measures it.
+    // Structural questions: what research must resolve before a
+    // photograph can be selected for this scene. Nothing here is
+    // answered from encoded body knowledge — anatomy lives in
+    // research (plates, oracle definitions), never in tables.
+    // Pose questions resolve through pose-reference plates;
+    // proportions through measured plates; skin through plate-study
+    // medians downstream; hair stays a named gap until research
+    // measures it.
     let mut structural = Vec::new();
     for a in &spec.actions {
-        // Researched representatives only: ROM-table seeds are
-        // encoded answers, not research — they name a gap, never an
-        // answered question.
-        let seeds = super::pose_learn::examples_for(&a.atype).len();
-        let researched = !super::pose_learn::researched_examples_for(&a.atype).is_empty();
         structural.push(StructuralQuestion {
-            question: format!("what joints does '{}' need, and at what angles?", a.atype),
-            topic: "skeleton",
-            answered: researched,
-            detail: if researched {
-                format!(
-                    "researched '{}' representative from measured pose plates",
-                    a.atype
-                )
-            } else if seeds > 0 {
-                format!(
-                    "'{}' has {} ROM-table seed example(s), zero researched — acquire pose-reference plates",
-                    a.atype, seeds
-                )
-            } else {
-                format!(
-                    "no '{}' examples at all — acquire pose-reference plates",
-                    a.atype
-                )
-            },
+            question: format!("which photographs show '{}'?", a.atype),
+            topic: "pose",
+            answered: false,
+            detail: format!(
+                "acquire '{}' pose-reference plates for this prompt",
+                a.atype
+            ),
         });
     }
     for (stype, class) in &subjects {
         match class {
             SubjectClass::Person => {
                 structural.push(StructuralQuestion {
-                    question: format!("what are '{}' body proportions?", stype),
+                    question: format!("which photographs show '{}'?", stype),
                     topic: "proportions",
-                    answered: true,
-                    detail: "measured rig (hm08 oracle mesh, morphed per subject)".to_string(),
+                    answered: false,
+                    detail: "acquire proportion-measurable plates for this prompt".to_string(),
                 });
                 structural.push(StructuralQuestion {
-                    question: format!("what skin tone does '{}' render with?", stype),
+                    question: format!("what skin tones do '{}' plates measure?", stype),
                     topic: "skin",
                     answered: false,
                     detail: "acquire plate-study median tone for this prompt".to_string(),
                 });
                 structural.push(StructuralQuestion {
-                    question: format!("how does '{}' hair read?", stype),
+                    question: format!("which photographs show '{}' hair clearly?", stype),
                     topic: "hair",
                     answered: false,
-                    detail: "hair structure unmeasured — needs hair extractor".to_string(),
+                    detail: "hair structure unmeasured — needs hair research".to_string(),
                 });
             }
             SubjectClass::Animal => {
                 structural.push(StructuralQuestion {
-                    question: format!("what is '{}' skeletal anatomy?", stype),
-                    topic: "skeleton",
+                    question: format!("which photographs show '{}' anatomy?", stype),
+                    topic: "pose",
                     answered: false,
-                    detail: format!(
-                        "acquire '{}' skeleton/proportion references for this prompt",
-                        stype
-                    ),
+                    detail: format!("acquire '{}' anatomy references for this prompt", stype),
                 });
                 structural.push(StructuralQuestion {
-                    question: format!("what coat does '{}' render with?", stype),
+                    question: format!("what coat tones do '{}' plates measure?", stype),
                     topic: "skin",
                     answered: false,
                     detail: "acquire plate-study palette for this prompt".to_string(),
@@ -169,7 +152,7 @@ pub fn research_intent(prose: &str) -> IntentResearch {
             }
             SubjectClass::Flora | SubjectClass::Thing => {
                 structural.push(StructuralQuestion {
-                    question: format!("what silhouette does '{}' render with?", stype),
+                    question: format!("which photographs show '{}'?", stype),
                     topic: "proportions",
                     answered: false,
                     detail: format!("acquire '{}' silhouette references", stype),
@@ -180,7 +163,7 @@ pub fn research_intent(prose: &str) -> IntentResearch {
                     question: format!("what is '{}'?", stype),
                     topic: "identity",
                     answered: false,
-                    detail: "unclassified subject — research must resolve before rendering"
+                    detail: "unclassified subject — research must resolve before delivery"
                         .to_string(),
                 });
             }
@@ -252,29 +235,17 @@ mod tests {
         assert!(ir.people_subject);
         assert!(!ir.plan.is_empty());
         assert!(!ir.seeks.is_empty());
-        // Structural questions name skeleton, skin, and hair.
+        // Structural questions name pose, skin, and hair — all gaps
+        // until research answers them; nothing answered from tables.
         let topics: Vec<&str> = ir.structural.iter().map(|q| q.topic).collect();
-        assert!(topics.contains(&"skeleton"), "{:?}", topics);
+        assert!(topics.contains(&"pose"), "{:?}", topics);
         assert!(topics.contains(&"skin"), "{:?}", topics);
         assert!(topics.contains(&"hair"), "{:?}", topics);
-        // Skeleton is a NAMED GAP until measured plates arrive
-        // (seeds are encoded answers, not research); skin/hair are
-        // gaps until plates are studied.
-        let skel = ir
-            .structural
-            .iter()
-            .find(|q| q.topic == "skeleton")
-            .unwrap();
         assert!(
-            !skel.answered,
-            "unresearched poses must not count as answered"
+            ir.structural.iter().all(|q| !q.answered),
+            "nothing is answered before research: {:?}",
+            ir.structural
         );
-        assert!(
-            skel.detail.contains("acquire pose-reference plates"),
-            "{}",
-            skel.detail
-        );
-        assert!(ir.structural.iter().any(|q| !q.answered));
     }
 
     #[test]
@@ -322,6 +293,6 @@ mod tests {
         assert_eq!(a, b);
         assert!(a.iter().any(|l| l.starts_with("intent:")));
         assert!(a.iter().any(|l| l.starts_with("research subject:")));
-        assert!(a.iter().any(|l| l.starts_with("structural [skeleton]:")));
+        assert!(a.iter().any(|l| l.starts_with("structural [pose]:")));
     }
 }

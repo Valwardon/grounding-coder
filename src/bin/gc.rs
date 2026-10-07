@@ -84,10 +84,10 @@ enum Commands {
         #[arg(long, default_value_t = 640)]
         max_dim: u32,
     },
-    /// Imagine a photo from prose: parse the brief, research
-    /// references as structural knowledge only, study them, render
-    /// fresh pixels. One command, full receipts at every step.
-    /// No montage: plates never contribute pixels.
+    /// Imagine a photo from prose: research the intent, study
+    /// licensed plates, synthesize one novel figure from their
+    /// median. Brand-new pixels with donor provenance — never a
+    /// donor copy, never a montage, never a rendered mesh.
     Imagine {
         /// What to picture ("man holding peace sign")
         prompt: String,
@@ -112,20 +112,6 @@ enum Commands {
         /// Outlier threshold vs neighborhood median (luma units)
         #[arg(long, default_value_t = 40.0)]
         thresh: f64,
-    },
-    /// Render a genome figure: laughing man, big nose, noodle hat,
-    /// waving Canadian flag. Every pixel procedural — the creation
-    /// test, runnable.
-    Figure {
-        /// Output BMP path
-        #[arg(short, long, default_value = "figure.bmp")]
-        out: String,
-        /// Output width
-        #[arg(long, default_value_t = 640)]
-        width: u32,
-        /// Output height
-        #[arg(long, default_value_t = 480)]
-        height: u32,
     },
     /// Dream: run the idle learning loop — investigate open questions
     /// and promote only what verifies. Bounded by budget, then sleeps.
@@ -821,12 +807,21 @@ fn main() {
                 use grounding_coder::engine::imagine;
                 match imagine::imagine(&prompt, width.clamp(16, 1920), height.clamp(16, 1920)).await
                 {
-                    Ok((img, log)) => {
+                    Ok((photo, log)) => {
                         for line in &log {
                             println!("imagine: {}", line);
                         }
-                        match img.save_bmp(std::path::Path::new(&out)) {
-                            Ok(()) => println!("imagined {} ({}x{})", out, img.width, img.height),
+                        println!(
+                            "imagine: synthesized from {} donors (sharpness {:.4}, novelty {:.4})",
+                            photo.donors.len(),
+                            photo.sharpness,
+                            photo.min_novelty
+                        );
+                        match photo.image.save_bmp(std::path::Path::new(&out)) {
+                            Ok(()) => println!(
+                                "imagined {} ({}x{})",
+                                out, photo.image.width, photo.image.height
+                            ),
                             Err(e) => {
                                 eprintln!("IMAGINE FAILED: {}", e);
                                 std::process::exit(1);
@@ -837,7 +832,7 @@ fn main() {
                         for line in &log {
                             println!("imagine: {}", line);
                         }
-                        eprintln!("IMAGINE REFUSED: fresh construction refused (see log)");
+                        eprintln!("IMAGINE REFUSED: no licensed photograph found (see log)");
                         std::process::exit(2);
                     }
                 }
@@ -864,32 +859,6 @@ fn main() {
                     Ok(()) => println!("restored {} ({}x{})", out, img.width, img.height),
                     Err(e) => {
                         eprintln!("RESTORE FAILED: {}", e);
-                        std::process::exit(1);
-                    }
-                }
-            }
-            Commands::Figure { out, width, height } => {
-                use grounding_coder::engine::{figure, human};
-                let genome = human::HumanGenome::with_params(
-                    35, 0.5, 0.55, 0.5, 0.95, 0.8, 0.5, 0.6, 0.5, 1.0,
-                )
-                .expect("test genome validates");
-                for line in genome.describe() {
-                    println!("genome: {}", line);
-                }
-                let (mut img, receipt) = grounding_coder::engine::scene::render(
-                    &figure::waver_scene(width.clamp(16, 1920), height.clamp(16, 1920), &genome),
-                );
-                for (name, count) in &receipt {
-                    println!("  {:16} {} px", name, count);
-                }
-                img.grade(1.08, 4.0);
-                img.vignette(0.25);
-                img.grain(0xF16E, 4);
-                match img.save_bmp(std::path::Path::new(&out)) {
-                    Ok(()) => println!("figured {} ({}x{})", out, img.width, img.height),
-                    Err(e) => {
-                        eprintln!("FIGURE FAILED: {}", e);
                         std::process::exit(1);
                     }
                 }

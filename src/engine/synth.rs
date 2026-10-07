@@ -651,6 +651,152 @@ pub fn synthesize_locked(
     Ok((img, log))
 }
 
+/// Canonical body frame: full-person donor crops land here before
+/// statistics. Larger than the face frame (bodies carry more), still
+/// small enough that medians stay cheap.
+pub const BODY_W: u32 = 192;
+/// Canonical body frame height.
+pub const BODY_H: u32 = 256;
+/// Minimum usable person donors for a body synthesis. Below this:
+/// refusal with the shortfall, never a thin average of strangers.
+pub const MIN_BODIES: usize = 8;
+/// Box expansion on every side (fraction of box size): ground-truth
+/// boxes arrive tight; heads need headroom and feet need ground.
+pub const BODY_MARGIN_FRAC: f64 = 0.12;
+/// Aspect coherence gate: donors whose box aspect strays further
+/// than this fraction from the median aspect are set aside (logged,
+/// counted) — standing portraits and seated portraits median into
+/// blur together, so the subset stays pose-coherent by shape.
+pub const BODY_ASPECT_TOL: f64 = 0.25;
+
+/// Crop a fractional person box (expanded by margin, clamped to the
+/// frame) from a plate. `None` for degenerate boxes — skipped with
+/// the reason, never stretched noise.
+pub fn crop_person(plate: &Image, bbox: (f64, f64, f64, f64)) -> Option<Image> {
+    let (pw, ph) = (plate.width as f64, plate.height as f64);
+    if pw < 16.0 || ph < 16.0 {
+        return None;
+    }
+    let bw = (bbox.2 - bbox.0).max(0.01);
+    let bh = (bbox.3 - bbox.1).max(0.01);
+    let m = BODY_MARGIN_FRAC;
+    let x0 = ((bbox.0 - bw * m) * pw).clamp(0.0, pw - 1.0) as u32;
+    let y0 = ((bbox.1 - bh * m) * ph).clamp(0.0, ph - 1.0) as u32;
+    let x1 = ((bbox.2 + bw * m) * pw).clamp(0.0, pw - 1.0) as u32;
+    let y1 = ((bbox.3 + bh * m) * ph).clamp(0.0, ph - 1.0) as u32;
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    let crop = plate.crop(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
+    if crop.width < 16 || crop.height < 16 {
+        return None;
+    }
+    Some(crop)
+}
+
+/// Full-body synthesis: person crops → one novel figure. The same
+/// honesty contract as faces, scaled up: per-pixel MEDIAN over
+/// box-aligned donors (translation/scale only), seeded detail
+/// bounded by measured deviation, novelty asserted against every
+/// donor, blur carried on the receipt. Pose-mixed donors blur by
+/// construction, so the aspect gate keeps the subset shape-coherent
+/// and the log names exactly who contributed and who was set aside.
+/// Every output pixel is statistics; no donor pixel is copied.
+pub fn synthesize_body(
+    plates: &[Image],
+    boxes: &[(f64, f64, f64, f64)],
+    seed: u64,
+) -> Result<(Image, SynthLog), String> {
+    if plates.len() != boxes.len() {
+        return Err(format!(
+            "plates/boxes mismatch ({} vs {}) — refusing",
+            plates.len(),
+            boxes.len()
+        ));
+    }
+    // Aspect coherence first: median box aspect, keep donors within
+    // tolerance. Shape coherence is the only pose proxy classical
+    // measurement affords — stated, not oversold.
+    let mut aspects: Vec<f64> = boxes
+        .iter()
+        .map(|b| ((b.2 - b.0).max(0.01)) / ((b.3 - b.1).max(0.01)))
+        .collect();
+    aspects.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let med_aspect = aspects.get(aspects.len() / 2).copied().unwrap_or(0.5);
+    let mut aligned = Vec::new();
+    let mut donors = Vec::new();
+    let mut refused = Vec::new();
+    let mut aspect_cut = 0usize;
+    for (i, (plate, bbox)) in plates.iter().zip(boxes.iter()).enumerate() {
+        let aspect = ((bbox.2 - bbox.0).max(0.01)) / ((bbox.3 - bbox.1).max(0.01));
+        if med_aspect > 0.0 && (aspect - med_aspect).abs() / med_aspect > BODY_ASPECT_TOL {
+            aspect_cut += 1;
+            refused.push(format!(
+                "donor {}: aspect {:.2} vs median {:.2} — set aside",
+                i, aspect, med_aspect
+            ));
+            continue;
+        }
+        match crop_person(plate, *bbox) {
+            Some(crop) => {
+                aligned.push(crop.resize_smooth(BODY_W, BODY_H));
+                donors.push(i);
+            }
+            None => refused.push(format!("donor {}: degenerate crop — skipped", i)),
+        }
+    }
+    if aligned.len() < MIN_BODIES {
+        return Err(format!(
+            "INSUFFICIENT: {}/{} usable bodies — need {} ({} refused: {} aspect-cut, {} degenerate)",
+            aligned.len(),
+            plates.len(),
+            MIN_BODIES,
+            refused.len(),
+            aspect_cut,
+            refused.len() - aspect_cut.min(refused.len())
+        ));
+    }
+    // median_face is a generic per-pixel median despite its name:
+    // all inputs share dimensions by construction above.
+    let median = median_face(&aligned)?;
+    let dev = deviation_map(&aligned, &median);
+    let mut img = graft_detail(&median, &dev, seed, 0.6);
+    img.grain(seed ^ 0xB0D7, 2);
+    let sharp = sharpness(&img);
+    let mut min_novel: f64 = 1.0;
+    for d in &aligned {
+        min_novel = min_novel.min(novelty(&img, d));
+    }
+    let n_donors = donors.len();
+    let n_refused = refused.len();
+    let log = SynthLog {
+        donors,
+        refused,
+        sharpness: sharp,
+        min_novelty: min_novel,
+        ops: vec![
+            format!(
+                "person crops: {} usable of {} (aspect median {:.2}, tol {:.0}%, {} cut, {} degenerate)",
+                n_donors,
+                n_donors + n_refused,
+                med_aspect,
+                BODY_ASPECT_TOL * 100.0,
+                aspect_cut,
+                n_refused - aspect_cut.min(n_refused)
+            ),
+            format!(
+                "align: box crop + margin {:.0}% + resize to {}x{} (scale only, no landmarks)",
+                BODY_MARGIN_FRAC * 100.0,
+                BODY_W,
+                BODY_H
+            ),
+            "median: per-pixel per-channel (outliers lose the vote)".to_string(),
+            "detail: seeded graft bounded by measured deviation (0.6x) + grain(2)".to_string(),
+            format!("sharpness {:.4}, min novelty {:.4}", sharp, min_novel),
+        ],
+    };
+    Ok((img, log))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
