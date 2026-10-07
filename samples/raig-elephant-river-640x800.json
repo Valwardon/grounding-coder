@@ -1,0 +1,10 @@
+{
+ "prompt": "an elephant crossing a river",
+ "path": "generated-photograph",
+ "model": "pollinations-flux",
+ "seed": 13268284329199740740,
+ "plates_researched": 8,
+ "novelty_vs_donors": 0.255,
+ "file": "samples/raig-elephant-river-640x800.bmp",
+ "note": "viewed: photorealistic elephant crossing a river. Generic path, no subject-specific code."
+}

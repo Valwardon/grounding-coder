@@ -141,10 +141,12 @@ Oracle verify (compiler / tests / parser per language)
   first plate in `samples/plates/` with full provenance)
 - **Plates as research material, never montage** — licensed
   photographs are researched for any subject through one generic
-  path, ranked by title overlap, and the winner's own bytes are
-  delivered labeled a sourced photograph. No per-subject code
-  anywhere: no montage, no meshes, no synthesis, no extractors.
-  (`src/engine/imagine.rs`, `gc imagine`)
+  path, reduced to compact conditioning (words, never pixels —
+  raw bytes discarded), and brand-new pixels come out of a
+  single generation pass with novelty asserted against every
+  donor. No per-subject code anywhere.
+  (`src/engine/generate.rs`, `src/engine/imagine.rs`, `gc
+  imagine`; `samples/raig-woman-standing-640x800.bmp`)
 - **Queryable anatomy, no vectors** — a researched partonomy graph
   (bones, vessels, relations: part-of, articulates, supplied-by)
   answers "vessels near the distal phalanges" by graph walk, with
@@ -154,10 +156,10 @@ Oracle verify (compiler / tests / parser per language)
 - **Imagine** — one command from prose to photo: intent research
   (intent → research plan → subjects → generic questions),
   reference research across Commons, web search, and Open Images
-  through one subject-agnostic path, then title-overlap ranking
-  and delivery with provenance. (`src/engine/imagine.rs`,
-  `src/engine/intent_research.rs`, `gc imagine`;
-  samples in `samples/`)
+  through one subject-agnostic path, conditioning extraction,
+  raw discard, single-pass generation with novelty receipt.
+  (`src/engine/imagine.rs`, `src/engine/intent_research.rs`,
+  `src/engine/generate.rs`, `gc imagine`; samples in `samples/`)
 - **Family restoration** — dust and scratch detection with
   classical operators, Laplacian inpainting, full defect reports.
   Your photos edit with no refusal path anywhere.

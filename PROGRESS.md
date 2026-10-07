@@ -1,5 +1,27 @@
 # Grounding Coder — Progress
 
+## v0.25.20 — RAIG: research retrieves, conditioning generates (2026-10-07)
+
+- New `engine/generate.rs`: compact conditioning (subjects,
+  attributes, actions, objects, places, plates count, seed —
+  words only, no pixel fields, <1KB), deterministic prompt
+  builder (same spec → same prompt), single-pass fetch with
+  decode/size/blank guards, novelty assertion vs donors.
+- `imagine`: research rounds unchanged, then conditioning
+  extracted, raw bytes discarded (logged count), generate,
+  novelty-vs-all-donors gate (refuse on 0.0). Product is
+  `GeneratedPhoto` with model/seed/prompt/novelty receipt.
+- Proved live and VIEWED: "woman standing" → photorealistic
+  woman by glass doors (14 donors, novelty 0.21);
+  "elephant crossing a river" → photorealistic river crossing
+  (8 donors, novelty 0.26, generic path). Both committed.
+- Stated limits: hosted flux backend behind the call (receipted,
+  not hidden) — on-device lightweight GAN takes the same
+  conditioning contract when it lands; free-tier watermark
+  bottom-right, receipted.
+- 178 lib + all integration green (kotlin: no toolchain);
+  check/clippy zero, fmt clean.
+
 ## v0.25.19 — Anatomy root deleted, research finds the photo (2026-10-07)
 
 - Deleted outright (21 files): anatomy, body_measure, skeleton,

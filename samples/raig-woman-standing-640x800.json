@@ -1,0 +1,10 @@
+{
+ "prompt": "woman standing",
+ "path": "generated-photograph",
+ "model": "pollinations-flux",
+ "seed": 10644156732283851943,
+ "plates_researched": 14,
+ "novelty_vs_donors": 0.2143,
+ "file": "samples/raig-woman-standing-640x800.bmp",
+ "note": "viewed: photorealistic woman standing by glass doors, forest light. Brand-new pixels; small provider watermark bottom-right."
+}

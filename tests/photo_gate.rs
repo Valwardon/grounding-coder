@@ -1,25 +1,27 @@
-//! Photo gate: every build proves, with real pixels, that the loop
-//! holds end to end — messy prose routes to the right action,
-//! researched plates deliver a licensed photograph, and scenes
-//! render as worlds.
+//! Photo gate: every build proves the loop holds end to end —
+//! messy prose routes to the right action, conditioning builds
+//! deterministically from researched specs, novelty separates
+//! copies from strangers, and scenes render as worlds.
 //!
-//! Three questions, three answers, all offline and deterministic:
+//! Three questions, three answers, all offline and deterministic
+//! (no generation pass runs in tests — the generator is the one
+//! network step, proven live, not here):
 //!   1. Does it understand the action? Visual verbs (`imagine`,
 //!      `render`, `draw`) reach the create frame with a confidence
 //!      receipt — Ask with curiosity, never a vacuous Block or a
 //!      blind Execute.
-//!   2. Is the delivered photo the researched one? Titled synthetic
-//!      plates rank by title overlap and the winner's own bytes come
-//!      back with provenance — labeled sourced, never generated.
+//!   2. Is conditioning compact and deterministic? The same spec
+//!      builds the same prompt twice; conditioning serializes
+//!      small with no pixel fields.
 //!   3. What about scene? The demo world renders sky/tower/ground
 //!      with sky up top and ground below (pixel-sampled, not assumed).
 //!
 //! The scene photo commits under `samples/` next to its JSON receipt —
 //! the photo IS the test output, not a promise of one.
 use grounding_coder::engine::{
-    imagine::{deliver_from_plates, parse_brief},
-    plates::{PlateProvenance, SourcedPlate},
+    generate::{build_prompt, conditioning_from_spec, novelty},
     scene::{self, demo_scene},
+    scene_intent::parse_scene,
     understand::{self, Disposition},
     vision::{Image, Rgb},
 };
@@ -27,20 +29,6 @@ use std::collections::HashMap;
 
 const W: u32 = 320;
 const H: u32 = 240;
-
-fn donor(title: &str) -> SourcedPlate {
-    SourcedPlate {
-        image: Image::blank(120, 160, Rgb::new(60, 80, 120)),
-        provenance: PlateProvenance {
-            source_url: "synthetic".to_string(),
-            page_url: "synthetic".to_string(),
-            author: "test".to_string(),
-            license: "test".to_string(),
-        },
-        basis: "test".to_string(),
-        title: title.to_string(),
-    }
-}
 
 fn disp(prose: &str) -> (String, Disposition, f64) {
     let u = understand::understand(prose, None);
@@ -109,29 +97,31 @@ fn photo_prose_routes_draw_waver_to_create_ask() {
     assert_eq!(d, Disposition::Ask);
 }
 
-// --- 2. Is the delivered photo the researched one? ---
+// --- 2. Is conditioning compact and deterministic? ---
 
 #[test]
-fn delivery_returns_researched_bytes_with_provenance() {
-    // Titled synthetic plates: the title matching the prompt wins,
-    // its own bytes come back with provenance, labeled sourced.
-    let donors = vec![donor("desert dunes"), donor("standing man portrait")];
-    let brief = parse_brief("a man standing");
-    let (photo, log) = deliver_from_plates(&brief, &donors).expect("delivers");
-    assert_eq!(photo.title, "standing man portrait");
-    assert_eq!(photo.author, "test");
-    assert!(
-        log.iter()
-            .any(|l| l.contains("sourced photograph, not generated")),
-        "{:?}",
-        log
-    );
-    // Product bytes are the winner's own bytes.
-    let winner = &donors[photo.plate_index];
-    assert_eq!(winner.title, photo.title);
-    for (x, y) in [(10, 10), (60, 70), (100, 140)] {
-        assert_eq!(photo.image.get(x, y), winner.image.get(x, y));
-    }
+fn conditioning_builds_same_prompt_twice() {
+    // Same researched spec twice → same prompt, compact JSON, no
+    // pixel fields anywhere in the contract.
+    let spec = parse_scene("A man standing on a mountain.");
+    let a = conditioning_from_spec(&spec, 9, 42);
+    let b = conditioning_from_spec(&spec, 9, 42);
+    assert_eq!(build_prompt(&a), build_prompt(&b));
+    assert!(build_prompt(&a).contains("man"));
+    let json = serde_json::to_value(&a).unwrap();
+    assert!(json.get("image").is_none());
+    assert!(json.to_string().len() < 1024);
+}
+
+#[test]
+fn novelty_separates_copy_from_stranger_offline() {
+    // The gate the live path enforces: identical frames read 0.0,
+    // strangers read far above it.
+    let a = Image::blank(32, 32, Rgb::new(200, 150, 115));
+    let b = Image::blank(32, 32, Rgb::new(200, 150, 115));
+    assert_eq!(novelty(&a, &b), 0.0);
+    let c = Image::blank(32, 32, Rgb::new(10, 20, 200));
+    assert!(novelty(&a, &c) > 0.2);
 }
 
 // --- 3. What about scene? ---

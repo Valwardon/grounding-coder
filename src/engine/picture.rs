@@ -2,10 +2,11 @@
 //!
 //! When chat receives a picture request (human subject + poseable
 //! action), it comes HERE — not to code tasks. The pipeline
-//! researches licensed photographs for the prompt, ranks them by
-//! title overlap, and delivers the winner's own bytes with
-//! provenance. The product is a sourced photograph, honestly
-//! labeled — never generated, never a montage, never rendered.
+//! researches licensed photographs for the prompt, extracts compact
+//! conditioning, discards the raw bytes, and generates brand-new
+//! pixels in a single pass. The product carries the model, seed,
+//! prompt, and novelty receipt — never donor bytes, never a montage,
+//! never a rendered mesh.
 //!
 //! No step is skippable and no step is hand-driven: this is the
 //! function the app's chat box calls.
@@ -73,8 +74,8 @@ pub async fn picture_from_prompt(
 ) -> Result<PictureOutcome, String> {
     let _ = per_req;
     std::fs::create_dir_all(out_dir).map_err(|e| format!("cannot create dir: {}", e))?;
-    // Sourced-only: research what this prompt needs, rank the
-    // licensed candidates, deliver the winner's own bytes.
+    // RAIG: research what this prompt needs, discard raw bytes,
+    // generate brand-new pixels from the conditioning.
     match super::imagine::imagine(prompt, 640, 800).await {
         Ok((photo, ilog)) => {
             let image_path = out_dir.join("picture.bmp");
@@ -91,17 +92,18 @@ pub async fn picture_from_prompt(
                 reply.push(format!("research: {}", l));
             }
             reply.push(
-                "path: sourced photograph (real photo, delivered as-is with provenance)"
+                "path: generated photograph (brand-new pixels from researched conditioning)"
                     .to_string(),
             );
             reply.push(format!("Done — picture at {}", image_path.display()));
             let body = serde_json::json!({
                 "prompt": prompt,
-                "path": "sourced-photograph",
-                "author": photo.author,
-                "license": photo.license,
-                "page_url": photo.page_url,
-                "title": photo.title,
+                "path": "generated-photograph",
+                "model": photo.model,
+                "seed": photo.seed,
+                "generation_prompt": photo.prompt,
+                "plates_researched": photo.plates_researched,
+                "min_novelty_vs_donors": photo.min_novelty_vs_donors,
                 "reply": reply,
                 "log": ilog,
             });

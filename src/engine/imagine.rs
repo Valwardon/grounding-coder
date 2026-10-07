@@ -20,7 +20,6 @@
 //! Refusal is honest: with no usable plate the command refuses with
 //! its research trail instead of fabricating pixels.
 
-use super::plates::SourcedPlate;
 use super::vision::Image;
 
 /// Who stands in the photo. Subjects come from researched
@@ -125,91 +124,31 @@ pub fn looks_like_person_name(s: &str) -> bool {
     })
 }
 
-/// Rank researched plates for delivery: title/query word overlap
-/// first (the plate's own words matching the prompt's words), frame
-/// area as tiebreak. Name-titled plates are excluded (logged) —
-/// identified people are a human decision, never automatic. Pure
-/// text matching over titles: identical machinery for a cat, a
-/// person, or a tree — no subject branches anywhere.
-/// Returns delivery order as indices. Pure over inputs.
-pub fn rank_for_delivery(
-    plates: &[SourcedPlate],
-    query_words: &[String],
-    log: &mut Vec<String>,
-) -> Vec<usize> {
-    let mut scored: Vec<(usize, usize, u64)> = Vec::new();
-    for (i, p) in plates.iter().enumerate() {
-        if looks_like_person_name(&p.provenance.author) {
-            log.push(format!(
-                "skipped name-titled plate: {:?}",
-                p.provenance.author
-            ));
-            continue;
-        }
-        let title_words = evidence_words(&p.title);
-        let overlap = query_words
-            .iter()
-            .filter(|w| title_words.contains(w))
-            .count();
-        let area = (p.image.width as u64) * (p.image.height as u64);
-        scored.push((i, overlap, area));
+/// Deterministic seed from the prompt: same prose, same photo
+/// (per generator model). FNV-1a over the lowered words — no
+/// randomness anywhere in the loop.
+pub fn seed_for(prose: &str) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in prose.to_lowercase().bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
     }
-    scored.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)));
-    scored.into_iter().map(|(i, _, _)| i).collect()
+    h
 }
 
-/// A sourced photograph: the winning plate's own bytes plus the
-/// provenance the license audit needs. Labeled exactly what it is —
-/// a real photograph by a real photographer, found by research, not
-/// generated.
+/// A generated photograph: brand-new pixels from the single-pass
+/// generator, driven by researched conditioning. The receipt names
+/// the model, the seed, the prompt, and the novelty against every
+/// researched donor — raw donor bytes were discarded before the
+/// pass and appear nowhere in the product.
 #[derive(Debug, Clone)]
-pub struct SourcedPhoto {
+pub struct GeneratedPhoto {
     pub image: Image,
-    pub plate_index: usize,
-    pub author: String,
-    pub license: String,
-    pub page_url: String,
-    pub title: String,
-}
-
-/// Deliver from already-sourced plates (no network): rank by title
-/// overlap with the prompt's words, hand over the winner's own bytes
-/// with its provenance. Pure over its inputs — the offline-testable
-/// core. Refuses (naming the shortfall) when nothing is deliverable.
-pub fn deliver_from_plates(
-    brief: &Brief,
-    plates: &[SourcedPlate],
-) -> Result<(SourcedPhoto, Vec<String>), String> {
-    let mut log = vec![format!(
-        "brief: {:?} {:?} {:?}",
-        brief.subject, brief.pose, brief.props
-    )];
-    log.push(format!(
-        "research-only: {} plate(s) — ranking by title overlap, never rendering",
-        plates.len()
-    ));
-    let query_words = evidence_words(&brief.raw);
-    let order = rank_for_delivery(plates, &query_words, &mut log);
-    let idx = order.into_iter().next().ok_or_else(|| {
-        "no deliverable photograph — every plate refused (name-titled or absent)".to_string()
-    })?;
-    let plate = &plates[idx];
-    log.push(format!(
-        "delivered: plate {} by {} ({}) — sourced photograph, not generated",
-        idx, plate.provenance.author, plate.provenance.license
-    ));
-    log.push(format!("provenance: {}", plate.provenance.page_url));
-    Ok((
-        SourcedPhoto {
-            image: plate.image.clone(),
-            plate_index: idx,
-            author: plate.provenance.author.clone(),
-            license: plate.provenance.license.clone(),
-            page_url: plate.provenance.page_url.clone(),
-            title: plate.title.clone(),
-        },
-        log,
-    ))
+    pub prompt: String,
+    pub model: String,
+    pub seed: u64,
+    pub plates_researched: usize,
+    pub min_novelty_vs_donors: f64,
 }
 
 /// Place word in prose, if any: backdrops and query anchors come
@@ -395,7 +334,8 @@ fn usable_openimages(
 }
 
 /// The full trajectory: research the brief, rank the plates,
-/// deliver the winner's own bytes. One command, full receipts.
+/// generate brand-new pixels from researched conditioning. One command,
+/// full receipts.
 /// Per-request training, narrow scope: research only what this prompt
 /// needs (subject + pose + props) — grounded, never from noise,
 /// never generated.
@@ -407,7 +347,7 @@ pub async fn imagine(
     prose: &str,
     _width: u32,
     _height: u32,
-) -> Result<(SourcedPhoto, Vec<String>), Vec<String>> {
+) -> Result<(GeneratedPhoto, Vec<String>), Vec<String>> {
     let brief = parse_brief(prose);
     let mut log = vec![format!(
         "brief: {:?} {:?} {:?}",
@@ -506,8 +446,8 @@ pub async fn imagine(
     }
 }
 
-/// One research round: research every named subject as
-/// candidates, rank them, deliver the winner. Override queries
+/// One research round: research every named subject, extract
+/// conditioning, discard raw bytes, generate. Override queries
 /// replace the default subject query (tried in order until plates
 /// land). Returns the outcome plus evidence words for coverage
 /// checking. Round 1 passes None and researches the brief. No
@@ -523,7 +463,7 @@ async fn attempt(
     extra_nouns: Vec<String>,
     override_queries: Option<Vec<String>>,
 ) -> (
-    Result<(SourcedPhoto, Vec<String>), Vec<String>>,
+    Result<(GeneratedPhoto, Vec<String>), Vec<String>>,
     Vec<String>,
 ) {
     let mut log = Vec::new();
@@ -628,11 +568,55 @@ async fn attempt(
         evidence.extend(evidence_words(&hit.plate.title));
         all_plates.push(hit.plate.clone());
     }
-    // Rank, then deliver the winner's own bytes.
-    match deliver_from_plates(brief, &all_plates) {
-        Ok((photo, mut chain)) => {
-            log.append(&mut chain);
-            (Ok((photo, log)), evidence)
+    // DISCARD RAW: plates researched, conditioning extracted, raw
+    // bytes dropped — the single pass consumes words, never pixels.
+    let seed = seed_for(prose);
+    let cond = super::generate::conditioning_from_spec(&researched.spec, all_plates.len(), seed);
+    let prompt = super::generate::build_prompt(&cond);
+    log.push(format!("conditioning: {:?}", cond));
+    log.push(format!("prompt: {}", prompt));
+    log.push(format!(
+        "discard: {} raw plate bytes dropped before generation",
+        all_plates.len()
+    ));
+    match super::generate::generate_photo(&cond, 640, 800).await {
+        Ok(image) => {
+            // Novelty vs every researched donor: the product must
+            // differ from all of them, measured, never assumed.
+            let mut min_novel = 1.0f64;
+            for p in &all_plates {
+                min_novel = min_novel.min(super::generate::novelty(&image, &p.image));
+            }
+            log.push(format!(
+                "novelty vs {} donor(s): {:.4}",
+                all_plates.len(),
+                min_novel
+            ));
+            if min_novel <= 0.0 {
+                log.push("refused: product identical to a donor — refusing".to_string());
+                return (Err(log), evidence);
+            }
+            log.push(format!(
+                "generated: {}x{} brand-new pixels via {} (seed {})",
+                image.width,
+                image.height,
+                super::generate::GENERATOR_MODEL,
+                seed
+            ));
+            (
+                Ok((
+                    GeneratedPhoto {
+                        image,
+                        prompt,
+                        model: super::generate::GENERATOR_MODEL.to_string(),
+                        seed,
+                        plates_researched: all_plates.len(),
+                        min_novelty_vs_donors: min_novel,
+                    },
+                    log,
+                )),
+                evidence,
+            )
         }
         Err(e) => {
             log.push(format!("refused: {}", e));
@@ -803,62 +787,12 @@ mod tests {
         );
     }
 
-    fn titled_plate(title: &str, w: u32, h: u32) -> SourcedPlate {
-        SourcedPlate {
-            image: Image::blank(w, h, Rgb::new(60, 80, 120)),
-            provenance: PlateProvenance {
-                source_url: "synthetic".to_string(),
-                page_url: "synthetic".to_string(),
-                author: "test".to_string(),
-                license: "test".to_string(),
-            },
-            basis: "test".to_string(),
-            title: title.to_string(),
-        }
-    }
-
     #[test]
-    fn rank_prefers_title_overlap_then_size() {
-        // Same generic machinery for any subject: title words
-        // matching the prompt win; ties break by frame area.
-        let plates = vec![
-            titled_plate("desert dunes", 200, 200),
-            titled_plate("elephant river crossing", 120, 160),
-            titled_plate("elephant river", 100, 100),
-        ];
-        let query = evidence_words("an elephant crossing a river");
-        let mut log = Vec::new();
-        let order = rank_for_delivery(&plates, &query, &mut log);
-        assert_eq!(order, vec![1, 2, 0], "overlap then size: {:?}", order);
-    }
-
-    #[test]
-    fn delivery_hands_over_winner_bytes_with_provenance() {
-        // The product is the winning plate's own bytes, labeled
-        // sourced — byte-identical to that donor, never rendered.
-        let plates = vec![
-            titled_plate("desert dunes", 120, 160),
-            titled_plate("standing man portrait", 120, 160),
-        ];
-        let brief = parse_brief("a man standing");
-        let (photo, log) = deliver_from_plates(&brief, &plates).expect("delivers");
-        assert_eq!(photo.title, "standing man portrait");
-        assert_eq!((photo.image.width, photo.image.height), (120, 160));
-        assert!(
-            log.iter()
-                .any(|l| l.contains("sourced photograph, not generated")),
-            "{:?}",
-            log
-        );
-        // Delivered bytes are the winner's own bytes.
-        let donor = &plates[photo.plate_index];
-        assert_eq!(donor.title, photo.title);
-        for (x, y) in [(10, 10), (60, 70), (100, 140)] {
-            assert_eq!(photo.image.get(x, y), donor.image.get(x, y));
-        }
-        // With no plates at all: honest refusal, never fabrication.
-        let err = deliver_from_plates(&brief, &[]).expect_err("must refuse");
-        assert!(err.contains("no deliverable photograph"), "{:?}", err);
+    fn seed_is_deterministic_per_prompt() {
+        // Same prose twice, same seed — the loop has no randomness.
+        assert_eq!(seed_for("a man standing"), seed_for("a man standing"));
+        assert_eq!(seed_for("A MAN STANDING"), seed_for("a man standing"));
+        assert_ne!(seed_for("a man standing"), seed_for("a woman standing"));
     }
 
     #[test]
