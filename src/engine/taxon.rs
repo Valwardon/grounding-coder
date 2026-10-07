@@ -176,14 +176,14 @@ async fn research_parent_in(query: &str, name: &str) -> Result<TaxonEdge, String
     );
     let search: serde_json::Value = crate::http::get_json(&search_url, None, None)
         .await
-        .map_err(|e| format!("taxonomy search failed for {:?}: {}", name, e))?;
+        .map_err(|e| format!("taxonomy search failed for {:?}: {}", query, e))?;
     let hits = search
         .get("search")
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
     if hits.is_empty() {
-        return Err(format!("no Wikidata entity for {:?}", name));
+        return Err(format!("no Wikidata entity for {:?}", query));
     }
     let mut tried = Vec::new();
     let mut best: Option<(usize, String, String, String, String)> = None;

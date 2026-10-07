@@ -1,1 +1,199 @@
-{"body_plans":"staged gap: plans attach to researched nodes later; this sample proves chain machinery only","chains":{"cat":{"edges":[["cat","Q20980826","felis","Q228283"],["felis","Q228283","felinae","Q42602"],["felinae","Q42602","felidae","Q25265"],["felidae","Q25265","feloidea","Q10281053"],["feloidea","Q10281053","Q4687717","Q4687717"],["Q4687717","Q4687717","feliformia","Q27070"]],"gap":"resolve taxonomy for feliformia","note":"unlabeled node surfaces as raw QID where no English label exists","relation":"parent-taxon"},"dog":{"edges":[["dog","Q20717272","canis","Q149892"],["canis","Q149892","canina","Q33229472"]],"gap":"resolve taxonomy for canina (throttled HTTP 429, continuation named)","relation":"parent-taxon"},"elephant":{"edges":[["elephant","Q2372824","elephantoidea","Q5359418"],["elephantoidea","Q5359418","elephantida","Q20686726"],["elephantida","Q20686726","elephantimorpha","Q23926871"],["elephantimorpha","Q23926871","elephantiformes","Q19561774"],["elephantiformes","Q19561774","proboscidea","Q26308"],["proboscidea","Q26308","tethytheria","Q20862"]],"gap":"resolve taxonomy for tethytheria","relation":"parent-taxon"}},"method":"Wikidata parent-taxon claims (P171 first, then P279, then P31); search top-hits arbitrated by claims, never by rank; 2s politeness between hops","programmed_knowledge":"none: graph starts empty every run, fills only through cited reads","source":"wikidata-claims"}
+{
+  "chains": {
+    "cat": {
+      "chain": [
+        "cat",
+        "felis",
+        "felinae",
+        "felidae",
+        "feloidea",
+        "q4687717",
+        "feliformia"
+      ],
+      "edges": [
+        [
+          "cat",
+          "Q20980826",
+          "felis",
+          "Q228283",
+          "parent-taxon",
+          "wikidata-claims"
+        ],
+        [
+          "felis",
+          "Q228283",
+          "felinae",
+          "Q42602",
+          "parent-taxon",
+          "wikidata-claims"
+        ],
+        [
+          "felinae",
+          "Q42602",
+          "felidae",
+          "Q25265",
+          "parent-taxon",
+          "wikidata-claims"
+        ],
+        [
+          "felidae",
+          "Q25265",
+          "feloidea",
+          "Q10281053",
+          "parent-taxon",
+          "wikidata-claims"
+        ],
+        [
+          "feloidea",
+          "Q10281053",
+          "q4687717",
+          "Q4687717",
+          "parent-taxon",
+          "wikidata-claims"
+        ],
+        [
+          "q4687717",
+          "Q4687717",
+          "feliformia",
+          "Q27070",
+          "parent-taxon",
+          "wikidata-claims"
+        ]
+      ],
+      "gap": "resolve taxonomy for \"feliformia\"",
+      "relation": "parent-taxon-first",
+      "source": "wikidata-claims"
+    },
+    "dog": {
+      "chain": [
+        "dog",
+        "canis",
+        "canina",
+        "canini",
+        "caninae",
+        "canidae",
+        "cynoidea"
+      ],
+      "edges": [
+        [
+          "dog",
+          "Q20717272",
+          "canis",
+          "Q149892",
+          "parent-taxon",
+          "wikidata-claims"
+        ],
+        [
+          "canis",
+          "Q149892",
+          "canina",
+          "Q33229472",
+          "parent-taxon",
+          "wikidata-claims"
+        ],
+        [
+          "canina",
+          "Q33229472",
+          "canini",
+          "Q28266",
+          "parent-taxon",
+          "wikidata-claims"
+        ],
+        [
+          "canini",
+          "Q28266",
+          "caninae",
+          "Q2474088",
+          "parent-taxon",
+          "wikidata-claims"
+        ],
+        [
+          "caninae",
+          "Q2474088",
+          "canidae",
+          "Q25324",
+          "parent-taxon",
+          "wikidata-claims"
+        ],
+        [
+          "canidae",
+          "Q25324",
+          "cynoidea",
+          "Q10262706",
+          "parent-taxon",
+          "wikidata-claims"
+        ]
+      ],
+      "gap": "resolve taxonomy for \"cynoidea\"",
+      "relation": "parent-taxon-first",
+      "source": "wikidata-claims"
+    },
+    "elephant": {
+      "chain": [
+        "elephant",
+        "elephantoidea",
+        "elephantida",
+        "elephantimorpha",
+        "elephantiformes",
+        "proboscidea",
+        "tethytheria"
+      ],
+      "edges": [
+        [
+          "elephant",
+          "Q2372824",
+          "elephantoidea",
+          "Q5359418",
+          "parent-taxon",
+          "wikidata-claims"
+        ],
+        [
+          "elephantoidea",
+          "Q5359418",
+          "elephantida",
+          "Q20686726",
+          "parent-taxon",
+          "wikidata-claims"
+        ],
+        [
+          "elephantida",
+          "Q20686726",
+          "elephantimorpha",
+          "Q23926871",
+          "parent-taxon",
+          "wikidata-claims"
+        ],
+        [
+          "elephantimorpha",
+          "Q23926871",
+          "elephantiformes",
+          "Q19561774",
+          "parent-taxon",
+          "wikidata-claims"
+        ],
+        [
+          "elephantiformes",
+          "Q19561774",
+          "proboscidea",
+          "Q26308",
+          "parent-taxon",
+          "wikidata-claims"
+        ],
+        [
+          "proboscidea",
+          "Q26308",
+          "tethytheria",
+          "Q20862",
+          "parent-taxon",
+          "wikidata-claims"
+        ]
+      ],
+      "gap": "resolve taxonomy for \"tethytheria\"",
+      "relation": "parent-taxon-first",
+      "source": "wikidata-claims"
+    }
+  },
+  "method": "Wikidata parent-taxon claims (P171 first, then P279, then P31); claims arbitrate over search rank; 2s politeness between hops",
+  "produced_by": "taxon_probe (program output, never transcribed)",
+  "programmed_knowledge": "none: graph starts empty every run, fills only through cited reads"
+}
