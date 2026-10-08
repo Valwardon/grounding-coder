@@ -974,6 +974,22 @@ impl Image {
         std::fs::write(path, buf).map_err(|e| format!("bmp write failed: {}", e))
     }
 
+    /// Encode as PNG via the `image` crate — for viewing and sharing
+    /// outputs with tools that don't read our hand-rolled BMP. The
+    /// engine's canonical lossless format stays BMP; this is a
+    /// presentation copy of the same pixels.
+    pub fn save_png(&self, path: &Path) -> Result<(), String> {
+        let mut buf = image::RgbImage::new(self.width, self.height);
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let p = self.pixels[(y * self.width + x) as usize];
+                buf.put_pixel(x, y, image::Rgb([p.r, p.g, p.b]));
+            }
+        }
+        buf.save(path)
+            .map_err(|e| format!("png write failed: {}", e))
+    }
+
     pub fn load_bmp(path: &Path) -> Result<Image, String> {
         let buf = std::fs::read(path).map_err(|e| format!("bmp read failed: {}", e))?;
         if buf.len() < 54

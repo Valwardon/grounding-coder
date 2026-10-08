@@ -100,6 +100,19 @@ enum Commands {
         #[arg(long, default_value_t = 800)]
         height: u32,
     },
+    /// Train the on-device conditional GAN on a provenance-gated
+    /// research bank. Weights + receipt land in the weights dir;
+    /// picture generation refuses until they exist.
+    Train {
+        /// Bank dir holding provenance.json and plate BMPs
+        bank: String,
+        /// Where to write generator weights + training receipt
+        #[arg(short, long, default_value = ".grounding/gan")]
+        weights: String,
+        /// Alternating training steps
+        #[arg(long, default_value_t = 200)]
+        steps: u64,
+    },
     /// Restore a family photo: detect dust specks and scratches,
     /// inpaint them, report every defect. Clean photos report zero.
     Restore {
@@ -814,7 +827,12 @@ fn main() {
                             "imagine: generated via {} (seed {}, novelty {:.4})",
                             photo.model, photo.seed, photo.min_novelty_vs_donors
                         );
-                        match photo.image.save_bmp(std::path::Path::new(&out)) {
+                        let save = if out.to_lowercase().ends_with(".png") {
+                            photo.image.save_png(std::path::Path::new(&out))
+                        } else {
+                            photo.image.save_bmp(std::path::Path::new(&out))
+                        };
+                        match save {
                             Ok(()) => println!(
                                 "imagined {} ({}x{})",
                                 out, photo.image.width, photo.image.height
@@ -831,6 +849,35 @@ fn main() {
                         }
                         eprintln!("IMAGINE REFUSED: no licensed photograph found (see log)");
                         std::process::exit(2);
+                    }
+                }
+            }
+            Commands::Train {
+                bank,
+                weights,
+                steps,
+            } => {
+                use grounding_coder::engine::gan;
+                match gan::train(
+                    std::path::Path::new(&bank),
+                    std::path::Path::new(&weights),
+                    steps,
+                ) {
+                    Ok(r) => {
+                        println!(
+                            "train: {} step(s) over {} example(s), {} refused",
+                            r.steps,
+                            r.examples,
+                            r.refused.len()
+                        );
+                        for (d, g) in &r.loss_trail {
+                            println!("train: d_loss {:.5} g_loss {:.5}", d, g);
+                        }
+                        println!("train: weights + receipt written to {}", weights);
+                    }
+                    Err(e) => {
+                        eprintln!("TRAIN FAILED: {}", e);
+                        std::process::exit(1);
                     }
                 }
             }
