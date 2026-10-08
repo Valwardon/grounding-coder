@@ -12,9 +12,10 @@
 //! ```
 //!
 //! Thresholding is Otsu's method — the photo picks its own cut — so
-//! there is no tuning constant to carry a subject. When no separable
-//! subject exists (a busy, subject-touching-border plate) measurement
-//! fails honestly instead of guessing a bounding box.
+//! there is no tuning constant to carry a subject. A subject must sit
+//! inside its ground, touching no frame edge; a region that fills the
+//! frame is a scene, and both it and a plate with no separable
+//! subject fail honestly instead of guessing a bounding box.
 use super::vision::{Image, Rgb};
 use serde::{Deserialize, Serialize};
 
@@ -500,11 +501,15 @@ fn bucketize(img: &Image, blob: &[usize], w: u32, bbox: [u32; 4]) -> Buckets {
 ///
 /// Two candidate subject masks are tried in order — color distance to
 /// the plate's border, then to its dominant color — and the first one
-/// yielding a plausible subject (1%..90% of the plate) is measured.
-/// The mask is then split into regions; the column-clustered group
-/// with the most pixels is the subject, and every other region is
-/// kept on the record. A plate with no separable subject fails with a
-/// reason instead of guessing a bounding box.
+/// yielding a plausible subject (1%..90% of the plate) that sits
+/// inside its ground (touching no frame edge) is measured. The mask is
+/// then split into regions; the column-clustered group with the most
+/// pixels is the subject, and every other region is kept on the
+/// record.
+///
+/// A plate with no separable subject fails with a reason, and a plate
+/// whose region fills or runs off the frame fails as a scene rather
+/// than being measured as a figure. Nothing is guessed.
 pub fn measure(img: &Image, meta: PlateMeta) -> Result<VisualFacts, String> {
     let w = img.width;
     let h = img.height;
@@ -515,6 +520,7 @@ pub fn measure(img: &Image, meta: PlateMeta) -> Result<VisualFacts, String> {
     let dominant = img.dominant_color().map(|(c, _)| c).unwrap_or(surround_px);
 
     let mut chosen: Option<(Vec<usize>, Vec<Component>, String)> = None;
+    let mut saw_frame_filling = false;
     for (reference, method) in [(surround_px, "border"), (dominant, "dominant")] {
         let mask = mask_far_from(img, reference);
         let cleaned = Image::morph_open(&mask, w, h, 1);
@@ -524,14 +530,42 @@ pub fn measure(img: &Image, meta: PlateMeta) -> Result<VisualFacts, String> {
         let area: usize = members.iter().map(|&i| comps[i].pixels.len()).sum();
         let frac = area as f64 / (w * h) as f64;
         if (0.01..0.9).contains(&frac) {
-            chosen = Some((members, comps, method.to_string()));
-            break;
+            // A subject sits inside its ground: its silhouette must be
+            // bounded by the surround on all four sides, clear of the
+            // frame by more than the morphology radius (a subject that
+            // reaches the frame loses its outermost ring to the open,
+            // so `> margin` and not `> 0`).
+            const FRAME_MARGIN: u32 = 1;
+            let (mut fx0, mut fy0, mut fx1, mut fy1) = (u32::MAX, u32::MAX, 0u32, 0u32);
+            for &i in &members {
+                let [cx0, cy0, cx1, cy1] = comps[i].bbox;
+                fx0 = fx0.min(cx0);
+                fy0 = fy0.min(cy0);
+                fx1 = fx1.max(cx1);
+                fy1 = fy1.max(cy1);
+            }
+            if fx0 > FRAME_MARGIN
+                && fy0 > FRAME_MARGIN
+                && fx1 + 1 + FRAME_MARGIN < w
+                && fy1 + 1 + FRAME_MARGIN < h
+            {
+                chosen = Some((members, comps, method.to_string()));
+                break;
+            }
+            saw_frame_filling = true;
         }
     }
     let (members, comps, method) = chosen.ok_or_else(|| {
-        "no separable subject: this plate has no region measurably \
-         different from its surroundings — research another plate"
-            .to_string()
+        if saw_frame_filling {
+            "subject runs off the frame: this plate is a scene, not a \
+             bounded subject — research a plate where the subject sits \
+             inside its ground"
+                .to_string()
+        } else {
+            "no separable subject: this plate has no region measurably \
+             different from its surroundings — research another plate"
+                .to_string()
+        }
     })?;
 
     // The subject as one body of pixels, plus the whole record of
@@ -787,6 +821,20 @@ mod tests {
         let img = Image::blank(8, 8, Rgb::new(0, 0, 0));
         let err = measure(&img, meta()).expect_err("too small");
         assert!(err.contains("too small"), "{err}");
+    }
+
+    /// A region that runs to the frame edge is the scene, not a
+    /// subject: a landscape or crowded room cannot be lifted back
+    /// into one figure.
+    #[test]
+    fn a_frame_filling_region_is_refused_as_a_scene() {
+        let mut img = Image::blank(64, 64, Rgb::new(200, 200, 200));
+        img.draw_rect(20, 0, 24, 64, Rgb::new(40, 60, 200)); // top to bottom
+        let err = measure(&img, meta()).expect_err("a scene, not a subject");
+        assert!(
+            err.contains("scene"),
+            "a frame-filling region must be refused as a scene: {err}"
+        );
     }
 
     /// Diagnostic: what did the subject mask actually catch?
