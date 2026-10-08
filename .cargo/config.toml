@@ -1,0 +1,6 @@
+# burn-flex pulls gemm-f16, whose aarch64 SIMD kernels are written against the
+# full half-precision arithmetic instructions. LLVM refuses to codegen them
+# unless the target advertises fp16, so every aarch64 build (host tests and
+# Android) must enable it. Without this the flex backend fails to compile.
+[target.'cfg(target_arch = "aarch64")']
+rustflags = ["-C", "target-feature=+fp16"]

@@ -65,6 +65,14 @@ ndarray = "0.15"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 # Engine-level type descriptions for generated humans.
 grounding-macros = { path = "grounding-macros" }
+# On-device conditional GAN (NOT diffusion, NOT an LLM): pure-Rust
+# Flex backend (CPU, SIMD) with autodiff — no native deps, trains and
+# runs on CPU. The generator is a tiny feed-forward net: one forward
+# pass per photo (single pass, phone-sized). Data comes ONLY from
+# researched plates; weights refuse to generate until trained.
+burn = { version = "0.22", features = ["autodiff", "optim", "flex"] }
+burn-flex = { version = "0.22", features = ["std"] }
+burn-store = { version = "0.22", features = ["std", "safetensors", "pytorch"] }
 
 # dioxus UI — only compiled with "ui" feature (Android/iOS mobile targets)
 dioxus = { version = "0.7", features = ["mobile"], optional = true }

@@ -6,6 +6,7 @@ pub mod corrector;
 pub mod error;
 pub mod evidence;
 pub mod experiment;
+pub mod gan;
 pub mod generate;
 pub mod imagine;
 pub mod intent_research;
