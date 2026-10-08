@@ -113,6 +113,28 @@ enum Commands {
         #[arg(long, default_value_t = 200)]
         steps: u64,
     },
+    /// Gather a semantic research bank from many prompts at once:
+    /// research each query across keyless sources and keep every
+    /// plate that has complete provenance AND a real title. Titles
+    /// are the GAN's conditioning — a titleless bank trains an
+    /// unconditional generator, so a missing title is refused.
+    Gather {
+        /// Output bank dir (provenance.json + plate BMPs)
+        #[arg(short, long, default_value = "bank")]
+        out: String,
+        /// Comma-separated research queries ("a woman standing, a cat sitting")
+        #[arg(long)]
+        queries: String,
+        /// Max plates kept per query
+        #[arg(short = 'n', long, default_value_t = 8)]
+        per_query: u32,
+        /// Comma-separated keyless sources: commons, web
+        #[arg(long, default_value = "commons,web")]
+        sources: String,
+        /// Downscale longer edge past this many pixels (repo stays lean)
+        #[arg(long, default_value_t = 256)]
+        max_dim: u32,
+    },
     /// Restore a family photo: detect dust specks and scratches,
     /// inpaint them, report every defect. Clean photos report zero.
     Restore {
@@ -608,6 +630,7 @@ fn main() {
                                 );
                                 manifest.push(serde_json::json!({
                                     "file": file,
+                                    "title": hit.plate.title,
                                     "source_url": hit.plate.provenance.source_url,
                                     "page_url": hit.plate.provenance.page_url,
                                     "author": hit.plate.provenance.author,
@@ -679,6 +702,7 @@ fn main() {
                             );
                             manifest.push(serde_json::json!({
                                 "file": file,
+                                "title": plate.title,
                                 "source_url": plate.provenance.source_url,
                                 "page_url": plate.provenance.page_url,
                                 "author": plate.provenance.author,
@@ -880,6 +904,122 @@ fn main() {
                         std::process::exit(1);
                     }
                 }
+            }
+            Commands::Gather {
+                out,
+                queries,
+                per_query,
+                sources,
+                max_dim,
+            } => {
+                use grounding_coder::engine::plates;
+                let dir = std::path::Path::new(&out);
+                if std::fs::create_dir_all(dir).is_err() {
+                    eprintln!("GATHER FAILED: cannot create {}", out);
+                    std::process::exit(1);
+                }
+                let want: Vec<String> = sources
+                    .split(',')
+                    .map(|s| s.trim().to_lowercase())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                let queries: Vec<String> = queries
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                let mut manifest = Vec::new();
+                let mut seen = std::collections::HashSet::new();
+                let mut kept = 0usize;
+                let mut refused = 0usize;
+                for q in &queries {
+                    let mut found = Vec::new();
+                    if want.iter().any(|s| s == "commons") {
+                        let (mut c, r) = plates::source_plates(q, per_query).await;
+                        for x in &r {
+                            println!("refused [{}]: {}", q, x);
+                            refused += 1;
+                        }
+                        found.append(&mut c);
+                    }
+                    if want.iter().any(|s| s == "web") {
+                        let (mut w, r) = plates::source_plates_web(q, per_query).await;
+                        for x in &r {
+                            println!("refused [{}]: {}", q, x);
+                            refused += 1;
+                        }
+                        found.append(&mut w);
+                    }
+                    for plate in found.into_iter().take(per_query as usize) {
+                        if !seen.insert(plate.provenance.source_url.clone()) {
+                            continue;
+                        }
+                        if plate.title.trim().is_empty() {
+                            refused += 1;
+                            continue;
+                        }
+                        let cap = max_dim.max(16);
+                        let img = if plate.image.width.max(plate.image.height) > cap {
+                            if plate.image.width >= plate.image.height {
+                                plate
+                                    .image
+                                    .resize(cap, plate.image.height * cap / plate.image.width)
+                            } else {
+                                plate
+                                    .image
+                                    .resize(plate.image.width * cap / plate.image.height, cap)
+                            }
+                        } else {
+                            plate.image.clone()
+                        };
+                        let file = format!("plate-{:04}.bmp", kept);
+                        let path = dir.join(&file);
+                        match img.save_bmp(&path) {
+                            Ok(()) => {
+                                println!(
+                                    "plate: {} <- {:?} ({}x{}, {}, {})",
+                                    file,
+                                    q,
+                                    img.width,
+                                    img.height,
+                                    plate.provenance.author,
+                                    plate.provenance.license
+                                );
+                                manifest.push(serde_json::json!({
+                                    "file": file,
+                                    "title": plate.title,
+                                    "query": q,
+                                    "source_url": plate.provenance.source_url,
+                                    "page_url": plate.provenance.page_url,
+                                    "author": plate.provenance.author,
+                                    "license": plate.provenance.license,
+                                    "basis": plate.basis,
+                                }));
+                                kept += 1;
+                            }
+                            Err(e) => {
+                                println!("refused [{}]: {}: {}", q, file, e);
+                                refused += 1;
+                            }
+                        }
+                    }
+                }
+                let manifest_path = dir.join("provenance.json");
+                if std::fs::write(
+                    &manifest_path,
+                    serde_json::to_string_pretty(&manifest).unwrap_or_default(),
+                )
+                .is_err()
+                {
+                    eprintln!("GATHER FAILED: cannot write manifest");
+                    std::process::exit(1);
+                }
+                println!(
+                    "gather: {} plate(s) kept, {} refused — manifest at {}",
+                    kept,
+                    refused,
+                    manifest_path.display()
+                );
             }
             Commands::Restore { plate, out, thresh } => {
                 use grounding_coder::engine::{restore, vision::Image};

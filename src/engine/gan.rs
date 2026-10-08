@@ -256,6 +256,45 @@ pub struct ResearchDataset {
     pub refused: Vec<String>,
 }
 
+/// Conditioning words for one researched example, derived with the
+/// SAME generic extractor used at generation time: title → scene →
+/// compact conditioning → flattened words. Sharing the extractor
+/// means a word means the same thing in training and at generation
+/// ("standing" and "stand" collapse to the same conditioning token).
+/// A title naming no known concept falls back to its raw lowercase
+/// tokens, so "Cat-2019.jpg" still conditions on "cat".
+fn example_words(title: &str) -> Vec<String> {
+    // Strip filename scaffolding ("File:", ".jpg", underscores) so a
+    // Commons title reads like prose to the scene parser.
+    let cleaned = title.trim();
+    let cleaned = cleaned
+        .strip_prefix("File:")
+        .or_else(|| cleaned.strip_prefix("file:"))
+        .unwrap_or(cleaned);
+    let cleaned = cleaned
+        .rsplit_once('.')
+        .filter(|(_, ext)| {
+            matches!(
+                ext.to_lowercase().as_str(),
+                "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tif" | "tiff"
+            )
+        })
+        .map(|(stem, _)| stem)
+        .unwrap_or(cleaned)
+        .replace('_', " ");
+    let spec = super::scene_intent::parse_scene(&cleaned);
+    let cond = super::generate::conditioning_from_spec(&spec, 1, 0);
+    let words = super::generate::conditioning_words(&cond);
+    if !words.is_empty() {
+        return words;
+    }
+    cleaned
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_lowercase())
+        .collect()
+}
+
 impl ResearchDataset {
     pub fn from_bank(bank: &std::path::Path) -> Self {
         let mut out = ResearchDataset::default();
@@ -290,11 +329,7 @@ impl ResearchDataset {
                 }
             };
             let title = e.get("title").and_then(|v| v.as_str()).unwrap_or(file);
-            let words: Vec<String> = title
-                .split(|c: char| !c.is_alphanumeric())
-                .filter(|w| !w.is_empty())
-                .map(|w| w.to_lowercase())
-                .collect();
+            let words = example_words(title);
             out.examples.push(ResearchExample {
                 words,
                 image: img,
@@ -377,12 +412,14 @@ fn first_scalar(t: &Tensor<1>) -> f32 {
 /// real-vs-fake, G learns to fool D. Returns the updated models,
 /// optimizers, and (d_loss, g_loss). Small, explicit, auditable —
 /// the math between gradients and weights is right here.
+#[allow(clippy::too_many_arguments)]
 pub fn train_step(
     genm: Generator,
     disc: Discriminator,
     mut gen_opt: burn::optim::ModuleOptimizer,
     mut disc_opt: burn::optim::ModuleOptimizer,
     ex: &ResearchExample,
+    neg_words: &[String],
     seed: u64,
     device: &burn::tensor::Device,
 ) -> (
@@ -399,13 +436,20 @@ pub fn train_step(
     let g_lr = 2e-4_f64;
     let d_lr = 1e-4_f64;
 
-    // D step: real should score 1, detached fake should score 0.
-    // One-sided label smoothing (real=0.9) keeps D logits bounded.
+    // D step: real scores 1, fake scores 0, AND real-with-wrong-words
+    // scores 0. That last term is what makes the discriminator care
+    // about conditioning: without it the network can ignore words
+    // entirely, and then the generator has no reason to follow them.
     let real = image_to_tensor(&ex.image, device);
     let noise = seeded_noise(seed, device);
     let fake = genm.forward(&ex.words, noise).detach();
-    let d_loss = bce_with_labels(disc.forward(real, &ex.words), 0.9)
+    let mut d_loss = bce_with_labels(disc.forward(real.clone(), &ex.words), 0.9)
         + bce_with_labels(disc.forward(fake, &ex.words), 0.0);
+    // Only a genuinely different word set teaches conditioning (a
+    // single-example bank has no mismatch to learn from).
+    if !neg_words.is_empty() && neg_words != ex.words.as_slice() {
+        d_loss = d_loss + bce_with_labels(disc.forward(real, neg_words), 0.0);
+    }
     let d_val = first_scalar(&d_loss);
     let d_grads = GradientsParams::from_grads(d_loss.backward(), &disc);
     let disc = disc_opt.step(d_lr, disc, d_grads);
@@ -472,7 +516,11 @@ pub fn train(
     let mut loss_trail = Vec::new();
     for step in 0..steps {
         let ex = &ds.examples[(step as usize) % ds.len()];
-        let (g, d, go, dop, dv, gv) = train_step(genm, disc, gen_opt, disc_opt, ex, step, &device);
+        // Words from a DIFFERENT example: the mismatch the
+        // discriminator must learn to reject, so conditioning binds.
+        let neg = &ds.examples[(step as usize + ds.len() / 2 + 1) % ds.len()];
+        let (g, d, go, dop, dv, gv) =
+            train_step(genm, disc, gen_opt, disc_opt, ex, &neg.words, step, &device);
         genm = g;
         disc = d;
         gen_opt = go;
@@ -639,9 +687,33 @@ mod tests {
         .unwrap();
         let ds = ResearchDataset::from_bank(dir);
         assert_eq!(ds.len(), 1);
-        assert_eq!(ds.examples[0].words, vec!["standing", "woman"]);
+        // Words come from the shared extractor, not a raw split:
+        // "standing woman" canonicalizes to subject + action, the
+        // same tokens generation uses for "a woman standing".
+        assert!(ds.examples[0].words.contains(&"woman".to_string()));
+        assert!(ds.examples[0].words.contains(&"stand".to_string()));
         assert_eq!(ds.refused.len(), 1);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn training_words_use_the_generation_extractor() {
+        // A title and its prose phrasing must yield the SAME
+        // conditioning words, so a concept learned in training is
+        // addressable at generation. ("standing" → "stand" both ways.)
+        let from_title = example_words("File:Woman standing on a mountain.jpg");
+        let spec = super::super::scene_intent::parse_scene("a woman standing on a mountain");
+        let from_prose = super::super::generate::conditioning_words(
+            &super::super::generate::conditioning_from_spec(&spec, 1, 0),
+        );
+        assert!(
+            from_title.contains(&"woman".to_string()) && from_title.contains(&"stand".to_string()),
+            "{:?}",
+            from_title
+        );
+        assert_eq!(from_title, from_prose, "title and prose must agree");
+        // A title naming no concept still conditions on its raw words.
+        assert!(example_words("Cat-2019.jpg").contains(&"cat".to_string()));
     }
 
     #[test]
@@ -660,9 +732,10 @@ mod tests {
             ),
             provenance: "test".to_string(),
         };
+        let neg = vec!["cat".to_string()];
         let (r#gen, disc, gopt, dopt, d1, g1) =
-            train_step(r#gen, disc, gopt, dopt, &ex, 1, &device);
-        let (_, _, _, _, d2, g2) = train_step(r#gen, disc, gopt, dopt, &ex, 2, &device);
+            train_step(r#gen, disc, gopt, dopt, &ex, &neg, 1, &device);
+        let (_, _, _, _, d2, g2) = train_step(r#gen, disc, gopt, dopt, &ex, &neg, 2, &device);
         for v in [d1, g1, d2, g2] {
             assert!(v.is_finite(), "loss blew up: {}", v);
         }
