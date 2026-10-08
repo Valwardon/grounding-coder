@@ -120,7 +120,7 @@ pub struct VisualFacts {
 
 /// Median color of the plate's one-pixel border — what surrounds the
 /// subject when the subject doesn't touch the edge.
-fn border_median(img: &Image) -> Rgb {
+pub fn border_median(img: &Image) -> Rgb {
     let (w, h) = (img.width, img.height);
     let mut rs: Vec<u8> = Vec::new();
     let mut gs: Vec<u8> = Vec::new();
@@ -168,15 +168,15 @@ pub const Z_FAR: f64 = 6.0;
 /// of the border's own spread trusts the axis the ground holds steady
 /// — usually hue — so that difference survives; [`Z_FAR`] then draws
 /// the line the plate itself made measurable.
-struct Ground {
+pub struct Ground {
     /// Border medians of (luminance, red-green, yellow-blue).
-    median: [f64; 3],
+    pub median: [f64; 3],
     /// Per-axis border spread (MAD as sigma, floored off zero).
-    sigma: [f64; 3],
+    pub sigma: [f64; 3],
 }
 
 /// A color in the opponent basis: (L, R-G, (R+G)/2-B).
-fn opponent(p: Rgb) -> [f64; 3] {
+pub fn opponent(p: Rgb) -> [f64; 3] {
     let (r, g, b) = (p.r as f64, p.g as f64, p.b as f64);
     [(r + g + b) / 3.0, r - g, (r + g) / 2.0 - b]
 }
@@ -184,8 +184,15 @@ fn opponent(p: Rgb) -> [f64; 3] {
 /// Median and spread of the border ring, axis by axis. The spread is
 /// derived from the median absolute deviation (`1.4826 * MAD ≈ σ`),
 /// floored so a perfectly flat axis cannot divide by zero.
-fn ground_stats(img: &Image) -> Ground {
-    let (w, h) = (img.width, img.height);
+pub fn ground_stats(img: &Image) -> Ground {
+    ground_stats_in(img, 0, 0, img.width - 1, img.height - 1)
+}
+
+/// The same over an arbitrary box: the ring of `x0..=x1, y0..=y1` is
+/// that box's own ground. Used when the user has pointed at a region
+/// and attention is narrowed to it; its perimeter, not the plate's,
+/// is what the figure must escape.
+pub fn ground_stats_in(img: &Image, x0: u32, y0: u32, x1: u32, y1: u32) -> Ground {
     let mut samples: [Vec<f64>; 3] = [Vec::new(), Vec::new(), Vec::new()];
     let mut push = |p: Rgb| {
         let o = opponent(p);
@@ -193,19 +200,19 @@ fn ground_stats(img: &Image) -> Ground {
             samples[k].push(o[k]);
         }
     };
-    for x in 0..w {
-        if let Some(p) = img.get(x, 0) {
+    for x in x0..=x1 {
+        if let Some(p) = img.get(x, y0) {
             push(p);
         }
-        if let Some(p) = img.get(x, h - 1) {
+        if let Some(p) = img.get(x, y1) {
             push(p);
         }
     }
-    for y in 1..h.saturating_sub(1) {
-        if let Some(p) = img.get(0, y) {
+    for y in (y0 + 1).max(1)..=y1.saturating_sub(1) {
+        if let Some(p) = img.get(x0, y) {
             push(p);
         }
-        if let Some(p) = img.get(w - 1, y) {
+        if let Some(p) = img.get(x1, y) {
             push(p);
         }
     }
@@ -227,7 +234,7 @@ fn ground_stats(img: &Image) -> Ground {
 /// Subject mask by opponent color distance to `center`, each axis
 /// divided by the ground's own spread, at [`Z_FAR`] deviations or
 /// more. Returns `mask` row-major.
-fn mask_far_from(img: &Image, ground: &Ground, center: [f64; 3]) -> Vec<bool> {
+pub fn mask_far_from(img: &Image, ground: &Ground, center: [f64; 3]) -> Vec<bool> {
     let mut mask = vec![false; (img.width * img.height) as usize];
     for y in 0..img.height {
         for x in 0..img.width {
@@ -559,6 +566,20 @@ fn substantial(fx0: u32, fy0: u32, fx1: u32, fy1: u32, frac: f64, w: u32, h: u32
 /// whose region fills or runs off the frame fails as a scene rather
 /// than being measured as a figure. Nothing is guessed.
 pub fn measure(img: &Image, meta: PlateMeta) -> Result<VisualFacts, String> {
+    measure_with_region(img, meta, None)
+}
+
+/// `measure`, but pointed at a box `[x0, y0, x1, y1]`: the figure must
+/// escape the box's own perimeter, not the plate's. This is how a
+/// clarification answer feeds back into measurement — the user answers
+/// "which region is the subject", and attention narrows to it, so a
+/// full-frame photo whose subject runs off the plate can still yield a
+/// bounded, measured figure. Same request, now with the missing fact.
+pub fn measure_with_region(
+    img: &Image,
+    meta: PlateMeta,
+    region: Option<[u32; 4]>,
+) -> Result<VisualFacts, String> {
     let w = img.width;
     let h = img.height;
     if w < 16 || h < 16 {
@@ -566,13 +587,38 @@ pub fn measure(img: &Image, meta: PlateMeta) -> Result<VisualFacts, String> {
     }
     let surround_px = border_median(img);
     let dominant = img.dominant_color().map(|(c, _)| c).unwrap_or(surround_px);
-    let ground = ground_stats(img);
+
+    // With a pointed box, the ground is the box's own perimeter and the
+    // figure must escape *it*; without one, the plate's border ring.
+    let (ground, base) = match region {
+        Some([x0, y0, x1, y1]) => (
+            ground_stats_in(img, x0, y0, x1, y1),
+            format!("region:{x0},{y0},{x1},{y1}"),
+        ),
+        None => (ground_stats(img), "border".to_string()),
+    };
+
+    let tries: Vec<([f64; 3], String)> = vec![
+        (ground.median, base),
+        (opponent(dominant), "dominant".to_string()),
+    ];
 
     let mut chosen: Option<(Vec<usize>, Vec<Component>, String)> = None;
     let mut saw_frame_filling = false;
     let mut saw_small_subject = false;
-    for (center, method) in [(ground.median, "border"), (opponent(dominant), "dominant")] {
-        let mask = mask_far_from(img, &ground, center);
+    for (center, method) in tries {
+        let mut mask = mask_far_from(img, &ground, center);
+        // Attention is a hard window: with a pointed box, pixels outside
+        // it do not exist for clustering — the figure must be read there.
+        if let Some([x0, y0, x1, y1]) = region {
+            for y in 0..h {
+                for x in 0..w {
+                    if x < x0 || x > x1 || y < y0 || y > y1 {
+                        mask[(y * w + x) as usize] = false;
+                    }
+                }
+            }
+        }
         let cleaned = Image::morph_open(&mask, w, h, 1);
         let cleaned = Image::morph_close(&cleaned, w, h, 1);
         let comps = components(&cleaned, w, h);
@@ -613,7 +659,7 @@ pub fn measure(img: &Image, meta: PlateMeta) -> Result<VisualFacts, String> {
                 // scene, not a subject to claim.
                 saw_small_subject = true;
             } else {
-                chosen = Some((members, comps, method.to_string()));
+                chosen = Some((members, comps, method.clone()));
                 break;
             }
         }
@@ -917,6 +963,25 @@ mod tests {
             err.contains("subject"),
             "a small bounded region must be refused, not claimed: {err}"
         );
+    }
+
+    #[test]
+    fn a_region_finds_a_subject_the_whole_frame_would_refuse() {
+        // A full-height figure (touches top and bottom, so the frame
+        // reads "scene") on a flat warm ground. The whole-frame
+        // measurement must refuse; pointing at the mid-figure box makes
+        // the figure escape the box's own perimeter and be measured.
+        let mut img = Image::blank(128, 64, Rgb::new(200, 190, 170));
+        img.draw_rect(60, 0, 21, 64, Rgb::new(150, 90, 60));
+        let plain = measure(&img, meta()).expect_err("whole-frame reads as a scene");
+        assert!(
+            plain.contains("scene"),
+            "a full-height strip must be refused as a scene, not claimed: {plain}"
+        );
+        let facts = measure_with_region(&img, meta(), Some([20, 15, 110, 50]))
+            .expect("the pointed box names the subject");
+        assert_eq!(facts.subject.method, "region:20,15,110,50");
+        assert_eq!(facts.subject.bbox, [60, 15, 80, 50]);
     }
 
     /// Diagnostic: what did the subject mask actually catch?

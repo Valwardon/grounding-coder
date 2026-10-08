@@ -1,6 +1,31 @@
 use clap::{Parser, Subcommand};
 use grounding_coder::{CodeBot, config};
 
+/// Today as `YYYY-MM-DD`, the format the decision and question logs use.
+fn date_today() -> String {
+    let days = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|s| s.as_secs() / 86400)
+        .unwrap_or(0) as i64;
+    let (y, m, d) = civil_from_days(days);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// Days since the Unix epoch to civil date, Howard Hinnant's algorithm
+/// (`civil_from_days` shifts by 719468 days internally).
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z.rem_euclid(146097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
 #[derive(Parser)]
 #[command(name = "gc", about = "Grounding Coder — deterministic coding agent")]
 struct Cli {
@@ -70,6 +95,26 @@ enum Commands {
         /// Output facts JSON path
         #[arg(short, long)]
         out: String,
+        /// Answer to the previous clarification: which region is the
+        /// subject, as `x0,y0,x1,y1`. Attention narrows to that box.
+        #[arg(long)]
+        hint: Option<String>,
+        /// Append every refusal to this question-memory file, so a
+        /// plate that cannot be measured names what to clarify and
+        /// this run continues instead of dying.
+        #[arg(long)]
+        clarify_out: Option<String>,
+    },
+    /// Sense what a request leaves open and retire answers
+    Clarify {
+        /// The request in natural language
+        prompt: String,
+        /// `aspect=value`, repeatable: answers that retire questions
+        #[arg(long = "answer")]
+        answer: Vec<String>,
+        /// Question-memory file: record the round (durable, reviewable)
+        #[arg(long = "store")]
+        store: Option<String>,
     },
     /// Source photographic plates: search Commons, require complete
     /// provenance, fetch and decode. Refusals print with reasons.
@@ -629,7 +674,13 @@ fn main() {
                     }
                 }
             }
-            Commands::Measure { bank, index, out } => {
+            Commands::Measure {
+                bank,
+                index,
+                out,
+                hint,
+                clarify_out,
+            } => {
                 use grounding_coder::engine::measure;
                 use grounding_coder::engine::vision::Image;
                 let bank_dir = std::path::Path::new(&bank);
@@ -669,7 +720,27 @@ fn main() {
                     "measuring \"{}\" ({}×{} px) — method chosen by the plate",
                     meta.title, img.width, img.height
                 );
-                match measure::measure(&img, meta) {
+                let region: Option<[u32; 4]> = match hint {
+                    Some(s) => {
+                        let parts: Vec<u32> = s
+                            .split(',')
+                            .map(|p| {
+                                p.trim().parse().unwrap_or_else(|e| {
+                                    eprintln!("--hint expects x0,y0,x1,y1 (got {s:?}): {e}");
+                                    std::process::exit(1);
+                                })
+                            })
+                            .collect();
+                        if parts.len() != 4 {
+                            eprintln!("--hint expects x0,y0,x1,y1");
+                            std::process::exit(1);
+                        }
+                        Some([parts[0], parts[1], parts[2], parts[3]])
+                    }
+                    None => None,
+                };
+                let meta_title = meta.title.clone();
+                match measure::measure_with_region(&img, meta, region) {
                     Ok(facts) => {
                         let s = &facts.subject;
                         println!("  subject   bbox {:?} · {:.1}% of plate", s.bbox, s.area_frac * 100.0);
@@ -703,8 +774,100 @@ fn main() {
                     }
                     Err(e) => {
                         eprintln!("MEASURE FAILED: {}", e);
-                        std::process::exit(1);
+                        // Failure is a question, not a dead end: the
+                        // refusal is remembered with which aspect it
+                        // needs, so the next round can answer it.
+                        if let Some(path) = clarify_out {
+                            if let Some(parent) = std::path::Path::new(&path).parent()
+                                && !parent.as_os_str().is_empty()
+                            {
+                                let _ = std::fs::create_dir_all(parent);
+                            }
+                            let record = serde_json::json!({
+                                "date": date_today(),
+                                "kind": "measure",
+                                "plate": index,
+                                "title": meta_title,
+                                "aspect": "subject-region",
+                                "question": e,
+                                "answer": region.map(|[a, b, c, d]| {
+                                    serde_json::json!([a, b, c, d])
+                                }),
+                                "resolved": false,
+                            });
+                            let mut line =
+                                serde_json::to_string(&record).unwrap_or_default();
+                            line.push('\n');
+                            let _ = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(&path)
+                                .map(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+                            println!("question recorded → {}", path);
+                        }
+                        std::process::exit(2);
                     }
+                }
+            }
+            Commands::Clarify {
+                prompt,
+                answer,
+                store,
+            } => {
+                use grounding_coder::engine::clarify;
+                let answers: Vec<(String, String)> = answer
+                    .iter()
+                    .filter_map(|a| {
+                        a.split_once('=')
+                            .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+                    })
+                    .collect();
+                let c = clarify::resolve(&prompt, &answers);
+                if let Some(path) = store {
+                    if let Some(parent) = std::path::Path::new(&path).parent()
+                        && !parent.as_os_str().is_empty()
+                    {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    let aspects: Vec<serde_json::Value> = c
+                        .ambiguities
+                        .iter()
+                        .map(|a| {
+                            serde_json::json!({
+                                "aspect": a.aspect,
+                                "question": a.question,
+                                "options": a.options,
+                            })
+                        })
+                        .collect();
+                    let domain = match c.domain {
+                        clarify::Domain::Scene => "scene",
+                        clarify::Domain::Code => "code",
+                        clarify::Domain::Unknown => "unknown",
+                    };
+                    let record = serde_json::json!({
+                        "date": date_today(),
+                        "kind": "prose",
+                        "request": prompt,
+                        "domain": domain,
+                        "aspects": aspects,
+                        "answers": answers
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect::<std::collections::HashMap<_, _>>(),
+                        "resolved": c.resolved,
+                    });
+                    let mut line = serde_json::to_string(&record).unwrap_or_default();
+                    line.push('\n');
+                    let _ = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&path)
+                        .map(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+                    println!("round recorded → {}", path);
+                }
+                for line in clarify::log_lines(&c) {
+                    println!("{line}");
                 }
             }
             Commands::Plate {
