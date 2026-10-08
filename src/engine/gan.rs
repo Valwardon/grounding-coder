@@ -183,15 +183,19 @@ pub struct DiscriminatorConfig {
     cond_dim: usize,
 }
 
-/// Tiny conditional discriminator: three strided convs, cond
-/// concatenated late, one logit. Sees words, never branches on them.
+/// Tiny conditional discriminator: words are fused EARLY (broadcast
+/// into the conv input, not only concatenated at the end). Early
+/// fusion is what lets D tell the SAME image apart under right vs
+/// wrong words — without it the negative term is a contradictory
+/// label on identical pixels, D cannot learn, and G collapses to a
+/// constant. Deliberately NO normalization either: instance norm
+/// zero-means each image and erases the brightness/color statistics
+/// that separate real photos from fakes. The generator keeps its norm.
 #[derive(Module, Debug)]
 pub struct Discriminator {
     encoder: CondEncoder,
     conv1: nn::conv::Conv2d,
-    norm1: nn::InstanceNorm,
     conv2: nn::conv::Conv2d,
-    norm2: nn::InstanceNorm,
     conv3: nn::conv::Conv2d,
     fc: nn::Linear,
 }
@@ -205,16 +209,14 @@ impl DiscriminatorConfig {
                 cond_dim: self.cond_dim,
             }
             .init(device),
-            conv1: nn::conv::Conv2dConfig::new([3, 16], [4, 4])
+            conv1: nn::conv::Conv2dConfig::new([3 + self.cond_dim, 16], [4, 4])
                 .with_stride([2, 2])
                 .with_padding(burn::nn::PaddingConfig2d::Explicit(1, 1, 1, 1))
                 .init(device),
-            norm1: nn::InstanceNormConfig::new(16).init(device),
             conv2: nn::conv::Conv2dConfig::new([16, 32], [4, 4])
                 .with_stride([2, 2])
                 .with_padding(burn::nn::PaddingConfig2d::Explicit(1, 1, 1, 1))
                 .init(device),
-            norm2: nn::InstanceNormConfig::new(32).init(device),
             conv3: nn::conv::Conv2dConfig::new([32, 64], [4, 4])
                 .with_stride([2, 2])
                 .with_padding(burn::nn::PaddingConfig2d::Explicit(1, 1, 1, 1))
@@ -226,11 +228,20 @@ impl DiscriminatorConfig {
 
 impl Discriminator {
     pub fn forward(&self, img: Tensor<4>, words: &[String]) -> Tensor<2> {
-        let cond = self.encoder.forward(words);
-        let x =
-            burn::tensor::activation::leaky_relu(self.norm1.forward(self.conv1.forward(img)), 0.2);
-        let x =
-            burn::tensor::activation::leaky_relu(self.norm2.forward(self.conv2.forward(x)), 0.2);
+        let cond = self.encoder.forward(words); // [1, cond_dim]
+        let cw = cond.dims()[1];
+        let sh = img.dims()[2];
+        let sw = img.dims()[3];
+        // Early fusion: broadcast the words over the whole image so
+        // the SAME photo reads differently under right vs wrong words.
+        let cond_map = cond
+            .clone()
+            .reshape([1, cw, 1, 1])
+            .repeat_dim(2, sh)
+            .repeat_dim(3, sw); // [1, cond_dim, H, W]
+        let x = Tensor::cat(vec![img, cond_map], 1); // [1, 3+cond_dim, H, W]
+        let x = burn::tensor::activation::leaky_relu(self.conv1.forward(x), 0.2);
+        let x = burn::tensor::activation::leaky_relu(self.conv2.forward(x), 0.2);
         let x = burn::tensor::activation::leaky_relu(self.conv3.forward(x), 0.2);
         let x = x.reshape([1, 8 * 8 * 64]);
         let x = Tensor::cat(vec![x, cond], 1);
@@ -739,6 +750,28 @@ mod tests {
         for v in [d1, g1, d2, g2] {
             assert!(v.is_finite(), "loss blew up: {}", v);
         }
+    }
+
+    /// Diagnostic: does the trained generator respond to NOISE, to
+    /// WORDS, or to neither? Run manually with `cargo test --lib probe --
+    /// --ignored --nocapture` against trained weights in .grounding/gan.
+    /// Isolates the collapse: if noise-only difference ~0 the generator
+    /// has stopped listening to its latent at all; if word-only ~0 it is
+    /// ignoring the conditioning.
+    #[test]
+    #[ignore = "needs trained weights in .grounding/gan"]
+    fn probe_noise_vs_word_sensitivity() {
+        use super::super::vision::Image;
+        let dir = std::path::Path::new(".grounding/gan");
+        let diff = |a: &Image, b: &Image| super::super::generate::novelty(a, b);
+        let paint = |words: &str, seed: u64| {
+            generate_on_device(dir, &[words.to_string()], seed).expect("weights present")
+        };
+        let a = paint("woman", 1);
+        let b = paint("woman", 2); // same words, new latent
+        let c = paint("cat", 1); // same latent, new words
+        println!("noise-only mean|Δ|/255 = {:.4}", diff(&a, &b));
+        println!("word-only mean|Δ|/255 = {:.4}", diff(&a, &c));
     }
 
     #[test]
