@@ -119,12 +119,16 @@ pub struct GeneratorConfig {
 
 /// Tiny feed-forward generator: FC → 8x8 → deconv ×3 → tanh.
 /// ~300K params. One forward() call is one photo (single pass).
+/// Instance norm between upscales keeps one example from collapsing
+/// the whole batch (batch size is 1, so BatchNorm cannot help here).
 #[derive(Module, Debug)]
 pub struct Generator {
     encoder: CondEncoder,
     fc: nn::Linear,
     deconv1: nn::conv::ConvTranspose2d,
+    norm1: nn::InstanceNorm,
     deconv2: nn::conv::ConvTranspose2d,
+    norm2: nn::InstanceNorm,
     deconv3: nn::conv::ConvTranspose2d,
 }
 
@@ -143,11 +147,13 @@ impl GeneratorConfig {
                 .with_padding([1, 1])
                 .with_padding_out([0, 0])
                 .init(device),
+            norm1: nn::InstanceNormConfig::new(16).init(device),
             deconv2: nn::conv::ConvTranspose2dConfig::new([16, 8], [4, 4])
                 .with_stride([2, 2])
                 .with_padding([1, 1])
                 .with_padding_out([0, 0])
                 .init(device),
+            norm2: nn::InstanceNormConfig::new(8).init(device),
             deconv3: nn::conv::ConvTranspose2dConfig::new([8, 3], [4, 4])
                 .with_stride([2, 2])
                 .with_padding([1, 1])
@@ -165,8 +171,8 @@ impl Generator {
         let x = self.fc.forward(x);
         let x = burn::tensor::activation::relu(x);
         let x = x.reshape([1, 32, 8, 8]);
-        let x = burn::tensor::activation::relu(self.deconv1.forward(x));
-        let x = burn::tensor::activation::relu(self.deconv2.forward(x));
+        let x = burn::tensor::activation::relu(self.norm1.forward(self.deconv1.forward(x)));
+        let x = burn::tensor::activation::relu(self.norm2.forward(self.deconv2.forward(x)));
         burn::tensor::activation::tanh(self.deconv3.forward(x))
     }
 }
@@ -183,7 +189,9 @@ pub struct DiscriminatorConfig {
 pub struct Discriminator {
     encoder: CondEncoder,
     conv1: nn::conv::Conv2d,
+    norm1: nn::InstanceNorm,
     conv2: nn::conv::Conv2d,
+    norm2: nn::InstanceNorm,
     conv3: nn::conv::Conv2d,
     fc: nn::Linear,
 }
@@ -201,10 +209,12 @@ impl DiscriminatorConfig {
                 .with_stride([2, 2])
                 .with_padding(burn::nn::PaddingConfig2d::Explicit(1, 1, 1, 1))
                 .init(device),
+            norm1: nn::InstanceNormConfig::new(16).init(device),
             conv2: nn::conv::Conv2dConfig::new([16, 32], [4, 4])
                 .with_stride([2, 2])
                 .with_padding(burn::nn::PaddingConfig2d::Explicit(1, 1, 1, 1))
                 .init(device),
+            norm2: nn::InstanceNormConfig::new(32).init(device),
             conv3: nn::conv::Conv2dConfig::new([32, 64], [4, 4])
                 .with_stride([2, 2])
                 .with_padding(burn::nn::PaddingConfig2d::Explicit(1, 1, 1, 1))
@@ -217,8 +227,10 @@ impl DiscriminatorConfig {
 impl Discriminator {
     pub fn forward(&self, img: Tensor<4>, words: &[String]) -> Tensor<2> {
         let cond = self.encoder.forward(words);
-        let x = burn::tensor::activation::leaky_relu(self.conv1.forward(img), 0.2);
-        let x = burn::tensor::activation::leaky_relu(self.conv2.forward(x), 0.2);
+        let x =
+            burn::tensor::activation::leaky_relu(self.norm1.forward(self.conv1.forward(img)), 0.2);
+        let x =
+            burn::tensor::activation::leaky_relu(self.norm2.forward(self.conv2.forward(x)), 0.2);
         let x = burn::tensor::activation::leaky_relu(self.conv3.forward(x), 0.2);
         let x = x.reshape([1, 8 * 8 * 64]);
         let x = Tensor::cat(vec![x, cond], 1);
@@ -381,17 +393,22 @@ pub fn train_step(
     f32,
     f32,
 ) {
-    let lr = 2e-4_f64;
+    // Asymmetric rates: the discriminator learns slower than the
+    // generator so it cannot saturate (d_loss≈0) and starve G of
+    // gradient — the failure mode that collapsed the first run.
+    let g_lr = 2e-4_f64;
+    let d_lr = 1e-4_f64;
 
     // D step: real should score 1, detached fake should score 0.
+    // One-sided label smoothing (real=0.9) keeps D logits bounded.
     let real = image_to_tensor(&ex.image, device);
     let noise = seeded_noise(seed, device);
     let fake = genm.forward(&ex.words, noise).detach();
-    let d_loss = bce_with_labels(disc.forward(real, &ex.words), 1.0)
+    let d_loss = bce_with_labels(disc.forward(real, &ex.words), 0.9)
         + bce_with_labels(disc.forward(fake, &ex.words), 0.0);
     let d_val = first_scalar(&d_loss);
     let d_grads = GradientsParams::from_grads(d_loss.backward(), &disc);
-    let disc = disc_opt.step(lr, disc, d_grads);
+    let disc = disc_opt.step(d_lr, disc, d_grads);
 
     // G step: generated photo should score 1.
     let noise = seeded_noise(seed.wrapping_add(1), device);
@@ -399,7 +416,7 @@ pub fn train_step(
     let g_loss = bce_with_labels(disc.forward(fake, &ex.words), 1.0);
     let g_val = first_scalar(&g_loss);
     let g_grads = GradientsParams::from_grads(g_loss.backward(), &genm);
-    let genm = gen_opt.step(lr, genm, g_grads);
+    let genm = gen_opt.step(g_lr, genm, g_grads);
 
     (genm, disc, gen_opt, disc_opt, d_val, g_val)
 }
