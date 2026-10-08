@@ -58,7 +58,8 @@ enum Commands {
     /// Measure a researched plate into committed visual facts: the
     /// subject's silhouette, palette and light direction, read out of
     /// the photograph and written as reviewable JSON. No tables, no
-    /// tuning constants — Otsu picks the cut the plate implies.
+    /// per-subject constants — a significance rule against the plate's
+    /// own ground picks the cut the plate implies.
     Measure {
         /// Research bank holding provenance.json and plate BMPs
         #[arg(long)]
@@ -597,7 +598,12 @@ fn main() {
                 };
                 let (img, receipt) = scene::render(&scene);
                 let path = std::path::Path::new(&out);
-                match img.save_bmp(path) {
+                let save = if out.to_lowercase().ends_with(".png") {
+                    img.save_png(path)
+                } else {
+                    img.save_bmp(path)
+                };
+                match save {
                     Ok(()) => {
                         println!("rendered {} ({}x{})", out, width, height);
                         for (name, count) in &receipt {

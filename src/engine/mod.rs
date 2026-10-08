@@ -2,6 +2,7 @@ pub mod accel;
 pub mod arena;
 pub mod budget;
 pub mod catalog;
+pub mod clarify;
 pub mod corrector;
 pub mod error;
 pub mod evidence;

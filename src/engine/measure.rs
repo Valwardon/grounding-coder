@@ -11,9 +11,12 @@
 //! plate.bmp + provenance → measure → VisualFacts (committed JSON)
 //! ```
 //!
-//! Thresholding is Otsu's method — the photo picks its own cut — so
-//! there is no tuning constant to carry a subject. A subject must sit
-//! inside its ground, touching no frame edge; a region that fills the
+//! Thresholding is a significance rule: a pixel is figure when its
+//! color lies more than [`Z_FAR`] standard deviations off the ground's
+//! own color — the plate sets the scale through its measured noise, the
+//! distance is measured where the ground holds steady, and no per-subject
+//! constant can carry a figure through. A subject must sit inside its
+//! ground, running off at most one frame edge; a region that fills the
 //! frame is a scene. Both it and a plate with no separable subject are
 //! refused with what to clarify — never guessed (see `AGENTS.md`).
 use super::vision::{Image, Rgb};
@@ -150,60 +153,94 @@ fn border_median(img: &Image) -> Rgb {
     Rgb::new(median(&mut rs), median(&mut gs), median(&mut bs))
 }
 
-/// Otsu's threshold over a 256-bin histogram: the split maximizing
-/// between-class variance. The plate picks its own cut, so no tuning
-/// constant can carry a subject through.
-fn otsu(hist: &[u64; 256]) -> u8 {
-    let total: u64 = hist.iter().sum();
-    if total == 0 {
-        return 0;
-    }
-    let total = total as f64;
-    let mut sum = 0.0;
-    for (i, &c) in hist.iter().enumerate() {
-        sum += i as f64 * c as f64;
-    }
-    let (mut sum_b, mut w_b, mut best, mut thr) = (0.0f64, 0.0f64, -1.0f64, 0u8);
-    for (t, &count) in hist.iter().enumerate() {
-        let w_f = count as f64;
-        if w_f == 0.0 {
-            continue;
-        }
-        let w_b_next = w_b + w_f;
-        let w_f_next = total - w_b_next;
-        if w_f_next <= 0.0 {
-            break;
-        }
-        sum_b += t as f64 * w_f;
-        let mean_b = sum_b / w_b_next;
-        let mean_f = (sum - sum_b) / w_f_next;
-        let between = w_b_next * w_f_next * (mean_b - mean_f) * (mean_b - mean_f);
-        if between > best {
-            best = between;
-            thr = t as u8;
-        }
-        w_b = w_b_next;
-    }
-    thr
+/// How many of the ground's own standard deviations a pixel must lie
+/// off before it counts as figure. A significance rule, not a tuning
+/// constant: the plate sets the scale (its measured ground noise) and
+/// this is the fixed claim that "far" means six deviations — far past
+/// the tightest 0.001% of a stable ground.
+pub const Z_FAR: f64 = 6.0;
+
+/// The ground's own color noise, in a color-opponent basis.
+///
+/// A photograph separates figure from ground by more than brightness:
+/// a dark silk dress on a dark ground can be invisible in luminance
+/// yet plainly warmer than the ground. Measuring each axis in units
+/// of the border's own spread trusts the axis the ground holds steady
+/// — usually hue — so that difference survives; [`Z_FAR`] then draws
+/// the line the plate itself made measurable.
+struct Ground {
+    /// Border medians of (luminance, red-green, yellow-blue).
+    median: [f64; 3],
+    /// Per-axis border spread (MAD as sigma, floored off zero).
+    sigma: [f64; 3],
 }
 
-/// Subject mask by color distance to a reference color, split at the
-/// plate's own Otsu threshold. Returns `mask` row-major.
-fn mask_far_from(img: &Image, reference: Rgb) -> Vec<bool> {
-    let mut hist = [0u64; 256];
-    let mut bins = vec![0u8; (img.width * img.height) as usize];
+/// A color in the opponent basis: (L, R-G, (R+G)/2-B).
+fn opponent(p: Rgb) -> [f64; 3] {
+    let (r, g, b) = (p.r as f64, p.g as f64, p.b as f64);
+    [(r + g + b) / 3.0, r - g, (r + g) / 2.0 - b]
+}
+
+/// Median and spread of the border ring, axis by axis. The spread is
+/// derived from the median absolute deviation (`1.4826 * MAD ≈ σ`),
+/// floored so a perfectly flat axis cannot divide by zero.
+fn ground_stats(img: &Image) -> Ground {
+    let (w, h) = (img.width, img.height);
+    let mut samples: [Vec<f64>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    let mut push = |p: Rgb| {
+        let o = opponent(p);
+        for k in 0..3 {
+            samples[k].push(o[k]);
+        }
+    };
+    for x in 0..w {
+        if let Some(p) = img.get(x, 0) {
+            push(p);
+        }
+        if let Some(p) = img.get(x, h - 1) {
+            push(p);
+        }
+    }
+    for y in 1..h.saturating_sub(1) {
+        if let Some(p) = img.get(0, y) {
+            push(p);
+        }
+        if let Some(p) = img.get(w - 1, y) {
+            push(p);
+        }
+    }
+    let mut median = [0.0f64; 3];
+    let mut sigma = [0.0f64; 3];
+    for k in 0..3 {
+        let v = &mut samples[k];
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let m = v.get(v.len() / 2).copied().unwrap_or(0.0);
+        median[k] = m;
+        let mut dev: Vec<f64> = v.iter().map(|x| (x - m).abs()).collect();
+        dev.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let mad = dev.get(dev.len() / 2).copied().unwrap_or(0.0);
+        sigma[k] = (mad * 1.4826).max(1.2);
+    }
+    Ground { median, sigma }
+}
+
+/// Subject mask by opponent color distance to `center`, each axis
+/// divided by the ground's own spread, at [`Z_FAR`] deviations or
+/// more. Returns `mask` row-major.
+fn mask_far_from(img: &Image, ground: &Ground, center: [f64; 3]) -> Vec<bool> {
+    let mut mask = vec![false; (img.width * img.height) as usize];
     for y in 0..img.height {
         for x in 0..img.width {
             let Some(px) = img.get(x, y) else { continue };
-            let d = px.distance2(&reference);
-            // RMS per channel, 0..255.
-            let bin = ((d / 3) as f64).sqrt().round().clamp(0.0, 255.0) as u8;
-            hist[bin as usize] += 1;
-            bins[(y * img.width + x) as usize] = bin;
+            let o = opponent(px);
+            let d: f64 = (0..3)
+                .map(|k| ((o[k] - center[k]) / ground.sigma[k]).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            mask[(y * img.width + x) as usize] = d > Z_FAR;
         }
     }
-    let thr = otsu(&hist);
-    bins.iter().map(|&b| b > thr).collect()
+    mask
 }
 
 /// Mean color of pixel indices.
@@ -497,15 +534,26 @@ fn bucketize(img: &Image, blob: &[usize], w: u32, bbox: [u32; 4]) -> Buckets {
     }
 }
 
+/// Bounded regions are only subjects when they are substantial against
+/// their ground: a solid share of the plate's area and a silhouette
+/// spanning half the frame along height or width. A 2% patch of bright
+/// path in a forest plate is an object in a scene, not the subject of
+/// the plate — claim nothing, ask instead.
+fn substantial(fx0: u32, fy0: u32, fx1: u32, fy1: u32, frac: f64, w: u32, h: u32) -> bool {
+    let extent = |a: u32, b: u32| (b - a + 1) as f64;
+    frac >= 0.05 && (extent(fy0, fy1) / h as f64 >= 0.5 || extent(fx0, fx1) / w as f64 >= 0.5)
+}
+
 /// Read one plate into committed visual facts.
 ///
 /// Two candidate subject masks are tried in order — color distance to
 /// the plate's border, then to its dominant color — and the first one
 /// yielding a plausible subject (1%..90% of the plate) that sits
-/// inside its ground (touching no frame edge) is measured. The mask is
-/// then split into regions; the column-clustered group with the most
-/// pixels is the subject, and every other region is kept on the
-/// record.
+/// inside its ground (running off at most one frame edge) and is
+/// substantial (a real share of the plate, readable as a figure) is
+/// measured. The mask is then split into regions; the column-clustered
+/// group with the most pixels is the subject, and every other region
+/// is kept on the record.
 ///
 /// A plate with no separable subject fails with a reason, and a plate
 /// whose region fills or runs off the frame fails as a scene rather
@@ -518,11 +566,13 @@ pub fn measure(img: &Image, meta: PlateMeta) -> Result<VisualFacts, String> {
     }
     let surround_px = border_median(img);
     let dominant = img.dominant_color().map(|(c, _)| c).unwrap_or(surround_px);
+    let ground = ground_stats(img);
 
     let mut chosen: Option<(Vec<usize>, Vec<Component>, String)> = None;
     let mut saw_frame_filling = false;
-    for (reference, method) in [(surround_px, "border"), (dominant, "dominant")] {
-        let mask = mask_far_from(img, reference);
+    let mut saw_small_subject = false;
+    for (center, method) in [(ground.median, "border"), (opponent(dominant), "dominant")] {
+        let mask = mask_far_from(img, &ground, center);
         let cleaned = Image::morph_open(&mask, w, h, 1);
         let cleaned = Image::morph_close(&cleaned, w, h, 1);
         let comps = components(&cleaned, w, h);
@@ -531,10 +581,9 @@ pub fn measure(img: &Image, meta: PlateMeta) -> Result<VisualFacts, String> {
         let frac = area as f64 / (w * h) as f64;
         if (0.01..0.9).contains(&frac) {
             // A subject sits inside its ground: its silhouette must be
-            // bounded by the surround on all four sides, clear of the
-            // frame by more than the morphology radius (a subject that
-            // reaches the frame loses its outermost ring to the open,
-            // so `> margin` and not `> 0`).
+            // clear of the frame by more than the morphology radius (a
+            // subject that reaches the frame loses its outermost ring
+            // to the open, so `> margin` and not `> 0`).
             const FRAME_MARGIN: u32 = 1;
             let (mut fx0, mut fy0, mut fx1, mut fy1) = (u32::MAX, u32::MAX, 0u32, 0u32);
             for &i in &members {
@@ -544,15 +593,29 @@ pub fn measure(img: &Image, meta: PlateMeta) -> Result<VisualFacts, String> {
                 fx1 = fx1.max(cx1);
                 fy1 = fy1.max(cy1);
             }
-            if fx0 > FRAME_MARGIN
-                && fy0 > FRAME_MARGIN
-                && fx1 + 1 + FRAME_MARGIN < w
-                && fy1 + 1 + FRAME_MARGIN < h
-            {
+            // How many frame edges the cluster reaches? A full-bleed
+            // plate runs off two or more edges and is a scene with no
+            // separable subject; a figure cropped at its feet touches
+            // only one and is still a subject — measure what remains.
+            let edges = [
+                fx0 <= FRAME_MARGIN,
+                fy0 <= FRAME_MARGIN,
+                fx1 + 1 + FRAME_MARGIN >= w,
+                fy1 + 1 + FRAME_MARGIN >= h,
+            ]
+            .into_iter()
+            .filter(|&t| t)
+            .count();
+            if edges >= 2 {
+                saw_frame_filling = true;
+            } else if !substantial(fx0, fy0, fx1, fy1, frac, w, h) {
+                // Bounded but small against its ground: a patch in a
+                // scene, not a subject to claim.
+                saw_small_subject = true;
+            } else {
                 chosen = Some((members, comps, method.to_string()));
                 break;
             }
-            saw_frame_filling = true;
         }
     }
     let (members, comps, method) = chosen.ok_or_else(|| {
@@ -560,6 +623,11 @@ pub fn measure(img: &Image, meta: PlateMeta) -> Result<VisualFacts, String> {
             "subject runs off the frame: this plate is a scene, not a \
              bounded subject — clarify which region is the subject, \
              then re-run"
+                .to_string()
+        } else if saw_small_subject {
+            "this plate's only figure is small against its ground: \
+             the subject is not substantial — clarify which region is \
+             the subject, then re-run"
                 .to_string()
         } else {
             "no separable subject: this plate has no region measurably \
@@ -838,6 +906,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_patch_in_a_scene_is_too_small_to_be_a_subject() {
+        let mut img = Image::blank(128, 128, Rgb::new(180, 180, 175));
+        // A small bounded bright patch — an object in a scene, roughly
+        // 1.5% of the plate, guaranteed under the substantiality gate.
+        img.draw_rect(58, 60, 82, 84, Rgb::new(40, 60, 200));
+        let err = measure(&img, meta()).expect_err("a patch is not a subject");
+        assert!(
+            err.contains("subject"),
+            "a small bounded region must be refused, not claimed: {err}"
+        );
+    }
+
     /// Diagnostic: what did the subject mask actually catch?
     /// `cargo test --lib dump_mask -- --ignored --nocapture <plate.bmp>`
     #[test]
@@ -848,17 +929,18 @@ mod tests {
             .find(|a| a.ends_with(".bmp"))
             .unwrap_or_else(|| "/tmp/bank-sem/plate-0000.bmp".into());
         let img = Image::load_bmp(std::path::Path::new(&path)).expect("plate");
+        let ground = ground_stats(&img);
         let surround = border_median(&img);
         let dominant = img.dominant_color().map(|(c, _)| c).unwrap_or(surround);
-        for (reference, name) in [(surround, "border"), (dominant, "dominant")] {
-            let mask = mask_far_from(&img, reference);
+        for (center, name) in [(ground.median, "border"), (opponent(dominant), "dominant")] {
+            let mask = mask_far_from(&img, &ground, center);
             let cleaned = Image::morph_open(&mask, img.width, img.height, 1);
             let cleaned = Image::morph_close(&cleaned, img.width, img.height, 1);
             let blob = Image::largest_blob(&cleaned, img.width, img.height);
             let frac = blob.len() as f64 / (img.width * img.height) as f64;
             println!(
                 "method {name}: ref {:?} full-mask {} px ({:.1}%) · largest component {} px ({:.1}%)",
-                [reference.r, reference.g, reference.b],
+                center.map(|v| v.round() as u8),
                 cleaned.iter().filter(|&&v| v).count(),
                 cleaned.iter().filter(|&&v| v).count() as f64 / (img.width * img.height) as f64
                     * 100.0,
