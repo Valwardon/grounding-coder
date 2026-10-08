@@ -7,17 +7,17 @@
 //! never copied into the product), and this module turns the
 //! conditioning into brand-new pixels in a single pass.
 //!
-//! Backend honesty, stated upfront: the single-pass generator
-//! running here is a hosted image model behind a network call —
-//! the receipt names it, with model, seed, and the exact
-//! conditioning it consumed. An on-device lightweight GAN takes
-//! this same conditioning contract when it lands; nothing upstream
-//! changes, because upstream only ever produced conditioning.
-//! No code here varies by subject: the prompt is built from
+//! Backend honesty, stated upfront: the single-pass generator is the
+//! on-device conditional GAN in [`super::gan`] — a pure-Rust CPU
+//! model, no network, no hosted fallback. This module owns the
+//! conditioning contract (compact words + seed) and the pixel checks;
+//! the GAN consumes the words. It REFUSES to generate until trained
+//! weights exist on disk, and nothing upstream changes when it does.
+//! No code here varies by subject: the conditioning is built from
 //! researched words by one generic rule.
 
 use super::scene_intent::SceneSpec;
-use super::vision::{Image, Rgb};
+use super::vision::Image;
 
 /// Compact knowledge: everything the generator may consume, small
 /// enough to log in full. Words come from the researched spec;
@@ -116,82 +116,33 @@ pub fn build_prompt(cond: &CompactConditioning) -> String {
     )
 }
 
-/// Percent-encode a prompt for a URL path segment.
-fn url_encode(s: &str) -> String {
-    let mut out = String::new();
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || b" -_.~".contains(&b) {
-            if b == b' ' {
-                out.push_str("%20");
-            } else {
-                out.push(b as char);
-            }
-        } else {
-            out.push_str(&format!("%{:02X}", b));
-        }
-    }
-    out
-}
+/// The generator behind the pixels, for the receipt. On-device GAN:
+/// no network, no hosted model, never a fallback.
+pub const GENERATOR_MODEL: &str = "on-device-gan";
 
-/// Generator backend identity for receipts.
-pub const GENERATOR_MODEL: &str = "pollinations-flux";
-/// Hard bound on one generation pass.
-pub const GENERATE_TIMEOUT_SECS: u64 = 300;
-
-/// One generation pass: conditioning → brand-new pixels. Seeded and
-/// single-pass; the bytes come back decoded into the engine buffer.
-/// Fails honestly (network, decode, degenerate frames) — failure
-/// refuses, never falls back to donor bytes.
-pub async fn generate_photo(
-    cond: &CompactConditioning,
-    width: u32,
-    height: u32,
-) -> Result<Image, String> {
-    let prompt = build_prompt(cond);
-    let url = format!(
-        "https://image.pollinations.ai/prompt/{}?width={}&height={}&seed={}&nologo=true&model=flux",
-        url_encode(&prompt),
-        width.clamp(64, 1280),
-        height.clamp(64, 1280),
-        cond.seed,
-    );
-    let bytes =
-        crate::http::get_bytes_timeout(&url, std::time::Duration::from_secs(GENERATE_TIMEOUT_SECS))
-            .await
-            .map_err(|e| format!("generator unreachable: {}", e))?;
-    if bytes.len() < 1024 {
-        return Err(format!(
-            "generator returned {} bytes — refusing short read",
-            bytes.len()
-        ));
-    }
-    let dyn_img =
-        image::load_from_memory(&bytes).map_err(|e| format!("generated decode failed: {}", e))?;
-    let rgb = dyn_img.to_rgb8();
-    let (w, h) = (rgb.width(), rgb.height());
-    if w < 16 || h < 16 || w > 4096 || h > 4096 {
-        return Err(format!("refusing generated frame of {}x{}", w, h));
-    }
-    let mut img = Image::blank(w, h, Rgb::new(0, 0, 0));
-    for (x, y, p) in rgb.enumerate_pixels() {
-        img.set(x, y, Rgb::new(p[0], p[1], p[2]));
-    }
-    // Blank-frame guard: a flat field is a failed pass, not a photo.
-    let mut distinct = std::collections::HashSet::new();
-    for y in (0..h).step_by(7) {
-        for x in (0..w).step_by(7) {
-            if let Some(p) = img.get(x, y) {
-                distinct.insert((p.r >> 4, p.g >> 4, p.b >> 4));
+/// Every researched word the conditioning carries, flattened by one
+/// generic rule into the word list the GAN's hashed encoder consumes.
+/// Unknown words hash like any other — nothing is out of vocabulary,
+/// and no subject takes a special branch.
+pub fn conditioning_words(cond: &CompactConditioning) -> Vec<String> {
+    let mut words = Vec::new();
+    for w in cond
+        .subjects
+        .iter()
+        .chain(cond.attributes.iter())
+        .chain(cond.actions.iter())
+        .chain(cond.objects.iter())
+        .chain(cond.places.iter())
+    {
+        // Objects may carry a material ("hat:straw"): both halves are
+        // words. Split on any non-alphanumeric, keep non-empty.
+        for part in w.split(|c: char| !c.is_alphanumeric()) {
+            if !part.is_empty() {
+                words.push(part.to_lowercase());
             }
         }
     }
-    if distinct.len() < 8 {
-        return Err(format!(
-            "generated frame nearly flat ({} tones) — refusing",
-            distinct.len()
-        ));
-    }
-    Ok(img)
+    words
 }
 
 /// Mean per-channel absolute difference, 0.0–1.0, over the overlap
@@ -232,6 +183,7 @@ pub struct GenerationReceipt {
 
 #[cfg(test)]
 mod tests {
+    use super::super::vision::Rgb;
     use super::*;
     use crate::engine::scene_intent::parse_scene;
 
@@ -296,11 +248,5 @@ mod tests {
         assert!(novelty(&a, &c) > 0.0);
         let d = Image::blank(32, 32, Rgb::new(10, 20, 200));
         assert!(novelty(&a, &d) > 0.2, "strangers must differ");
-    }
-
-    #[test]
-    fn url_encode_is_safe() {
-        assert_eq!(url_encode("a man"), "a%20man");
-        assert!(!url_encode(" trees/river? ").contains('/'));
     }
 }

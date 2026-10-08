@@ -1,24 +1,20 @@
 //! One command from prose to photo: imagine.
 //!
 //! ```text
-//! prose → intent → research → rank → deliver
+//! prose → intent → research → conditioning → on-device GAN → deliver
 //! ```
 //!
-//! Research finds the photograph; the photograph is the answer.
+//! Research finds licensed plates for the subject; extraction reduces
+//! them to compact conditioning (words + counts), and the RAW BYTES ARE
+//! DISCARDED. The on-device conditional GAN in [`super::gan`] then paints
+//! brand-new pixels in one forward pass from those words — no montage,
+//! no meshes, no hosted model, no donor bytes in the product. One
+//! generic path serves a woman, a cat, and a tree alike: no code here
+//! varies by subject, because subjects live in research.
 //!
-//! There is no pixel generation here of any kind — no montage, no
-//! meshes, no statistical synthesis, no per-subject extractors. A
-//! person-synthesizer would demand a cat-synthesizer and a
-//! tree-synthesizer next: infinite programming for every living
-//! thing, which research already answers. So the pipeline parses
-//! intent, researches licensed plates for ANY subject through the
-//! same generic path, ranks them by title/query overlap, and hands
-//! over the winner's own bytes labeled exactly what they are: a
-//! sourced photograph by a real photographer, not a generated image.
-//! No code here varies by subject — subjects live in research.
-//!
-//! Refusal is honest: with no usable plate the command refuses with
-//! its research trail instead of fabricating pixels.
+//! Refusal is honest: with no usable plate the command refuses with its
+//! research trail; with no trained generator weights it refuses too,
+//! never fabricating pixels and never falling back to a hosted service.
 
 use super::vision::Image;
 
@@ -451,8 +447,8 @@ pub async fn imagine(
 /// replace the default subject query (tried in order until plates
 /// land). Returns the outcome plus evidence words for coverage
 /// checking. Round 1 passes None and researches the brief. No
-/// copying into new pixels, no montage, no rendering: the winning
-/// plate's own bytes, labeled sourced.
+/// copying into new pixels, no montage, no rendering: the on-device
+/// GAN paints brand-new pixels from the conditioning words.
 #[allow(clippy::too_many_arguments)]
 async fn attempt(
     prose: &str,
@@ -573,13 +569,18 @@ async fn attempt(
     let seed = seed_for(prose);
     let cond = super::generate::conditioning_from_spec(&researched.spec, all_plates.len(), seed);
     let prompt = super::generate::build_prompt(&cond);
+    let words = super::generate::conditioning_words(&cond);
     log.push(format!("conditioning: {:?}", cond));
-    log.push(format!("prompt: {}", prompt));
+    log.push(format!("conditioning words: {:?}", words));
     log.push(format!(
         "discard: {} raw plate bytes dropped before generation",
         all_plates.len()
     ));
-    match super::generate::generate_photo(&cond, 640, 800).await {
+    // On-device single pass: the GAN consumes the researched words and
+    // seeded noise. It REFUSES when no trained weights exist — there is
+    // no hosted fallback and never a donor-byte copy.
+    let weights_dir = super::gan::default_weights_dir();
+    match super::gan::generate_on_device(&weights_dir, &words, seed) {
         Ok(image) => {
             // Novelty vs every researched donor: the product must
             // differ from all of them, measured, never assumed.
@@ -597,7 +598,7 @@ async fn attempt(
                 return (Err(log), evidence);
             }
             log.push(format!(
-                "generated: {}x{} brand-new pixels via {} (seed {})",
+                "generated: {}x{} brand-new pixels on-device via {} (seed {})",
                 image.width,
                 image.height,
                 super::generate::GENERATOR_MODEL,

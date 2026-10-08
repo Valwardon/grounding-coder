@@ -42,8 +42,15 @@ pub const WORD_DIM: usize = 16;
 pub const MAX_WORDS: usize = 16;
 /// Checkpoint file inside a trained weights dir.
 pub const WEIGHTS_FILE: &str = "generator.safetensors";
-/// Training receipt file inside a trained weights dir.
+/// Training receipt file, written beside the weights.
 pub const TRAIN_RECEIPT_FILE: &str = "train_receipt.json";
+
+/// Default on-disk home for trained generator weights, under the
+/// engine's own state directory. The picture pipeline refuses to
+/// generate until a generator trained here exists.
+pub fn default_weights_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(".grounding/gan")
+}
 
 /// FNV-1a word hash into buckets: every word in every language
 /// lands somewhere deterministic — no vocabulary to maintain, no
