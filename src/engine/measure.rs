@@ -14,8 +14,8 @@
 //! Thresholding is Otsu's method — the photo picks its own cut — so
 //! there is no tuning constant to carry a subject. A subject must sit
 //! inside its ground, touching no frame edge; a region that fills the
-//! frame is a scene, and both it and a plate with no separable
-//! subject fail honestly instead of guessing a bounding box.
+//! frame is a scene. Both it and a plate with no separable subject are
+//! refused with what to clarify — never guessed (see `AGENTS.md`).
 use super::vision::{Image, Rgb};
 use serde::{Deserialize, Serialize};
 
@@ -558,12 +558,13 @@ pub fn measure(img: &Image, meta: PlateMeta) -> Result<VisualFacts, String> {
     let (members, comps, method) = chosen.ok_or_else(|| {
         if saw_frame_filling {
             "subject runs off the frame: this plate is a scene, not a \
-             bounded subject — research a plate where the subject sits \
-             inside its ground"
+             bounded subject — clarify which region is the subject, \
+             then re-run"
                 .to_string()
         } else {
             "no separable subject: this plate has no region measurably \
-             different from its surroundings — research another plate"
+             different from its surroundings — clarify which region is \
+             the subject, then re-run"
                 .to_string()
         }
     })?;
