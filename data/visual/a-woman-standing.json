@@ -1,0 +1,272 @@
+{
+  "plate": {
+    "title": "File:Hals, Frans - Portrait of a Woman Standing L-1312-00-000016-pp.jpg",
+    "query": "a woman standing",
+    "source_url": "https://upload.wikimedia.org/wikipedia/commons/c/c7/Hals%2C_Frans_-_Portrait_of_a_Woman_Standing_L-1312-00-000016-pp.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail_unscaled",
+    "page_url": "https://commons.wikimedia.org/wiki/File:Hals,_Frans_-_Portrait_of_a_Woman_Standing_L-1312-00-000016-pp.jpg",
+    "author": "Frans Hals",
+    "license": "Public domain",
+    "file": "plate-0000.bmp"
+  },
+  "plate_size": [
+    198,
+    256
+  ],
+  "subject": {
+    "method": "border",
+    "bbox": [
+      64,
+      18,
+      133,
+      224
+    ],
+    "centroid": [
+      0.4728153396581402,
+      0.32148798712021137
+    ],
+    "height_frac": 0.80859375,
+    "width_frac": 0.35353535353535354,
+    "area_frac": 0.07467250631313131,
+    "profile": [
+      0.14285714285714285,
+      0.2396825396825397,
+      0.26607142857142857,
+      0.24285714285714285,
+      0.09285714285714286,
+      0.10428571428571429,
+      0.11571428571428571,
+      0.12714285714285714,
+      0.13857142857142857,
+      0.15000000000000002,
+      0.16142857142857142,
+      0.17285714285714288,
+      0.1842857142857143,
+      0.19571428571428573,
+      0.20714285714285716,
+      0.5111111111111111,
+      0.8035714285714286,
+      0.9428571428571428,
+      0.9767857142857143,
+      0.8253968253968255,
+      0.7063492063492063,
+      0.6678571428571428,
+      0.5857142857142857,
+      0.3873015873015873
+    ],
+    "side_balance": -0.0597485488620463,
+    "vertical_balance": -0.042876695128290065,
+    "pixels": 3785,
+    "components": [
+      {
+        "bbox": [
+          64,
+          18,
+          133,
+          99
+        ],
+        "area": 3250,
+        "mean": [
+          123,
+          99,
+          79
+        ],
+        "in_subject": true
+      },
+      {
+        "bbox": [
+          64,
+          187,
+          97,
+          224
+        ],
+        "area": 535,
+        "mean": [
+          147,
+          102,
+          75
+        ],
+        "in_subject": true
+      },
+      {
+        "bbox": [
+          35,
+          167,
+          51,
+          200
+        ],
+        "area": 335,
+        "mean": [
+          133,
+          92,
+          64
+        ],
+        "in_subject": false
+      }
+    ],
+    "profile_covered": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "row_colors": [
+      [
+        139,
+        90,
+        61
+      ],
+      [
+        138,
+        92,
+        68
+      ],
+      [
+        148,
+        102,
+        75
+      ],
+      [
+        160,
+        116,
+        87
+      ],
+      [
+        141,
+        112,
+        90
+      ],
+      [
+        51,
+        28,
+        18
+      ],
+      [
+        42,
+        24,
+        16
+      ],
+      [
+        40,
+        24,
+        16
+      ],
+      [
+        43,
+        27,
+        19
+      ],
+      [
+        39,
+        24,
+        17
+      ],
+      [
+        42,
+        25,
+        18
+      ],
+      [
+        41,
+        25,
+        17
+      ],
+      [
+        46,
+        28,
+        21
+      ],
+      [
+        53,
+        33,
+        26
+      ],
+      [
+        109,
+        86,
+        66
+      ],
+      [
+        123,
+        107,
+        91
+      ],
+      [
+        123,
+        109,
+        96
+      ],
+      [
+        122,
+        101,
+        82
+      ],
+      [
+        122,
+        96,
+        75
+      ],
+      [
+        129,
+        93,
+        70
+      ],
+      [
+        120,
+        90,
+        63
+      ],
+      [
+        138,
+        103,
+        73
+      ],
+      [
+        118,
+        92,
+        68
+      ],
+      [
+        106,
+        98,
+        87
+      ]
+    ]
+  },
+  "palette": {
+    "subject": [
+      126,
+      100,
+      79
+    ],
+    "surround": [
+      28,
+      24,
+      19
+    ],
+    "ground": [
+      33,
+      24,
+      17
+    ]
+  }
+}

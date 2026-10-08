@@ -38,6 +38,8 @@ enum Commands {
     Recipes,
     /// Render the demo scene (tower, ground, sky) to a BMP photo.
     /// People come from researched photographs, never from meshes.
+    /// With --facts, render the committed measurements of a plate
+    /// instead: the subject comes back where the photograph had it.
     Render {
         /// Output file path
         #[arg(short, long, default_value = "photo.bmp")]
@@ -48,6 +50,25 @@ enum Commands {
         /// Frame height in pixels
         #[arg(long, default_value_t = 240)]
         height: u32,
+        /// Visual facts JSON from `gc measure` — render those
+        /// measurements instead of the demo scene
+        #[arg(long)]
+        facts: Option<String>,
+    },
+    /// Measure a researched plate into committed visual facts: the
+    /// subject's silhouette, palette and light direction, read out of
+    /// the photograph and written as reviewable JSON. No tables, no
+    /// tuning constants — Otsu picks the cut the plate implies.
+    Measure {
+        /// Research bank holding provenance.json and plate BMPs
+        #[arg(long)]
+        bank: String,
+        /// Which plate in provenance.json to measure (0-based)
+        #[arg(long, default_value_t = 0)]
+        index: u32,
+        /// Output facts JSON path
+        #[arg(short, long)]
+        out: String,
     },
     /// Source photographic plates: search Commons, require complete
     /// provenance, fetch and decode. Refusals print with reasons.
@@ -539,11 +560,42 @@ fn main() {
                     println!("  {}", recipe);
                 }
             }
-            Commands::Render { out, width, height } => {
+            Commands::Render {
+                out,
+                width,
+                height,
+                facts,
+            } => {
                 use grounding_coder::engine::{scene, vision::Image};
                 let width = width.clamp(16, 1920);
                 let height = height.clamp(16, 1920);
-                let (img, receipt) = scene::render(&scene::demo_scene(width, height));
+                let scene = match &facts {
+                    Some(path) => {
+                        let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
+                            eprintln!("FACTS UNREADABLE {path}: {e}");
+                            std::process::exit(1);
+                        });
+                        let facts: grounding_coder::engine::measure::VisualFacts =
+                            serde_json::from_str(&text).unwrap_or_else(|e| {
+                                eprintln!("FACTS INVALID {path}: {e}");
+                                std::process::exit(1);
+                            });
+                        println!(
+                            "rendering measurements of \"{}\" ({})",
+                            facts.plate.title, facts.plate.query
+                        );
+                        println!(
+                            "  measured bbox {:?} · {}×{} plate · method {}",
+                            facts.subject.bbox,
+                            facts.plate_size[0],
+                            facts.plate_size[1],
+                            facts.subject.method
+                        );
+                        scene::scene_from_facts(&facts, width, height)
+                    }
+                    None => scene::demo_scene(width, height),
+                };
+                let (img, receipt) = scene::render(&scene);
                 let path = std::path::Path::new(&out);
                 match img.save_bmp(path) {
                     Ok(()) => {
@@ -567,6 +619,84 @@ fn main() {
                     }
                     Err(e) => {
                         eprintln!("RENDER FAILED: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            Commands::Measure { bank, index, out } => {
+                use grounding_coder::engine::measure;
+                use grounding_coder::engine::vision::Image;
+                let bank_dir = std::path::Path::new(&bank);
+                let prov_path = bank_dir.join("provenance.json");
+                let text = std::fs::read_to_string(&prov_path).unwrap_or_else(|e| {
+                    eprintln!("NO PROVENANCE {}: {}", prov_path.display(), e);
+                    std::process::exit(1);
+                });
+                let entries: Vec<serde_json::Value> =
+                    serde_json::from_str(&text).unwrap_or_else(|e| {
+                        eprintln!("PROVENANCE INVALID {}: {}", prov_path.display(), e);
+                        std::process::exit(1);
+                    });
+                let entry = entries.get(index as usize).unwrap_or_else(|| {
+                    eprintln!(
+                        "PLATE {} NOT FOUND: provenance.json holds {} entries",
+                        index,
+                        entries.len()
+                    );
+                    std::process::exit(1);
+                });
+                let meta: measure::PlateMeta =
+                    serde_json::from_value(entry.clone()).unwrap_or_else(|e| {
+                        eprintln!("PLATE METADATA UNREADABLE: {}", e);
+                        std::process::exit(1);
+                    });
+                if meta.file.is_empty() {
+                    eprintln!("PLATE {} HAS NO FILE: nothing to measure", index);
+                    std::process::exit(1);
+                }
+                let plate_path = bank_dir.join(&meta.file);
+                let img = Image::load_bmp(&plate_path).unwrap_or_else(|e| {
+                    eprintln!("PLATE UNREADABLE {}: {}", plate_path.display(), e);
+                    std::process::exit(1);
+                });
+                println!(
+                    "measuring \"{}\" ({}×{} px) — method chosen by the plate",
+                    meta.title, img.width, img.height
+                );
+                match measure::measure(&img, meta) {
+                    Ok(facts) => {
+                        let s = &facts.subject;
+                        println!("  subject   bbox {:?} · {:.1}% of plate", s.bbox, s.area_frac * 100.0);
+                        println!(
+                            "  profile   {} rows, bottom→top: {:?}…",
+                            s.profile.len(),
+                            &s.profile[..s.profile.len().min(6)]
+                        );
+                        println!(
+                            "  palette   subject {:?} · surround {:?} · ground {:?}",
+                            facts.palette.subject, facts.palette.surround, facts.palette.ground
+                        );
+                        println!(
+                            "  light     side_balance {:+.3} · vertical_balance {:+.3}",
+                            s.side_balance, s.vertical_balance
+                        );
+                        if let Some(parent) = std::path::Path::new(&out).parent()
+                            && !parent.as_os_str().is_empty()
+                        {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        let json = serde_json::to_string_pretty(&facts).unwrap_or_else(|e| {
+                            eprintln!("FACTS SERIALIZE FAILED: {}", e);
+                            std::process::exit(1);
+                        });
+                        if let Err(e) = std::fs::write(&out, format!("{}\n", json)) {
+                            eprintln!("FACTS WRITE FAILED {}: {}", out, e);
+                            std::process::exit(1);
+                        }
+                        println!("committed → {}", out);
+                    }
+                    Err(e) => {
+                        eprintln!("MEASURE FAILED: {}", e);
                         std::process::exit(1);
                     }
                 }

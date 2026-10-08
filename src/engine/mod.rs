@@ -12,6 +12,7 @@ pub mod imagine;
 pub mod intent_research;
 pub mod knowledge;
 pub mod lang;
+pub mod measure;
 pub mod mesh;
 pub mod pathfind;
 pub mod picture;

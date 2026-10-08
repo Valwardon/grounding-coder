@@ -14,6 +14,7 @@
 //! Modification is the whole point: add/remove a node, re-render,
 //! and the receipt (per-material pixel counts) proves what changed
 //! and what didn't. The oracle is arithmetic on the buffer.
+use super::measure::VisualFacts;
 use super::mesh::Mesh;
 use super::vision::{Image, Rgb};
 
@@ -656,6 +657,174 @@ pub fn demo_scene(width: u32, height: u32) -> Scene {
     }
 }
 
+/// Ray through a pixel in center coordinates (pixel `i` sits at
+/// `i + 0.5`). Deliberately the same arithmetic as `render_core`, so
+/// anything unprojected through this lands where the renderer will
+/// actually draw it — measurement and render agree by construction.
+fn camera_ray(cam: &Camera, cx: f64, cy: f64) -> (Vec3, Vec3) {
+    let fwd = cam.look_at.sub(cam.pos).norm();
+    let right = fwd.cross(Vec3::new(0.0, 1.0, 0.0)).norm();
+    let up = right.cross(fwd).norm();
+    let tan_half = (cam.fov_deg.to_radians() / 2.0).tan();
+    let aspect = cam.width as f64 / cam.height as f64;
+    let px = (2.0 * cx / cam.width as f64 - 1.0) * aspect;
+    let py = 1.0 - 2.0 * cy / cam.height as f64;
+    let dir = fwd
+        .add(right.scale(px * tan_half))
+        .add(up.scale(py * tan_half))
+        .norm();
+    (cam.pos, dir)
+}
+
+/// Where the ray through a pixel meets the ground plane `y = 0`.
+/// `None` when the pixel lies above the horizon (a plate cropped
+/// below the subject's feet never shows its ground contact).
+fn unproject_ground(cam: &Camera, cx: f64, cy: f64) -> Option<Vec3> {
+    let (origin, dir) = camera_ray(cam, cx, cy);
+    if dir.y >= -1e-9 {
+        return None;
+    }
+    let t = -origin.y / dir.y;
+    (t > 0.0).then(|| origin.add(dir.scale(t)))
+}
+
+/// Where the ray through a pixel meets the vertical plane `z = depth`.
+fn unproject_depth(cam: &Camera, cx: f64, cy: f64, depth: f64) -> Vec3 {
+    let (origin, dir) = camera_ray(cam, cx, cy);
+    let t = if dir.z.abs() < 1e-9 {
+        1.0
+    } else {
+        (depth - origin.z) / dir.z
+    };
+    origin.add(dir.scale(t.max(0.0)))
+}
+
+/// Blend two measured colors halfway — used for the sky gradient's
+/// lower stop, so the horizon reads the plate's own ground color.
+fn mix(a: Rgb, b: Rgb) -> Rgb {
+    Rgb::new(
+        ((a.r as u16 + b.r as u16) / 2) as u8,
+        ((a.g as u16 + b.g as u16) / 2) as u8,
+        ((a.b as u16 + b.b as u16) / 2) as u8,
+    )
+}
+
+/// Build a scene from committed measurements: the plate's own
+/// silhouette, palette, placement and light — unprojected onto the
+/// ground through the same rays the renderer casts.
+///
+/// Nothing here is anatomy. The subject's height is where the plate's
+/// top pixel lands at the depth its bottom pixel established; its
+/// width per row is the measured silhouette, row for row; its colors
+/// are the measured palette; its light direction is the measured
+/// brightness balance. A row the photograph left empty stays empty.
+///
+/// Each slice box puts its FRONT face on the measurement plane, so
+/// the render projects the subject back onto the bbox it came from.
+pub fn scene_from_facts(facts: &VisualFacts, width: u32, height: u32) -> Scene {
+    let s = &facts.subject;
+    let [x0, y0, x1, y1] = s.bbox;
+    let cam = Camera {
+        pos: Vec3::new(0.0, 1.6, 5.0),
+        look_at: Vec3::new(0.0, 1.1, 0.0),
+        fov_deg: 50.0,
+        width,
+        height,
+    };
+
+    // Foot point: where the plate's bottom-centre pixel meets the
+    // ground. That fixes the depth plane every other measurement is
+    // read at. A plate cropped above the ground falls back to the
+    // look-at plane rather than inventing a floor position.
+    let bx = (x0 as f64 + x1 as f64) / 2.0 + 0.5;
+    let by = y1 as f64 + 0.5;
+    let (cx_world, z_world) = match unproject_ground(&cam, bx, by) {
+        Some(p) => (p.x, p.z),
+        None => {
+            let p = unproject_depth(&cam, bx, by, cam.look_at.z);
+            (p.x, cam.look_at.z)
+        }
+    };
+
+    // Height: the plate's top pixel, measured at the foot's depth.
+    let top = unproject_depth(&cam, bx, y0 as f64 + 0.5, z_world);
+    let h = top.y.max(0.05);
+
+    // Width: the plate's left and right edges, same depth.
+    let mid_y = (y0 as f64 + y1 as f64) / 2.0 + 0.5;
+    let left = unproject_depth(&cam, x0 as f64 + 0.5, mid_y, z_world);
+    let right = unproject_depth(&cam, x1 as f64 + 0.5, mid_y, z_world);
+    let w_world = (right.x - left.x).abs().max(0.02);
+    let cx_world = if (right.x - left.x).abs() > 1e-9 {
+        (left.x + right.x) / 2.0
+    } else {
+        cx_world
+    };
+
+    let ground = Rgb::new(
+        facts.palette.ground[0],
+        facts.palette.ground[1],
+        facts.palette.ground[2],
+    );
+    let surround = Rgb::new(
+        facts.palette.surround[0],
+        facts.palette.surround[1],
+        facts.palette.surround[2],
+    );
+    let subject = Rgb::new(
+        facts.palette.subject[0],
+        facts.palette.subject[1],
+        facts.palette.subject[2],
+    );
+
+    let mut shapes = vec![Shape::Plane {
+        y: 0.0,
+        mat: Material::named("ground", ground),
+    }];
+    let n = s.profile.len().max(1);
+    for (i, &fill) in s.profile.iter().enumerate() {
+        let y_lo = h * i as f64 / n as f64;
+        let y_hi = h * (i + 1) as f64 / n as f64;
+        let w = fill * w_world;
+        if w <= 1e-9 {
+            continue; // empty in the plate, empty in the render
+        }
+        // Color measured at this height in the plate: lit face, dark
+        // silk dress, whatever the photograph painted there.
+        let band = s
+            .row_colors
+            .get(i)
+            .map(|&[r, g, b]| Rgb::new(r, g, b))
+            .unwrap_or(subject);
+        // A silhouette carries no depth evidence — the only honest
+        // measure is how wide the subject is, so the cross-section
+        // stays square in that measured width.
+        let d = w;
+        shapes.push(Shape::Box {
+            min: Vec3::new(cx_world - w / 2.0, y_lo, z_world - d),
+            max: Vec3::new(cx_world + w / 2.0, y_hi, z_world),
+            mat: Material::named("subject", band),
+        });
+    }
+
+    // Key light from the measured brightness balance: which side of
+    // the subject was brighter, which half was brighter above.
+    let key = Vec3::new(
+        s.side_balance,
+        (0.5 + 0.5 * s.vertical_balance).clamp(0.15, 1.0),
+        0.45,
+    );
+
+    Scene {
+        camera: cam,
+        lights: vec![Light::key(key)],
+        ambient: 0.35,
+        sky_top: surround,
+        sky_bottom: mix(surround, ground),
+        shapes,
+    }
+}
+
 fn shade(base: Rgb, amount: f64) -> Rgb {
     let a = amount.clamp(0.0, 1.0);
     Rgb::new(
@@ -939,6 +1108,172 @@ mod tests {
             let id = table.iter().position(|n| n == name).expect("label table");
             assert_eq!(counts[id], *count, "label/receipt mismatch for {}", name);
         }
+    }
+
+    // Measured-facts rendering: the plate is the only authority.
+    // Facts are what `measure` would commit; the render is judged by
+    // the buffer, against the bbox those facts came from.
+
+    use crate::engine::measure::{Palette, PlateMeta, SubjectFacts};
+
+    fn measured_facts(bbox: [u32; 4], profile: Vec<f64>) -> VisualFacts {
+        let [x0, y0, x1, y1] = bbox;
+        let buckets = profile.len();
+        VisualFacts {
+            plate: PlateMeta {
+                title: "File:Synthetic.jpg".into(),
+                query: "a figure standing".into(),
+                source_url: String::new(),
+                page_url: String::new(),
+                author: String::new(),
+                license: String::new(),
+                file: "plate-0000.bmp".into(),
+            },
+            plate_size: [64, 64],
+            subject: SubjectFacts {
+                method: "border".into(),
+                bbox,
+                centroid: [
+                    (x0 as f64 + x1 as f64 + 1.0) / 2.0 / 64.0,
+                    (y0 as f64 + y1 as f64 + 1.0) / 2.0 / 64.0,
+                ],
+                height_frac: (y1 - y0 + 1) as f64 / 64.0,
+                width_frac: (x1 - x0 + 1) as f64 / 64.0,
+                area_frac: 0.2,
+                profile,
+                side_balance: 0.5,
+                vertical_balance: 0.3,
+                pixels: 500,
+                components: Vec::new(),
+                profile_covered: vec![true; buckets],
+                row_colors: Vec::new(),
+            },
+            palette: Palette {
+                subject: [40, 60, 200],
+                surround: [200, 200, 200],
+                ground: [90, 140, 80],
+            },
+        }
+    }
+
+    /// Subject pixels of a rendered frame, plus their bounding box.
+    fn subject_extent(width: u32, scene: &Scene) -> Option<(u32, u32, u32, u32, u64)> {
+        let (_, labels, table) = render_labels(scene);
+        let id = table.iter().position(|n| n == "subject")?;
+        let (mut x0, mut y0, mut x1, mut y1, mut n) = (u32::MAX, u32::MAX, 0, 0, 0u64);
+        for (i, &l) in labels.iter().enumerate() {
+            if l != id {
+                continue;
+            }
+            let (x, y) = (i as u32 % width, i as u32 / width);
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x);
+            y1 = y1.max(y);
+            n += 1;
+        }
+        (n > 0).then_some((x0, y0, x1, y1, n))
+    }
+
+    #[test]
+    fn the_render_puts_the_subject_back_where_the_plate_had_it() {
+        // A 64x64 plate with a full-width subject from y=8..60,
+        // x=16..47 — render at the plate's own size so pixel
+        // coordinates are directly comparable.
+        let bbox = [16, 8, 47, 60];
+        let facts = measured_facts(bbox, vec![1.0; super::super::measure::PROFILE_ROWS]);
+        let scene = scene_from_facts(&facts, 64, 64);
+        let extent = subject_extent(64, &scene).expect("subject must render");
+        let (rx0, ry0, rx1, ry1, n) = extent;
+        assert!(n > 150, "subject rendered {n} px, expected a solid figure");
+        // Back onto the measured bbox, allowing for the slice depth
+        // bulging the silhouette a few pixels wider than the front face.
+        let tol = 8;
+        assert!(
+            rx0.abs_diff(bbox[0]) <= tol,
+            "left edge rendered at {rx0}, plate said {}",
+            bbox[0]
+        );
+        assert!(
+            rx1.abs_diff(bbox[2]) <= tol,
+            "right edge rendered at {rx1}, plate said {}",
+            bbox[2]
+        );
+        assert!(
+            ry0.abs_diff(bbox[1]) <= tol,
+            "top rendered at {ry0}, plate said {}",
+            bbox[1]
+        );
+        assert!(
+            ry1.abs_diff(bbox[3]) <= tol,
+            "feet rendered at {ry1}, plate said {}",
+            bbox[3]
+        );
+    }
+
+    #[test]
+    fn measured_facts_render_byte_deterministically() {
+        let facts = measured_facts(
+            [16, 8, 47, 60],
+            vec![0.7; super::super::measure::PROFILE_ROWS],
+        );
+        let a = scene_from_facts(&facts, 64, 64);
+        let b = scene_from_facts(&facts, 64, 64);
+        let (ia, _) = render(&a);
+        let (ib, _) = render(&b);
+        for y in 0..ia.height {
+            for x in 0..ia.width {
+                assert_eq!(ia.get(x, y), ib.get(x, y), "pixel ({},{})", x, y);
+            }
+        }
+    }
+
+    #[test]
+    fn a_row_the_plate_left_empty_stays_empty_in_the_render() {
+        let n = super::super::measure::PROFILE_ROWS;
+        let mut gapped = vec![1.0; n];
+        // Four missing rows mid-figure — legs the plate didn't show.
+        for v in &mut gapped[8..12] {
+            *v = 0.0;
+        }
+        let full = scene_from_facts(&measured_facts([16, 8, 47, 60], vec![1.0; n]), 64, 64);
+        let cut = scene_from_facts(&measured_facts([16, 8, 47, 60], gapped), 64, 64);
+        let full_px = subject_extent(64, &full).map(|e| e.4).unwrap_or(0);
+        let cut_px = subject_extent(64, &cut).map(|e| e.4).unwrap_or(0);
+        assert!(
+            cut_px < full_px,
+            "gapped silhouette rendered {cut_px} px vs full {full_px} — \
+             empty plate rows must cost pixels"
+        );
+    }
+
+    #[test]
+    fn the_measured_light_direction_reaches_the_render() {
+        let mut lit_right = measured_facts(
+            [16, 8, 47, 60],
+            vec![1.0; super::super::measure::PROFILE_ROWS],
+        );
+        lit_right.subject.side_balance = 0.95;
+        let mut lit_left = lit_right.clone();
+        lit_left.subject.side_balance = -0.95;
+
+        let scene_r = scene_from_facts(&lit_right, 48, 48);
+        let scene_l = scene_from_facts(&lit_left, 48, 48);
+        // The measured balance becomes the key light's direction.
+        assert!(
+            scene_r.lights[0].dir.x > 0.0,
+            "right-lit plate → light from +x"
+        );
+        assert!(
+            scene_l.lights[0].dir.x < 0.0,
+            "left-lit plate → light from -x"
+        );
+
+        // And flipping the measured light changes the photo.
+        let (a, _) = render(&scene_r);
+        let (b, _) = render(&scene_l);
+        let differs = (0..48).any(|y| (0..48).any(|x| a.get(x, y) != b.get(x, y)));
+        assert!(differs, "flipping measured lighting must change the render");
     }
 
     // REMOVED with the canon bodies: study_anatomy measured renders
