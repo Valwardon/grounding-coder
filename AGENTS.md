@@ -45,3 +45,10 @@ stop.)
   them all with where they live in the code. A rule is only filed once
   its measurement is in; the tests verify the engine never cites a
   lesson that is not filed.
+- The loop also learns from its own repeats: a subject that refuses a
+  class twice in a row, with no committed fact in between, files a
+  subject lesson (`S-…`) it must cite before acting again
+  (`KNOWN: …`) — and a fresh commit refutes it, because a lesson that
+  a measurement can break is memory, not a rule. Memory never becomes
+  a code branch: subject lessons change the loop's question, never
+  its measurement.

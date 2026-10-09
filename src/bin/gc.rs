@@ -212,6 +212,205 @@ fn cited_lessons(text: &str) -> Vec<String> {
     keys
 }
 
+/// Two plates share a subject when their words match: lowercased,
+/// trimmed, whitespace collapsed.
+fn subject_key(title: &str) -> String {
+    title
+        .trim()
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// An id-safe slug for a subject key.
+fn slug_of(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+        } else if c == ' ' && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+/// The image encounters a subject has had, in the order they happened.
+fn subject_encounters(path: &str, key: &str) -> Vec<serde_json::Value> {
+    let t = std::fs::read_to_string(path).unwrap_or_default();
+    t.lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|r| {
+            r["kind"] == "image" && subject_key(r["stimulus"].as_str().unwrap_or("")) == key
+        })
+        .collect()
+}
+
+/// The active subject lessons a subject carries: lessons the loop filed
+/// from its own repeats, not yet refuted by a fresh commit.
+fn known_subject_lessons(lessons_path: &str, key: &str) -> Vec<serde_json::Value> {
+    read_lessons(lessons_path)
+        .into_iter()
+        .filter(|l| {
+            l["kind"] == "subject"
+                && l["subject"] == serde_json::json!(key)
+                && l["status"] != serde_json::json!("refuted")
+        })
+        .collect()
+}
+
+fn write_lessons(path: &str, lessons: &[serde_json::Value]) {
+    if let Some(parent) = std::path::Path::new(path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+    {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut body = lessons
+        .iter()
+        .map(|l| serde_json::to_string(l).unwrap_or_default())
+        .collect::<Vec<String>>()
+        .join("\n");
+    body.push('\n');
+    let _ = std::fs::write(path, body);
+}
+
+/// The loop consults its memory before acting: if the subject coming in
+/// is known to refuse a class outright, say so up front. Fresh
+/// measurement still decides; a commit will refute the memory.
+fn consult_known(lessons_path: &str, title: &str) -> bool {
+    let known = known_subject_lessons(lessons_path, &subject_key(title));
+    if known.is_empty() {
+        return false;
+    }
+    for l in &known {
+        println!(
+            "KNOWN: {} — {}",
+            l["id"].as_str().unwrap_or("?"),
+            l["statement"].as_str().unwrap_or("?")
+        );
+    }
+    true
+}
+
+/// File or strengthen a subject lesson: a subject that refused a class
+/// and refuses it again, with no committed fact in between, is a
+/// learned rule — the loop will not claim a figure from a whole-frame
+/// read of it.
+fn learn_from_refusal(
+    lessons_path: &str,
+    encounters_path: &str,
+    title: &str,
+    class: &str,
+    date: &str,
+) {
+    let key = subject_key(title);
+    let mut lessons = read_lessons(lessons_path);
+    if let Some(i) = lessons.iter().position(|l| {
+        l["kind"] == "subject"
+            && l["subject"] == serde_json::json!(key)
+            && l["class"] == serde_json::json!(class)
+    }) {
+        if lessons[i]["status"] == serde_json::json!("refuted") {
+            return;
+        }
+        let id = lessons[i]["id"].as_str().unwrap_or("?").to_string();
+        let repeats = lessons[i]["repeats"].as_u64().unwrap_or(1) + 1;
+        lessons[i]["repeats"] = serde_json::json!(repeats);
+        if let Some(enc) = lessons[i]["encounters"].as_array_mut()
+            && !enc.iter().any(|d| d == &serde_json::json!(date))
+        {
+            enc.push(serde_json::json!(date));
+        }
+        write_lessons(lessons_path, &lessons);
+        println!(
+            "lesson learned: {} strengthened — {key} refused {class} {repeats} times",
+            id
+        );
+        return;
+    }
+    // No filed lesson yet: does the repeat warrant one? Only consecutive
+    // refusals with no intervening commit count — a memory that would
+    // be broken by a fresh fact is no memory.
+    let encounters = subject_encounters(encounters_path, &key);
+    let mut refusals = 0u64;
+    let mut first: Option<String> = None;
+    for e in &encounters {
+        let res = e["result"].as_str().unwrap_or("");
+        if e["action"] == "committed" {
+            refusals = 0;
+            first = None;
+        } else if e["action"] == "refused" && cited_lessons(res).iter().any(|c| c == class) {
+            refusals += 1;
+            if first.is_none() {
+                first = Some(e["date"].as_str().unwrap_or(date).to_string());
+            }
+        }
+    }
+    if refusals < 2 {
+        return;
+    }
+    let slug = slug_of(&key);
+    let mut n = 0usize;
+    let id = loop {
+        let cand = if n == 0 {
+            format!("S-{slug}")
+        } else {
+            format!("S-{slug}-{n}")
+        };
+        if lessons.iter().any(|l| l["id"] == serde_json::json!(cand)) {
+            n += 1;
+        } else {
+            break cand;
+        }
+    };
+    lessons.push(serde_json::json!({
+        "id": id,
+        "kind": "subject",
+        "subject": key,
+        "class": class,
+        "name": "known flat refusal",
+        "statement": format!(
+            "I have met subject \"{key}\" before and it refused {class} {refusals} times with \
+             no committed fact in between; I will not claim a figure from a whole-frame read of \
+             it — engage a pointed region or verify first."
+        ),
+        "repeats": refusals,
+        "encounters": [first.unwrap_or_else(|| date.to_string()), date.to_string()],
+        "where": "derived from encounters that refused with no committed fact between them",
+        "evidence": format!(
+            "{refusals} consecutive refusals of the same class in data/encounters.jsonl"
+        ),
+        "status": "active",
+    }));
+    write_lessons(lessons_path, &lessons);
+    println!("lesson learned from repeat: {id} filed — {key} refuses {class} again");
+}
+
+/// A fresh commit overturns memory: any active subject lesson for this
+/// subject is refuted — the read now succeeds, so the rule was wrong.
+/// Returns how many were retired.
+fn retire_refuted(lessons_path: &str, title: &str) -> usize {
+    let key = subject_key(title);
+    let mut lessons = read_lessons(lessons_path);
+    let mut retired = 0usize;
+    for l in lessons.iter_mut() {
+        if l["kind"] == "subject"
+            && l["subject"] == serde_json::json!(key)
+            && l["status"] != serde_json::json!("refuted")
+        {
+            l["status"] = serde_json::json!("refuted");
+            l["refuted_on"] = serde_json::json!(date_today());
+            retired += 1;
+        }
+    }
+    if retired > 0 {
+        write_lessons(lessons_path, &lessons);
+    }
+    retired
+}
+
 fn write_question_records(path: &str, records: &[serde_json::Value]) {
     if let Some(parent) = std::path::Path::new(path).parent()
         && !parent.as_os_str().is_empty()
@@ -317,6 +516,10 @@ enum Commands {
         /// Encounter memory (what happened, one line per pass)
         #[arg(long, default_value = "data/encounters.jsonl")]
         encounters: String,
+        /// Lesson memory: discrimination rules plus the subject
+        /// lessons the loop files from its own repeats
+        #[arg(long, default_value = "data/lessons.jsonl")]
+        lessons: String,
         /// Reflect first: print everything the journal still leaves
         /// open, then run this pass as usual (answers given this turn
         /// close the questions they meet).
@@ -416,6 +619,9 @@ enum Commands {
         /// doubles as "what are you applying right now"
         #[arg(long)]
         journal: Option<String>,
+        /// The lesson-memory file to read
+        #[arg(long, default_value = "data/lessons.jsonl")]
+        file: String,
     },
     /// Source photographic plates: search Commons, require complete
     /// provenance, fetch and decode. Refusals print with reasons.
@@ -620,9 +826,9 @@ fn measure_standalone(
 /// Read the question journal aloud: everything the loop still leaves
 /// open. The mind's start-of-turn review — reflection is memory made
 /// visible, not analysis of the self.
-fn reflect_open(path: &str) {
+fn reflect_open(path: &str, lessons_path: &str) {
     let records = question_records(path);
-    let lessons = read_lessons("data/lessons.jsonl");
+    let lessons = read_lessons(lessons_path);
     let lesson = |key: &str| -> String {
         lessons
             .iter()
@@ -1083,14 +1289,16 @@ fn main() {
                 journal,
                 facts_dir,
                 encounters,
+                lessons,
                 reflect,
             } => {
                 if reflect {
-                    reflect_open(&journal);
+                    reflect_open(&journal, &lessons);
                 }
                 match (image, prose) {
                     (Some(img), None) => {
                         let t = title.clone().unwrap_or_else(|| image_stem(&img));
+                        consult_known(&lessons, &t);
                         let region_box = parse_box(region.as_deref(), "--region");
                         match measure_standalone(&img, &t, region_box) {
                             Ok(facts) => {
@@ -1128,6 +1336,13 @@ fn main() {
                                     ),
                                 );
                                 println!("committed → {}", out_path);
+                                let retired = retire_refuted(&lessons, &t);
+                                if retired > 0 {
+                                    println!(
+                                        "lesson revoked by a fresh commit: {retired} subject \
+                                         rule(s) refuted — measurement overtook memory"
+                                    );
+                                }
                             }
                             Err(e) => {
                                 let mut recs = question_records(&journal);
@@ -1155,6 +1370,17 @@ fn main() {
                                 );
                                 eprintln!("MEASURE FAILED: {}", e);
                                 eprintln!("question remembered → {}", journal);
+                                let class = cited_lessons(&e)
+                                    .into_iter()
+                                    .next()
+                                    .unwrap_or_else(|| "L-separable".to_string());
+                                learn_from_refusal(
+                                    &lessons,
+                                    &encounters,
+                                    &t,
+                                    &class,
+                                    &date_today(),
+                                );
                                 std::process::exit(2);
                             }
                         }
@@ -1569,19 +1795,43 @@ fn main() {
                     println!("{line}");
                 }
             }
-            Commands::Lessons { journal } => {
-                let lessons = read_lessons("data/lessons.jsonl");
+            Commands::Lessons { journal, file } => {
+                let lessons = read_lessons(&file);
+                let (rules, subjects): (Vec<_>, Vec<_>) = lessons
+                    .iter()
+                    .partition(|l| l["kind"] != serde_json::json!("subject"));
                 println!(
-                    "LESSONS: the discrimination memory I hold — {} rules",
-                    lessons.len()
+                    "LESSONS: the discrimination memory I hold — {} rules, {} subject lessons",
+                    rules.len(),
+                    subjects.len()
                 );
-                for row in &lessons {
-                    println!("  {} · {}", row["id"], row["name"]);
-                    println!("       {}", row["statement"]);
+                for row in &rules {
+                    println!(
+                        "  {} · {}",
+                        row["id"].as_str().unwrap_or("?"),
+                        row["name"].as_str().unwrap_or("?")
+                    );
+                    println!("       {}", row["statement"].as_str().unwrap_or("?"));
                     println!(
                         "       where {} · evidence {}",
-                        row["where"], row["evidence"]
+                        row["where"].as_str().unwrap_or("?"),
+                        row["evidence"].as_str().unwrap_or("?")
                     );
+                }
+                if !subjects.is_empty() {
+                    println!(
+                        "SUBJECT LESSONS: the loop remembering subjects that refuse — {}",
+                        subjects.len()
+                    );
+                    for row in &subjects {
+                        println!(
+                            "  {} [{} · {} repeats]",
+                            row["id"].as_str().unwrap_or("?"),
+                            row["status"].as_str().unwrap_or("?"),
+                            row["repeats"].as_u64().unwrap_or(0)
+                        );
+                        println!("       {}", row["statement"].as_str().unwrap_or("?"));
+                    }
                 }
                 if let Some(path) = journal {
                     let mut cited: Vec<String> = Vec::new();
@@ -2207,5 +2457,197 @@ mod lessons_tests {
         for key in cited_lessons(&err) {
             assert!(ids.contains(&key.as_str()), "engine cited {key}: {err}");
         }
+    }
+}
+
+#[cfg(test)]
+mod learn_tests {
+    use super::*;
+
+    fn scratch(name: &str) -> String {
+        std::env::temp_dir()
+            .join(format!("gc-learn-{}-{name}", std::process::id()))
+            .to_string_lossy()
+            .to_string()
+    }
+
+    fn enc_line(stimulus: &str, action: &str, class: Option<&str>) -> String {
+        let result = match class {
+            Some(c) => format!("{c} · refused"),
+            None => "[0, 0, 10, 10] · method border".to_string(),
+        };
+        serde_json::to_string(&serde_json::json!({
+            "date": "2026-10-09",
+            "kind": "image",
+            "stimulus": stimulus,
+            "aspect": "subject-region",
+            "action": action,
+            "result": result,
+        }))
+        .unwrap()
+    }
+
+    fn write(p: &str, body: &str) {
+        std::fs::write(p, body).unwrap();
+    }
+
+    #[test]
+    fn subject_key_normalizes_titles() {
+        assert_eq!(
+            subject_key("  A   Man   Playing FOLK music "),
+            "a man playing folk music"
+        );
+        assert_eq!(subject_key("The Same Title"), "the same title");
+    }
+
+    #[test]
+    fn a_repeat_files_a_subject_lesson_and_strengthens() {
+        let enc = scratch("repeat-enc.jsonl");
+        let les = scratch("repeat-lessons.jsonl");
+        write(
+            &enc,
+            &format!(
+                "{}\n{}\n",
+                enc_line("a man playing folk music", "refused", Some("L-separable")),
+                enc_line("a man playing folk music", "refused", Some("L-separable"))
+            ),
+        );
+        learn_from_refusal(
+            &les,
+            &enc,
+            "a man playing folk music",
+            "L-separable",
+            "2026-10-09",
+        );
+        let lessons = read_lessons(&les);
+        let filed = lessons
+            .iter()
+            .find(|l| l["kind"] == "subject" && l["subject"] == "a man playing folk music");
+        assert!(
+            filed.is_some(),
+            "a repeat must file a subject lesson: {lessons:?}"
+        );
+        let filed = filed.unwrap();
+        assert_eq!(filed["id"], "S-a-man-playing-folk-music");
+        assert_eq!(filed["repeats"], 2);
+        assert_eq!(filed["status"], "active");
+
+        write(
+            &enc,
+            &format!(
+                "{}\n{}\n{}\n",
+                enc_line("a man playing folk music", "refused", Some("L-separable")),
+                enc_line("a man playing folk music", "refused", Some("L-separable")),
+                enc_line("a man playing folk music", "refused", Some("L-separable"))
+            ),
+        );
+        learn_from_refusal(
+            &les,
+            &enc,
+            "a man playing folk music",
+            "L-separable",
+            "2026-10-10",
+        );
+        let lessons = read_lessons(&les);
+        let filed = lessons
+            .iter()
+            .find(|l| l["id"] == "S-a-man-playing-folk-music")
+            .expect("lesson survives");
+        assert_eq!(
+            filed["repeats"], 3,
+            "a third refusal strengthens the lesson"
+        );
+        assert!(filed["encounters"].as_array().unwrap().len() >= 2);
+    }
+
+    #[test]
+    fn a_commit_between_refusals_stops_a_lesson() {
+        let enc = scratch("commit-enc.jsonl");
+        let les = scratch("commit-lessons.jsonl");
+        write(
+            &enc,
+            &format!(
+                "{}\n{}\n{}\n",
+                enc_line("a man playing folk music", "refused", Some("L-separable")),
+                enc_line("a man playing folk music", "committed", None),
+                enc_line("a man playing folk music", "refused", Some("L-separable"))
+            ),
+        );
+        learn_from_refusal(
+            &les,
+            &enc,
+            "a man playing folk music",
+            "L-separable",
+            "2026-10-09",
+        );
+        let lessons = read_lessons(&les);
+        assert!(
+            lessons.iter().all(|l| l["kind"] != "subject"),
+            "a lesson broken by a committed fact in between is no lesson: {lessons:?}"
+        );
+    }
+
+    #[test]
+    fn a_fresh_commit_retires_the_lesson() {
+        let enc = scratch("retire-enc.jsonl");
+        let les = scratch("retire-lessons.jsonl");
+        write(
+            &enc,
+            &format!("{}\n", enc_line("a studio visitor", "committed", None)),
+        );
+        learn_from_refusal(
+            &les,
+            &enc,
+            "a studio visitor",
+            "L-ground-escape",
+            "2026-10-09",
+        );
+        write(
+            &enc,
+            &format!(
+                "{}\n{}\n",
+                enc_line("a studio visitor", "refused", Some("L-ground-escape")),
+                enc_line("a studio visitor", "refused", Some("L-ground-escape"))
+            ),
+        );
+        learn_from_refusal(
+            &les,
+            &enc,
+            "a studio visitor",
+            "L-ground-escape",
+            "2026-10-10",
+        );
+        assert!(read_lessons(&les).iter().any(|l| l["kind"] == "subject"));
+        let retired = retire_refuted(&les, "a studio visitor");
+        assert_eq!(retired, 1, "the filed lesson must be retired by a commit");
+        let lessons = read_lessons(&les);
+        assert_eq!(lessons[0]["status"], "refuted");
+        assert_eq!(lessons[0]["refuted_on"], "2026-10-09");
+    }
+
+    #[test]
+    fn consult_known_reports_known_subjects() {
+        let les = scratch("known-lessons.jsonl");
+        write(
+            &les,
+            &format!("{}\n", serde_json::to_string(&serde_json::json!({
+            "id": "S-x",
+            "kind": "subject",
+            "subject": "a studio visitor",
+            "class": "L-ground-escape",
+            "name": "known flat refusal",
+            "statement": "I have met \"a studio visitor\" before and it refused L-ground-escape.",
+            "repeats": 2,
+            "encounters": ["2026-10-09"],
+            "where": "derived",
+            "evidence": "2 consecutive refusals",
+            "status": "active",
+        })).unwrap()),
+        );
+        assert!(consult_known(&les, "a studio visitor"));
+        assert!(!consult_known(&les, "someone else"));
+        // Refuted lessons no longer surface.
+        retire_refuted(&les, "a studio visitor");
+        assert!(!consult_known(&les, "a studio visitor"));
     }
 }
