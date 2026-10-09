@@ -1,0 +1,332 @@
+{
+  "plate": {
+    "title": "File:A young woman standing at a virginal.jpg",
+    "query": "a woman standing",
+    "source_url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/5/54/A_young_woman_standing_at_a_virginal.jpg/3840px-A_young_woman_standing_at_a_virginal.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail",
+    "page_url": "https://commons.wikimedia.org/wiki/File:A_young_woman_standing_at_a_virginal.jpg",
+    "author": "Johannes Vermeer",
+    "license": "Public domain",
+    "file": "plate-0002.bmp"
+  },
+  "plate_size": [
+    224,
+    256
+  ],
+  "subject": {
+    "method": "border",
+    "bbox": [
+      39,
+      1,
+      189,
+      253
+    ],
+    "centroid": [
+      0.49522106659104553,
+      0.49025043058150397
+    ],
+    "height_frac": 0.98828125,
+    "width_frac": 0.6741071428571429,
+    "area_frac": 0.3733607700892857,
+    "profile": [
+      0.38925680647534955,
+      0.30488103998037774,
+      0.22050527348540594,
+      0.13612950699043416,
+      0.656953642384106,
+      0.9452137266706803,
+      0.9377483443708609,
+      0.9024683925346177,
+      0.8284768211920529,
+      0.913305237808549,
+      0.9761589403973511,
+      0.9921733895243828,
+      0.9867549668874173,
+      0.9874172185430463,
+      0.9933774834437086,
+      0.9933774834437086,
+      0.9933774834437086,
+      0.9933774834437086,
+      0.9933774834437086,
+      0.9908940397350994,
+      0.7553807947019868,
+      0.5198675496688742,
+      0.4420529801324503,
+      0.36423841059602646
+    ],
+    "side_balance": -0.1810928581421333,
+    "vertical_balance": 0.15987599763384092,
+    "pixels": 21410,
+    "components": [
+      {
+        "bbox": [
+          39,
+          46,
+          189,
+          213
+        ],
+        "area": 19836,
+        "mean": [
+          116,
+          109,
+          98
+        ],
+        "in_subject": true
+      },
+      {
+        "bbox": [
+          97,
+          23,
+          180,
+          32
+        ],
+        "area": 622,
+        "mean": [
+          120,
+          119,
+          139
+        ],
+        "in_subject": true
+      },
+      {
+        "bbox": [
+          100,
+          245,
+          170,
+          253
+        ],
+        "area": 504,
+        "mean": [
+          141,
+          142,
+          155
+        ],
+        "in_subject": true
+      },
+      {
+        "bbox": [
+          128,
+          1,
+          188,
+          4
+        ],
+        "area": 216,
+        "mean": [
+          112,
+          98,
+          125
+        ],
+        "in_subject": true
+      },
+      {
+        "bbox": [
+          126,
+          215,
+          149,
+          221
+        ],
+        "area": 96,
+        "mean": [
+          113,
+          100,
+          124
+        ],
+        "in_subject": true
+      },
+      {
+        "bbox": [
+          112,
+          47,
+          126,
+          52
+        ],
+        "area": 77,
+        "mean": [
+          58,
+          53,
+          42
+        ],
+        "in_subject": true
+      },
+      {
+        "bbox": [
+          79,
+          24,
+          94,
+          32
+        ],
+        "area": 59,
+        "mean": [
+          109,
+          108,
+          126
+        ],
+        "in_subject": true
+      }
+    ],
+    "profile_covered": [
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true,
+      false,
+      true
+    ],
+    "row_colors": [
+      [
+        141,
+        142,
+        155
+      ],
+      [
+        43,
+        42,
+        49
+      ],
+      [
+        37,
+        35,
+        41
+      ],
+      [
+        97,
+        86,
+        93
+      ],
+      [
+        44,
+        47,
+        42
+      ],
+      [
+        53,
+        63,
+        66
+      ],
+      [
+        78,
+        72,
+        64
+      ],
+      [
+        87,
+        79,
+        68
+      ],
+      [
+        92,
+        82,
+        71
+      ],
+      [
+        98,
+        89,
+        78
+      ],
+      [
+        112,
+        104,
+        94
+      ],
+      [
+        138,
+        135,
+        127
+      ],
+      [
+        134,
+        134,
+        127
+      ],
+      [
+        133,
+        128,
+        115
+      ],
+      [
+        134,
+        127,
+        113
+      ],
+      [
+        141,
+        126,
+        102
+      ],
+      [
+        142,
+        129,
+        106
+      ],
+      [
+        126,
+        117,
+        102
+      ],
+      [
+        150,
+        137,
+        119
+      ],
+      [
+        147,
+        141,
+        134
+      ],
+      [
+        23,
+        20,
+        31
+      ],
+      [
+        119,
+        118,
+        138
+      ],
+      [
+        23,
+        21,
+        28
+      ],
+      [
+        112,
+        98,
+        125
+      ]
+    ]
+  },
+  "palette": {
+    "subject": [
+      116,
+      110,
+      101
+    ],
+    "surround": [
+      15,
+      11,
+      16
+    ],
+    "ground": [
+      53,
+      51,
+      60
+    ]
+  }
+}

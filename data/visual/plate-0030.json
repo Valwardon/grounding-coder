@@ -1,0 +1,242 @@
+{
+  "plate": {
+    "title": "File:Forest path through a deciduous forest in spring, Finland.jpg",
+    "query": "a forest path",
+    "source_url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/7/72/Forest_path_through_a_deciduous_forest_in_spring%2C_Finland.jpg/3840px-Forest_path_through_a_deciduous_forest_in_spring%2C_Finland.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail",
+    "page_url": "https://commons.wikimedia.org/wiki/File:Forest_path_through_a_deciduous_forest_in_spring,_Finland.jpg",
+    "author": "Sanzzu",
+    "license": "CC BY-SA 4.0",
+    "file": "plate-0030.bmp"
+  },
+  "plate_size": [
+    256,
+    170
+  ],
+  "subject": {
+    "method": "dominant",
+    "bbox": [
+      54,
+      116,
+      193,
+      168
+    ],
+    "centroid": [
+      0.49719799692993016,
+      0.8364385773572613
+    ],
+    "height_frac": 0.31176470588235294,
+    "width_frac": 0.546875,
+    "area_frac": 0.09542738970588235,
+    "profile": [
+      0.45714285714285713,
+      0.4107142857142857,
+      0.4,
+      0.44642857142857145,
+      0.4809523809523809,
+      0.5642857142857143,
+      0.5857142857142857,
+      0.6035714285714285,
+      0.6071428571428571,
+      0.6666666666666666,
+      0.7107142857142857,
+      0.7142857142857143,
+      0.6928571428571428,
+      0.7,
+      0.7404761904761905,
+      0.9392857142857143,
+      0.9857142857142858,
+      0.9607142857142857,
+      0.925,
+      0.6666666666666666,
+      0.5071428571428571,
+      0.5428571428571428,
+      0.5142857142857142,
+      0.19523809523809524
+    ],
+    "side_balance": 0.022851140803201615,
+    "vertical_balance": -0.012361574687546104,
+    "pixels": 4153,
+    "components": [
+      {
+        "bbox": [
+          54,
+          116,
+          193,
+          168
+        ],
+        "area": 4153,
+        "mean": [
+          170,
+          151,
+          85
+        ],
+        "in_subject": true
+      }
+    ],
+    "profile_covered": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "row_colors": [
+      [
+        182,
+        133,
+        99
+      ],
+      [
+        154,
+        118,
+        97
+      ],
+      [
+        171,
+        134,
+        110
+      ],
+      [
+        181,
+        142,
+        115
+      ],
+      [
+        186,
+        145,
+        117
+      ],
+      [
+        170,
+        137,
+        103
+      ],
+      [
+        169,
+        143,
+        102
+      ],
+      [
+        178,
+        154,
+        113
+      ],
+      [
+        181,
+        158,
+        117
+      ],
+      [
+        178,
+        158,
+        110
+      ],
+      [
+        172,
+        158,
+        99
+      ],
+      [
+        170,
+        155,
+        101
+      ],
+      [
+        168,
+        156,
+        100
+      ],
+      [
+        161,
+        153,
+        88
+      ],
+      [
+        171,
+        159,
+        83
+      ],
+      [
+        171,
+        158,
+        66
+      ],
+      [
+        170,
+        159,
+        52
+      ],
+      [
+        154,
+        150,
+        40
+      ],
+      [
+        155,
+        151,
+        42
+      ],
+      [
+        149,
+        137,
+        52
+      ],
+      [
+        194,
+        159,
+        79
+      ],
+      [
+        166,
+        148,
+        61
+      ],
+      [
+        172,
+        157,
+        66
+      ],
+      [
+        138,
+        159,
+        13
+      ]
+    ]
+  },
+  "palette": {
+    "subject": [
+      170,
+      151,
+      85
+    ],
+    "surround": [
+      42,
+      33,
+      2
+    ],
+    "ground": [
+      98,
+      93,
+      36
+    ]
+  }
+}

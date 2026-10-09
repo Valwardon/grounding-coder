@@ -1,0 +1,242 @@
+{
+  "plate": {
+    "title": "File:Hals, Frans - Portrait of a Woman Standing L-1312-00-000016-pp.jpg",
+    "query": "a woman standing",
+    "source_url": "https://upload.wikimedia.org/wikipedia/commons/c/c7/Hals%2C_Frans_-_Portrait_of_a_Woman_Standing_L-1312-00-000016-pp.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail_unscaled",
+    "page_url": "https://commons.wikimedia.org/wiki/File:Hals,_Frans_-_Portrait_of_a_Woman_Standing_L-1312-00-000016-pp.jpg",
+    "author": "Frans Hals",
+    "license": "Public domain",
+    "file": "plate-0000.bmp"
+  },
+  "plate_size": [
+    198,
+    256
+  ],
+  "subject": {
+    "method": "border",
+    "bbox": [
+      28,
+      18,
+      165,
+      254
+    ],
+    "centroid": [
+      0.4622596292046923,
+      0.553743320418832
+    ],
+    "height_frac": 0.92578125,
+    "width_frac": 0.696969696969697,
+    "area_frac": 0.31889204545454547,
+    "profile": [
+      0.4838969404186795,
+      0.4811594202898551,
+      0.4797101449275363,
+      0.4681159420289855,
+      0.4601449275362319,
+      0.4739130434782609,
+      0.5971014492753624,
+      0.8181159420289855,
+      0.967793880837359,
+      0.991304347826087,
+      0.9688405797101448,
+      0.936231884057971,
+      0.8702898550724637,
+      0.8123188405797102,
+      0.6427536231884058,
+      0.5992753623188406,
+      0.3325281803542673,
+      0.4623188405797101,
+      0.558695652173913,
+      0.5485507246376812,
+      0.46159420289855074,
+      0.4210144927536232,
+      0.35144927536231885,
+      0.21521739130434783
+    ],
+    "side_balance": -0.0176565882726476,
+    "vertical_balance": 0.21831573295099982,
+    "pixels": 16164,
+    "components": [
+      {
+        "bbox": [
+          28,
+          18,
+          165,
+          254
+        ],
+        "area": 16164,
+        "mean": [
+          70,
+          49,
+          37
+        ],
+        "in_subject": true
+      }
+    ],
+    "profile_covered": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "row_colors": [
+      [
+        60,
+        36,
+        23
+      ],
+      [
+        54,
+        33,
+        23
+      ],
+      [
+        48,
+        28,
+        18
+      ],
+      [
+        65,
+        40,
+        26
+      ],
+      [
+        75,
+        48,
+        33
+      ],
+      [
+        87,
+        58,
+        40
+      ],
+      [
+        83,
+        57,
+        41
+      ],
+      [
+        60,
+        37,
+        26
+      ],
+      [
+        55,
+        35,
+        25
+      ],
+      [
+        46,
+        28,
+        20
+      ],
+      [
+        40,
+        24,
+        16
+      ],
+      [
+        40,
+        24,
+        17
+      ],
+      [
+        41,
+        24,
+        17
+      ],
+      [
+        42,
+        25,
+        18
+      ],
+      [
+        48,
+        30,
+        23
+      ],
+      [
+        48,
+        31,
+        21
+      ],
+      [
+        110,
+        93,
+        77
+      ],
+      [
+        112,
+        98,
+        84
+      ],
+      [
+        114,
+        93,
+        75
+      ],
+      [
+        109,
+        83,
+        64
+      ],
+      [
+        98,
+        76,
+        56
+      ],
+      [
+        101,
+        79,
+        58
+      ],
+      [
+        103,
+        80,
+        58
+      ],
+      [
+        96,
+        87,
+        77
+      ]
+    ]
+  },
+  "palette": {
+    "subject": [
+      70,
+      49,
+      37
+    ],
+    "surround": [
+      28,
+      24,
+      19
+    ],
+    "ground": [
+      33,
+      24,
+      17
+    ]
+  }
+}

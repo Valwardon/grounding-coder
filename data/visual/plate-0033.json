@@ -1,0 +1,377 @@
+{
+  "plate": {
+    "title": "File:Kimono Forest at night, Arashiyama Station, Arashiyama, Kyoto, Japan.jpg",
+    "query": "a forest path",
+    "source_url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/5/54/Kimono_Forest_at_night%2C_Arashiyama_Station%2C_Arashiyama%2C_Kyoto%2C_Japan.jpg/3840px-Kimono_Forest_at_night%2C_Arashiyama_Station%2C_Arashiyama%2C_Kyoto%2C_Japan.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail",
+    "page_url": "https://commons.wikimedia.org/wiki/File:Kimono_Forest_at_night,_Arashiyama_Station,_Arashiyama,_Kyoto,_Japan.jpg",
+    "author": "Yasumichi Morita (designer)\n\nBasile Morin (photographer)",
+    "license": "CC BY-SA 4.0",
+    "file": "plate-0033.bmp"
+  },
+  "plate_size": [
+    256,
+    170
+  ],
+  "subject": {
+    "method": "dominant",
+    "bbox": [
+      42,
+      13,
+      133,
+      156
+    ],
+    "centroid": [
+      0.32047329514270034,
+      0.45820580702094227
+    ],
+    "height_frac": 0.8470588235294118,
+    "width_frac": 0.359375,
+    "area_frac": 0.12559742647058825,
+    "profile": [
+      0.14565217391304347,
+      0.11630434782608695,
+      0.08695652173913043,
+      0.14492753623188406,
+      0.3061594202898551,
+      0.42572463768115937,
+      0.552536231884058,
+      0.6268115942028986,
+      0.7681159420289856,
+      0.8152173913043478,
+      0.8913043478260869,
+      0.8514492753623187,
+      0.9039855072463768,
+      0.9547101449275361,
+      0.9510869565217391,
+      0.9528985507246377,
+      0.9365942028985508,
+      0.8768115942028986,
+      0.8188405797101449,
+      0.6105072463768115,
+      0.44927536231884063,
+      0.302536231884058,
+      0.125,
+      0.05797101449275362
+    ],
+    "side_balance": 0.010174105439402035,
+    "vertical_balance": -0.0011306804177116624,
+    "pixels": 5466,
+    "components": [
+      {
+        "bbox": [
+          42,
+          13,
+          133,
+          144
+        ],
+        "area": 5316,
+        "mean": [
+          180,
+          118,
+          81
+        ],
+        "in_subject": true
+      },
+      {
+        "bbox": [
+          201,
+          1,
+          254,
+          168
+        ],
+        "area": 4976,
+        "mean": [
+          188,
+          127,
+          87
+        ],
+        "in_subject": false
+      },
+      {
+        "bbox": [
+          9,
+          3,
+          38,
+          158
+        ],
+        "area": 2742,
+        "mean": [
+          191,
+          123,
+          87
+        ],
+        "in_subject": false
+      },
+      {
+        "bbox": [
+          143,
+          55,
+          161,
+          78
+        ],
+        "area": 233,
+        "mean": [
+          188,
+          135,
+          94
+        ],
+        "in_subject": false
+      },
+      {
+        "bbox": [
+          168,
+          57,
+          180,
+          81
+        ],
+        "area": 180,
+        "mean": [
+          172,
+          134,
+          91
+        ],
+        "in_subject": false
+      },
+      {
+        "bbox": [
+          187,
+          56,
+          196,
+          83
+        ],
+        "area": 150,
+        "mean": [
+          170,
+          117,
+          76
+        ],
+        "in_subject": false
+      },
+      {
+        "bbox": [
+          66,
+          26,
+          73,
+          41
+        ],
+        "area": 83,
+        "mean": [
+          167,
+          105,
+          73
+        ],
+        "in_subject": true
+      },
+      {
+        "bbox": [
+          1,
+          23,
+          10,
+          35
+        ],
+        "area": 71,
+        "mean": [
+          212,
+          170,
+          135
+        ],
+        "in_subject": false
+      },
+      {
+        "bbox": [
+          76,
+          152,
+          90,
+          156
+        ],
+        "area": 67,
+        "mean": [
+          124,
+          82,
+          54
+        ],
+        "in_subject": true
+      },
+      {
+        "bbox": [
+          188,
+          87,
+          196,
+          99
+        ],
+        "area": 56,
+        "mean": [
+          176,
+          124,
+          83
+        ],
+        "in_subject": false
+      }
+    ],
+    "profile_covered": [
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "row_colors": [
+      [
+        124,
+        82,
+        54
+      ],
+      [
+        74,
+        44,
+        21
+      ],
+      [
+        189,
+        108,
+        78
+      ],
+      [
+        179,
+        96,
+        66
+      ],
+      [
+        183,
+        116,
+        77
+      ],
+      [
+        181,
+        118,
+        75
+      ],
+      [
+        177,
+        115,
+        80
+      ],
+      [
+        187,
+        124,
+        87
+      ],
+      [
+        172,
+        108,
+        74
+      ],
+      [
+        181,
+        117,
+        79
+      ],
+      [
+        188,
+        127,
+        88
+      ],
+      [
+        179,
+        116,
+        79
+      ],
+      [
+        186,
+        124,
+        85
+      ],
+      [
+        184,
+        122,
+        83
+      ],
+      [
+        182,
+        121,
+        80
+      ],
+      [
+        181,
+        123,
+        85
+      ],
+      [
+        184,
+        124,
+        85
+      ],
+      [
+        174,
+        118,
+        80
+      ],
+      [
+        170,
+        112,
+        76
+      ],
+      [
+        179,
+        119,
+        83
+      ],
+      [
+        184,
+        120,
+        83
+      ],
+      [
+        166,
+        95,
+        64
+      ],
+      [
+        171,
+        94,
+        59
+      ],
+      [
+        159,
+        98,
+        58
+      ]
+    ]
+  },
+  "palette": {
+    "subject": [
+      179,
+      118,
+      80
+    ],
+    "surround": [
+      111,
+      71,
+      90
+    ],
+    "ground": [
+      98,
+      64,
+      39
+    ]
+  }
+}
