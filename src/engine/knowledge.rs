@@ -114,10 +114,21 @@ pub struct KnowledgeItem {
     pub visits: u32,
     /// Failed investigation attempts (deprioritizes, never deletes).
     pub failures: u32,
+    /// Sleeping, not gone. A dormant item keeps its provenance and its
+    /// edges but never surfaces: its content was either compressed
+    /// into a pattern (`absorbed_by`) or primed as unusable (rejected,
+    /// or worn out by failures). Attention stays on live memory.
+    #[serde(default)]
+    pub dormant: bool,
+    /// The pattern that subsumes this item, when compression put it to
+    /// sleep. `None` for items primed for a reason other than
+    /// consolidation.
+    #[serde(default)]
+    pub absorbed_by: Option<String>,
 }
 
 impl KnowledgeItem {
-    pub(crate) fn new(concept: &str, state: KnowledgeState, source: &str) -> Self {
+    pub fn new(concept: &str, state: KnowledgeState, source: &str) -> Self {
         KnowledgeItem {
             concept: concept.to_string(),
             state,
@@ -131,6 +142,8 @@ impl KnowledgeItem {
             },
             visits: 0,
             failures: 0,
+            dormant: false,
+            absorbed_by: None,
         }
     }
 }
@@ -332,12 +345,15 @@ impl KnowledgeStore {
     /// declarations — the dream loop finds patterns instead of being
     /// handed supporters. Each cluster still passes through
     /// [`KnowledgeStore::generalize`], so the 2-supporter rule and
-    /// the rejection path hold unchanged. Returns created patterns.
+    /// the rejection path hold unchanged. On success the members are
+    /// **compressed**: put to sleep (`dormant`, `absorbed_by` the
+    /// pattern) so the pattern carries them and active memory holds N
+    /// facts as one. Returns created patterns.
     pub fn consolidate(&mut self) -> Vec<String> {
         let mut verified: Vec<String> = self
             .items
             .values()
-            .filter(|i| i.state == KnowledgeState::Verified)
+            .filter(|i| i.state == KnowledgeState::Verified && !i.dormant)
             .map(|i| i.concept.clone())
             .collect();
         verified.sort();
@@ -369,8 +385,18 @@ impl KnowledgeStore {
             if cluster.len() >= 2 {
                 cluster.sort();
                 let pattern = format!("cluster:{}", cluster.join("+"));
-                if self.get(&pattern).is_none() && self.generalize(&pattern, &cluster).is_ok() {
-                    created.push(pattern);
+                let fresh = self.get(&pattern).is_none();
+                if fresh && self.generalize(&pattern, &cluster).is_ok() {
+                    created.push(pattern.clone());
+                }
+                // Compression: the freshly built pattern carries the
+                // members, so put them to sleep. A pattern that already
+                // existed is left as it was (converged, not re-merged).
+                if fresh && self.get(&pattern).is_some() {
+                    for member in &cluster {
+                        self.mark_dormant(member, Some(pattern.clone()));
+                    }
+                    self.persist();
                 }
                 for member in &cluster {
                     clustered.insert(member.clone());
@@ -378,6 +404,48 @@ impl KnowledgeStore {
             }
         }
         created
+    }
+
+    /// Put a concept to sleep: keep its provenance and edges, stop it
+    /// surfacing. `absorbed_by` names the pattern that compressed it,
+    /// when there is one.
+    fn mark_dormant(&mut self, concept: &str, absorbed_by: Option<String>) -> bool {
+        if let Some(item) = self.items.get_mut(concept) {
+            item.dormant = true;
+            item.absorbed_by = absorbed_by;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Priming: forget what will not be used, without deleting it.
+    /// `Rejected` concepts (disproven) and hypotheses/evidence worn out
+    /// by repeated failures go dormant — kept as evidence, off the
+    /// active graph. Returns the concepts primed, sorted.
+    pub fn prime(&mut self) -> Vec<String> {
+        const WORN: u32 = 3;
+        let mut primed: Vec<String> = self
+            .items
+            .values()
+            .filter(|i| {
+                !i.dormant
+                    && (i.state == KnowledgeState::Rejected
+                        || (matches!(
+                            i.state,
+                            KnowledgeState::Hypothesis | KnowledgeState::Evidence
+                        ) && i.failures >= WORN))
+            })
+            .map(|i| i.concept.clone())
+            .collect();
+        primed.sort();
+        if !primed.is_empty() {
+            for concept in &primed {
+                self.mark_dormant(concept, None);
+            }
+            self.persist();
+        }
+        primed
     }
 
     /// Concepts structurally adjacent to this one: its dependencies
@@ -434,6 +502,11 @@ pub fn extract_gaps(task: &CompletedTask, store: &mut KnowledgeStore) -> Vec<Str
             continue;
         }
         if let Some(existing) = store.get(concept.as_str()) {
+            if existing.dormant {
+                // Sleeping memory does not wake just because a task
+                // brushed past it — it was compressed or primed.
+                continue;
+            }
             match existing.state {
                 KnowledgeState::Verified
                 | KnowledgeState::Generalized
@@ -474,7 +547,9 @@ pub fn prioritize(store: &mut KnowledgeStore) -> Option<String> {
     let mut open: Vec<&KnowledgeItem> = store
         .items
         .values()
-        .filter(|i| matches!(i.state, KnowledgeState::Question | KnowledgeState::Unknown))
+        .filter(|i| {
+            !i.dormant && matches!(i.state, KnowledgeState::Question | KnowledgeState::Unknown)
+        })
         .collect();
     open.sort_by(|a, b| {
         (a.state as u8)
@@ -514,7 +589,9 @@ fn prov(source: String) -> Provenance {
 /// form a hypothesis, investigate it (web lookup when `research` is
 /// on), record honest evidence, and promote only what verifies.
 /// Afterwards, seed the verified concept's unstored neighbors as
-/// `Unknown` so the next idle pass has somewhere to go. Deterministic
+/// `Unknown` so the next idle pass has somewhere to go, then **sleep**:
+/// consolidate what was verified into patterns (compressing members
+/// into dormancy) and prime what will never be used. Deterministic
 /// and bounded: at most `budget` investigations, then it sleeps.
 pub async fn dream_loop(project_dir: &Path, budget: u32, research: bool) -> Vec<DreamOutcome> {
     let mut store = KnowledgeStore::open(project_dir);
@@ -538,6 +615,13 @@ pub async fn dream_loop(project_dir: &Path, budget: u32, research: bool) -> Vec<
         let r = dream_one(&mut store, &mut oracle, &concept, research).await;
         outcomes.push(r);
     }
+    // The sleep that follows the day's work: make the connections the
+    // verified facts imply (compress each cluster into one pattern and
+    // put its members to sleep), then prime what will never be used.
+    // Side effects on the store; the returned outcomes stay exactly the
+    // investigations, so budget and metrics describe the studying.
+    store.consolidate();
+    store.prime();
     outcomes
 }
 
@@ -857,6 +941,71 @@ mod tests {
     }
 
     #[test]
+    fn consolidation_compresses_members_into_pattern() {
+        let mut store = mem_store();
+        for name in ["alpha", "beta"] {
+            let mut item = KnowledgeItem::new(name, KnowledgeState::Verified, "test");
+            item.provenance.verification = Some("probe green".to_string());
+            item.dependencies = vec![
+                "d1".to_string(),
+                "d2".to_string(),
+                "d3".to_string(),
+                "d4".to_string(),
+            ];
+            store.insert(item);
+        }
+        let created = store.consolidate();
+        assert_eq!(created, vec!["cluster:alpha+beta".to_string()]);
+        let pattern = &created[0];
+        // The pattern is awake; the members sleep beneath it.
+        let mut active: Vec<&str> = store
+            .all()
+            .iter()
+            .filter(|i| !i.dormant)
+            .map(|i| i.concept.as_str())
+            .collect();
+        active.sort();
+        assert_eq!(active, vec![pattern.as_str()]);
+        for member in ["alpha", "beta"] {
+            let item = store.get(member).expect("member kept");
+            assert!(item.dormant, "{} must sleep", member);
+            assert_eq!(item.absorbed_by.as_deref(), Some(pattern.as_str()));
+            // Compression keeps the evidence: provenance survives sleep.
+            assert!(item.provenance.verification.is_some());
+        }
+    }
+
+    #[test]
+    fn prime_forgets_rejected_and_worn_but_not_live_knowledge() {
+        let mut store = mem_store();
+        store.insert(KnowledgeItem::new("dud", KnowledgeState::Rejected, "test"));
+        let mut worn = KnowledgeItem::new("chased", KnowledgeState::Hypothesis, "test");
+        worn.failures = 3;
+        store.insert(worn);
+        let mut young = KnowledgeItem::new("fresh", KnowledgeState::Hypothesis, "test");
+        young.failures = 1;
+        store.insert(young);
+        let mut live = KnowledgeItem::new("fact", KnowledgeState::Verified, "test");
+        live.provenance.verification = Some("probe green".to_string());
+        store.insert(live);
+
+        let primed = store.prime();
+        assert_eq!(primed, vec!["chased".to_string(), "dud".to_string()]);
+        assert!(store.get("dud").unwrap().dormant);
+        assert!(store.get("chased").unwrap().dormant);
+        assert!(
+            !store.get("fresh").unwrap().dormant,
+            "one failure is not worn out"
+        );
+        assert!(
+            !store.get("fact").unwrap().dormant,
+            "verified memory stays live"
+        );
+        // Second pass converges: nothing left to prime.
+        assert!(store.prime().is_empty());
+    }
+
+    #[test]
     fn consolidation_discovers_clusters() {
         let mut store = mem_store();
         // Two verified items with identical signatures: kin.
@@ -898,8 +1047,6 @@ mod tests {
 
     #[test]
     fn tiers_distinguish_evidence_strength() {
-        // Old journal lines without a tier read as Sourced — the
-        // weaker claim, never the stronger.
         let old: KnowledgeItem = serde_json::from_str(
             r#"{"concept":"x","state":"Verified","dependencies":[],
                 "provenance":{"source":"s","experiment":null,"verification":"v","rejection":null},

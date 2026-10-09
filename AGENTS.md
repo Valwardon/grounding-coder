@@ -52,3 +52,10 @@ stop.)
   a measurement can break is memory, not a rule. Memory never becomes
   a code branch: subject lessons change the loop's question, never
   its measurement.
+- A dream pass does not only investigate — it also sleeps on what it
+  learned. Verified facts that share structure consolidate into a
+  `Generalized` pattern and their members go **dormant** (compressed,
+  `absorbed_by` the pattern); rejected or failure-worn items are
+  **primed** dormant. Dormant memory keeps its provenance and edges but
+  never surfaces: attention stays on live knowledge. `gc dream` prints
+  the verified / generalized / open / rejected / dormant counts.

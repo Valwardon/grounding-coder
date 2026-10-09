@@ -2337,17 +2337,32 @@ fn main() {
                     );
                 }
                 let store = knowledge::KnowledgeStore::open(std::path::Path::new(&project));
-                let (verified, open) = store.all().iter().fold((0, 0), |(v, o), i| {
-                    use grounding_coder::engine::knowledge::KnowledgeState as S;
-                    match i.state {
-                        S::Verified | S::Generalized => (v + 1, o),
-                        S::Question | S::Unknown | S::Hypothesis | S::Experiment | S::Evidence => {
-                            (v, o + 1)
-                        }
-                        S::Rejected => (v, o),
-                    }
-                });
-                println!("knowledge: {} verified, {} open", verified, open);
+                // The count reads the whole brain: everything lives on disk, so
+                // dormant (compressed/primed) memory is reported, not hidden.
+                let (verified, generalized, open, rejected, dormant) =
+                    store
+                        .all()
+                        .iter()
+                        .fold((0, 0, 0, 0, 0), |(v, g, o, r, d), i| {
+                            use grounding_coder::engine::knowledge::KnowledgeState as S;
+                            if i.dormant {
+                                return (v, g, o, r, d + 1);
+                            }
+                            match i.state {
+                                S::Verified => (v + 1, g, o, r, d),
+                                S::Generalized => (v, g + 1, o, r, d),
+                                S::Rejected => (v, g, o, r + 1, d),
+                                S::Question
+                                | S::Unknown
+                                | S::Hypothesis
+                                | S::Experiment
+                                | S::Evidence => (v, g, o + 1, r, d),
+                            }
+                        });
+                println!(
+                    "knowledge: {} verified, {} generalized, {} open, {} rejected, {} dormant",
+                    verified, generalized, open, rejected, dormant
+                );
             }
         }
     });

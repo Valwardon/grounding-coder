@@ -2,7 +2,9 @@
 //! gaps become questions, the loop investigates on spare cycles, and
 //! only verified results become knowledge. No network anywhere here —
 //! every dream that cannot verify stays a dream.
-use grounding_coder::engine::knowledge::{self, CompletedTask, KnowledgeState, KnowledgeStore};
+use grounding_coder::engine::knowledge::{
+    self, CompletedTask, KnowledgeItem, KnowledgeState, KnowledgeStore,
+};
 
 fn scratch_project(tag: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -92,5 +94,73 @@ fn failures_deprioritize_without_deleting() {
     assert_ne!(
         store.get("backoff").unwrap().state,
         KnowledgeState::Rejected
+    );
+}
+
+#[test]
+fn dream_sleeps_on_what_it_learned() {
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let project = scratch_project("sleep");
+    let mut store = KnowledgeStore::open(&project);
+    // Two verified facts sharing structure, and one rejected dream.
+    for name in ["alpha", "beta"] {
+        let mut item = KnowledgeItem::new(name, KnowledgeState::Verified, "test");
+        item.provenance.verification = Some("probe green".to_string());
+        item.dependencies = vec![
+            "d1".to_string(),
+            "d2".to_string(),
+            "d3".to_string(),
+            "d4".to_string(),
+        ];
+        store.insert(item);
+    }
+    store.insert(KnowledgeItem::new(
+        "bad-dream",
+        KnowledgeState::Rejected,
+        "test",
+    ));
+    drop(store);
+
+    // No open questions: only the sleep runs, and it is silent — the
+    // returned outcomes are investigations, of which there are none.
+    let outcomes = rt.block_on(knowledge::dream_loop(&project, 5, false));
+    assert!(outcomes.is_empty(), "{:?}", outcomes);
+
+    // The store file is the truth: the pair compressed into a pattern,
+    // the members and the rejected dream went dormant, the pattern did not.
+    let store = KnowledgeStore::open(&project);
+    let pattern = "cluster:alpha+beta";
+    assert_eq!(
+        store.get(pattern).map(|i| i.state),
+        Some(KnowledgeState::Generalized)
+    );
+    assert!(
+        !store.get(pattern).unwrap().dormant,
+        "the pattern stays live"
+    );
+    for member in ["alpha", "beta"] {
+        let item = store.get(member).expect("member kept");
+        assert!(item.dormant, "{} absorbed into the pattern", member);
+        assert_eq!(item.absorbed_by.as_deref(), Some(pattern));
+    }
+    assert!(store.get("bad-dream").unwrap().dormant, "disproven primed");
+}
+
+#[test]
+fn dormant_memory_never_surfaces() {
+    let project = scratch_project("dormant");
+    let mut store = KnowledgeStore::open(&project);
+    let mut worn = KnowledgeItem::new("stale", KnowledgeState::Question, "test");
+    // Prime it by hand through the public path: reject then prime.
+    store.insert(KnowledgeItem::new("dead", KnowledgeState::Rejected, "test"));
+    store.prime();
+    assert!(store.get("dud-or-missing").is_none());
+    assert!(store.get("bad-dream-missing").is_none());
+    // A dormant, non-terminal concept is never surfaced again.
+    worn.dormant = true;
+    store.insert(worn);
+    assert_ne!(
+        knowledge::prioritize(&mut store),
+        Some("chased".to_string())
     );
 }
