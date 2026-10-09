@@ -267,9 +267,9 @@ fn mean_of(img: &Image, pixels: &[usize]) -> [u8; 3] {
 
 /// One connected foreground region and where it sits on the plate.
 #[derive(Debug, Clone)]
-struct Component {
-    pixels: Vec<usize>,
-    bbox: [u32; 4],
+pub struct Component {
+    pub pixels: Vec<usize>,
+    pub bbox: [u32; 4],
 }
 
 /// Foreground regions as recorded on the facts file: proof that the
@@ -287,7 +287,7 @@ pub struct ComponentFacts {
 
 /// 8-connected components of the mask. Regions smaller than 0.1% of
 /// the plate are sensor speckle, not content.
-fn components(mask: &[bool], w: u32, h: u32) -> Vec<Component> {
+pub fn components(mask: &[bool], w: u32, h: u32) -> Vec<Component> {
     let total = (w * h) as usize;
     let min_area = total / 1000;
     let mut seen = vec![false; total];
@@ -340,7 +340,7 @@ fn components(mask: &[bool], w: u32, h: u32) -> Vec<Component> {
 /// (overlap in x) are stacked views of one thing and are read as one
 /// subject; a region beside the figure with no column in common — a
 /// coat-of-arms, a distant object — is recorded but not claimed.
-fn cluster_columns(comps: &[Component]) -> Vec<usize> {
+pub fn cluster_columns(comps: &[Component]) -> Vec<usize> {
     let n = comps.len();
     let mut parent: Vec<usize> = (0..n).collect();
     fn find(parent: &mut [usize], mut i: usize) -> usize {
