@@ -26,6 +26,108 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
+/// Parse `x0,y0,x1,y1` from an optional CLI flag. Malformed input is a
+/// hard CLI error; `None` is an absent flag.
+fn parse_box(s: Option<&str>, flag: &str) -> Option<[u32; 4]> {
+    match s {
+        None => None,
+        Some(s) => {
+            let parts: Vec<u32> = s
+                .split(',')
+                .map(|p| {
+                    p.trim().parse().unwrap_or_else(|e| {
+                        eprintln!("{flag} expects x0,y0,x1,y1 (got {s:?}): {e}");
+                        std::process::exit(1);
+                    })
+                })
+                .collect();
+            if parts.len() != 4 {
+                eprintln!("{flag} expects x0,y0,x1,y1");
+                std::process::exit(1);
+            }
+            Some([parts[0], parts[1], parts[2], parts[3]])
+        }
+    }
+}
+
+/// Measure one plate and write its facts file. Shared by single-plate,
+/// sweep, and replay so all three measure identically.
+fn measure_plate(
+    bank: &str,
+    entries: &[serde_json::Value],
+    idx: u32,
+    out_path: &str,
+    region: Option<[u32; 4]>,
+) -> Result<grounding_coder::engine::measure::VisualFacts, String> {
+    use grounding_coder::engine::measure;
+    use grounding_coder::engine::vision::Image;
+    let entry = entries
+        .get(idx as usize)
+        .ok_or_else(|| format!("plate {idx} not in provenance ({} entries)", entries.len()))?;
+    let meta: measure::PlateMeta = serde_json::from_value(entry.clone())
+        .map_err(|e| format!("plate metadata unreadable: {e}"))?;
+    if meta.file.is_empty() {
+        return Err(format!("plate {idx} has no file: nothing to measure"));
+    }
+    let img = Image::load_bmp(&std::path::Path::new(bank).join(&meta.file))
+        .map_err(|e| format!("plate unreadable: {}", e))?;
+    let facts = measure::measure_with_region(&img, meta, region)?;
+    if let Some(parent) = std::path::Path::new(out_path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+    {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let json =
+        serde_json::to_string_pretty(&facts).map_err(|e| format!("facts serialize failed: {e}"))?;
+    std::fs::write(out_path, format!("{json}\n"))
+        .map_err(|e| format!("facts write failed {out_path}: {e}"))?;
+    Ok(facts)
+}
+
+/// The question journal: every open question about a stimulus is a
+/// durable fact. These helpers read, upsert, and write it.
+fn question_records(path: &str) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(path)
+        .map(|t| {
+            t.lines()
+                .filter_map(|l| serde_json::from_str(l).ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn write_question_records(path: &str, records: &[serde_json::Value]) {
+    if let Some(parent) = std::path::Path::new(path).parent()
+        && !parent.as_os_str().is_empty()
+    {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut body = records
+        .iter()
+        .map(|r| serde_json::to_string(r).unwrap_or_default())
+        .collect::<Vec<String>>()
+        .join("\n");
+    if !body.is_empty() {
+        body.push('\n');
+    }
+    let _ = std::fs::write(path, body);
+}
+
+/// The one open question a measure refusal carries.
+fn measure_question(plate: u32, title: &str, question: String) -> serde_json::Value {
+    serde_json::json!({
+        "date": date_today(),
+        "kind": "measure",
+        "plate": plate,
+        "title": title,
+        "aspect": "subject-region",
+        "question": question,
+        "answer": null,
+        "resolved": false,
+    })
+}
+
 #[derive(Parser)]
 #[command(name = "gc", about = "Grounding Coder — deterministic coding agent")]
 struct Cli {
@@ -89,25 +191,30 @@ enum Commands {
         /// Research bank holding provenance.json and plate BMPs
         #[arg(long)]
         bank: String,
-        /// Which plate in provenance.json to measure (0-based)
-        #[arg(long, default_value_t = 0)]
-        index: u32,
-        /// Output facts JSON path
+        /// Which plate in provenance.json to measure. Omit to sweep the
+        /// whole bank in one pass (refusals go into --clarify-out).
+        #[arg(long)]
+        index: Option<u32>,
+        /// Output facts JSON path (single-plate mode)
         #[arg(short, long)]
-        out: String,
+        out: Option<String>,
+        /// Output directory for committed facts (sweep mode)
+        #[arg(long)]
+        out_dir: Option<String>,
         /// Answer to the previous clarification: which region is the
         /// subject, as `x0,y0,x1,y1`. Attention narrows to that box.
         #[arg(long)]
         hint: Option<String>,
-        /// Append every refusal to this question-memory file, so a
-        /// plate that cannot be measured names what to clarify and
-        /// this run continues instead of dying.
+        /// Question-memory file: every refusal and every subject with
+        /// an open question is recorded here so the run continues
+        /// instead of dying.
         #[arg(long)]
         clarify_out: Option<String>,
     },
     /// Sense what a request leaves open and retire answers
     Clarify {
         /// The request in natural language
+        #[arg(default_value = "")]
         prompt: String,
         /// `aspect=value`, repeatable: answers that retire questions
         #[arg(long = "answer")]
@@ -115,6 +222,17 @@ enum Commands {
         /// Question-memory file: record the round (durable, reviewable)
         #[arg(long = "store")]
         store: Option<String>,
+        /// Replay the question-memory file: apply the answers, mark
+        /// each measure record resolved, and re-measure the answered
+        /// plates (needs --bank and --out-dir).
+        #[arg(long)]
+        replay: Option<String>,
+        /// Research bank (for replay)
+        #[arg(long)]
+        bank: Option<String>,
+        /// Output directory for re-measured facts (for replay)
+        #[arg(long)]
+        out_dir: Option<String>,
     },
     /// Source photographic plates: search Commons, require complete
     /// provenance, fetch and decode. Refusals print with reasons.
@@ -678,11 +796,10 @@ fn main() {
                 bank,
                 index,
                 out,
+                out_dir,
                 hint,
                 clarify_out,
             } => {
-                use grounding_coder::engine::measure;
-                use grounding_coder::engine::vision::Image;
                 let bank_dir = std::path::Path::new(&bank);
                 let prov_path = bank_dir.join("provenance.json");
                 let text = std::fs::read_to_string(&prov_path).unwrap_or_else(|e| {
@@ -694,125 +811,152 @@ fn main() {
                         eprintln!("PROVENANCE INVALID {}: {}", prov_path.display(), e);
                         std::process::exit(1);
                     });
-                let entry = entries.get(index as usize).unwrap_or_else(|| {
-                    eprintln!(
-                        "PLATE {} NOT FOUND: provenance.json holds {} entries",
-                        index,
-                        entries.len()
-                    );
-                    std::process::exit(1);
-                });
-                let meta: measure::PlateMeta =
-                    serde_json::from_value(entry.clone()).unwrap_or_else(|e| {
-                        eprintln!("PLATE METADATA UNREADABLE: {}", e);
-                        std::process::exit(1);
-                    });
-                if meta.file.is_empty() {
-                    eprintln!("PLATE {} HAS NO FILE: nothing to measure", index);
-                    std::process::exit(1);
+                let region = parse_box(hint.as_deref(), "--hint");
+
+                fn title_of(e: &serde_json::Value) -> String {
+                    e.get("title")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("")
+                        .to_string()
                 }
-                let plate_path = bank_dir.join(&meta.file);
-                let img = Image::load_bmp(&plate_path).unwrap_or_else(|e| {
-                    eprintln!("PLATE UNREADABLE {}: {}", plate_path.display(), e);
-                    std::process::exit(1);
-                });
-                println!(
-                    "measuring \"{}\" ({}×{} px) — method chosen by the plate",
-                    meta.title, img.width, img.height
-                );
-                let region: Option<[u32; 4]> = match hint {
-                    Some(s) => {
-                        let parts: Vec<u32> = s
-                            .split(',')
-                            .map(|p| {
-                                p.trim().parse().unwrap_or_else(|e| {
-                                    eprintln!("--hint expects x0,y0,x1,y1 (got {s:?}): {e}");
-                                    std::process::exit(1);
+
+                // One plate: measure, and if it refuses, remember the
+                // question instead of dying with it.
+                let handle_one = |entries: &[serde_json::Value],
+                                  idx: u32,
+                                  out_path: &str,
+                                  qpath: Option<&str>,
+                                  recs: Option<&mut Vec<serde_json::Value>>,
+                                  exit_on_refuse: bool|
+                 -> Result<(), ()> {
+                    let title = title_of(
+                        entries
+                            .get(idx as usize)
+                            .unwrap_or(&serde_json::Value::Null),
+                    );
+                    println!(
+                        "measuring \"{}\" (plate {idx})",
+                        if title.is_empty() { "(untitled)" } else { &title }
+                    );
+                    match measure_plate(&bank, entries, idx, out_path, region) {
+                        Ok(facts) => {
+                            let s = &facts.subject;
+                            println!(
+                                "  subject   bbox {:?} · {:.1}% of plate",
+                                s.bbox,
+                                s.area_frac * 100.0
+                            );
+                            println!("  method    {}", s.method);
+                            println!("committed → {}", out_path);
+                            if let (Some(path), Some(recs)) = (qpath, recs)
+                                && let Some(rec) = recs.iter_mut().find(|r| {
+                                    r["kind"] == "measure"
+                                        && r["plate"] == serde_json::json!(idx)
+                                        && r["resolved"] == serde_json::json!(false)
                                 })
-                            })
-                            .collect();
-                        if parts.len() != 4 {
-                            eprintln!("--hint expects x0,y0,x1,y1");
-                            std::process::exit(1);
-                        }
-                        Some([parts[0], parts[1], parts[2], parts[3]])
-                    }
-                    None => None,
-                };
-                let meta_title = meta.title.clone();
-                match measure::measure_with_region(&img, meta, region) {
-                    Ok(facts) => {
-                        let s = &facts.subject;
-                        println!("  subject   bbox {:?} · {:.1}% of plate", s.bbox, s.area_frac * 100.0);
-                        println!(
-                            "  profile   {} rows, bottom→top: {:?}…",
-                            s.profile.len(),
-                            &s.profile[..s.profile.len().min(6)]
-                        );
-                        println!(
-                            "  palette   subject {:?} · surround {:?} · ground {:?}",
-                            facts.palette.subject, facts.palette.surround, facts.palette.ground
-                        );
-                        println!(
-                            "  light     side_balance {:+.3} · vertical_balance {:+.3}",
-                            s.side_balance, s.vertical_balance
-                        );
-                        if let Some(parent) = std::path::Path::new(&out).parent()
-                            && !parent.as_os_str().is_empty()
-                        {
-                            let _ = std::fs::create_dir_all(parent);
-                        }
-                        let json = serde_json::to_string_pretty(&facts).unwrap_or_else(|e| {
-                            eprintln!("FACTS SERIALIZE FAILED: {}", e);
-                            std::process::exit(1);
-                        });
-                        if let Err(e) = std::fs::write(&out, format!("{}\n", json)) {
-                            eprintln!("FACTS WRITE FAILED {}: {}", out, e);
-                            std::process::exit(1);
-                        }
-                        println!("committed → {}", out);
-                    }
-                    Err(e) => {
-                        eprintln!("MEASURE FAILED: {}", e);
-                        // Failure is a question, not a dead end: the
-                        // refusal is remembered with which aspect it
-                        // needs, so the next round can answer it.
-                        if let Some(path) = clarify_out {
-                            if let Some(parent) = std::path::Path::new(&path).parent()
-                                && !parent.as_os_str().is_empty()
                             {
-                                let _ = std::fs::create_dir_all(parent);
+                                // A plate that measures plainly heals
+                                // its own old open question.
+                                rec["resolved"] = serde_json::json!(true);
+                                rec["resolved_on"] = serde_json::json!(date_today());
+                                rec["slug"] = serde_json::json!("measured without an answer");
+                                println!("  healed a stale question → {}", path);
                             }
-                            let record = serde_json::json!({
-                                "date": date_today(),
-                                "kind": "measure",
-                                "plate": index,
-                                "title": meta_title,
-                                "aspect": "subject-region",
-                                "question": e,
-                                "answer": region.map(|[a, b, c, d]| {
-                                    serde_json::json!([a, b, c, d])
-                                }),
-                                "resolved": false,
-                            });
-                            let mut line =
-                                serde_json::to_string(&record).unwrap_or_default();
-                            line.push('\n');
-                            let _ = std::fs::OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open(&path)
-                                .map(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
-                            println!("question recorded → {}", path);
+                            Ok(())
                         }
-                        std::process::exit(2);
+                        Err(e) => {
+                            eprintln!("MEASURE FAILED: {}", e);
+                            if let Some(path) = qpath {
+                                let fresh = measure_question(idx, &title, e);
+                                match recs {
+                                    Some(recs) => {
+                                        if let Some(old) = recs.iter_mut().find(|r| {
+                                            r["kind"] == "measure"
+                                                && r["plate"] == serde_json::json!(idx)
+                                        }) {
+                                            *old = fresh;
+                                        } else {
+                                            recs.push(fresh);
+                                        }
+                                    }
+                                    None => {
+                                        let mut all = question_records(path);
+                                        if let Some(old) = all.iter_mut().find(|r| {
+                                            r["kind"] == "measure"
+                                                && r["plate"] == serde_json::json!(idx)
+                                        }) {
+                                            *old = fresh;
+                                        } else {
+                                            all.push(fresh);
+                                        }
+                                        write_question_records(path, &all);
+                                    }
+                                }
+                                println!("question recorded → {}", path);
+                            }
+                            if exit_on_refuse {
+                                std::process::exit(2);
+                            }
+                            Err(())
+                        }
                     }
+                };
+
+                if let Some(idx) = index {
+                    let Some(out_path) = out else {
+                        eprintln!("--out required for a single-plate measure");
+                        std::process::exit(1);
+                    };
+                    let _ = handle_one(
+                        &entries,
+                        idx,
+                        &out_path,
+                        clarify_out.as_deref(),
+                        None,
+                        true,
+                    );
+                } else {
+                    // Sweep the whole bank: committed plates write their
+                    // facts, refusals become open questions.
+                    let Some(dir) = out_dir else {
+                        eprintln!("--out-dir required when sweeping the bank");
+                        std::process::exit(1);
+                    };
+                    let Some(qpath) = clarify_out.as_deref() else {
+                        eprintln!("--clarify-out required when sweeping the bank");
+                        std::process::exit(1);
+                    };
+                    let _ = std::fs::create_dir_all(&dir);
+                    let mut recs = question_records(qpath);
+                    let (mut committed, mut refused) = (0, 0);
+                    for idx in 0..entries.len() as u32 {
+                        let out_path = format!("{dir}/plate-{idx:04}.json");
+                        match handle_one(
+                            &entries,
+                            idx,
+                            &out_path,
+                            Some(qpath),
+                            Some(&mut recs),
+                            false,
+                        ) {
+                            Ok(()) => committed += 1,
+                            Err(()) => refused += 1,
+                        }
+                    }
+                    write_question_records(qpath, &recs);
+                    println!(
+                        "sweep: {committed} committed, {refused} refused → questions in {}",
+                        qpath
+                    );
                 }
             }
             Commands::Clarify {
                 prompt,
                 answer,
                 store,
+                replay,
+                bank,
+                out_dir,
             } => {
                 use grounding_coder::engine::clarify;
                 let answers: Vec<(String, String)> = answer
@@ -822,6 +966,81 @@ fn main() {
                             .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
                     })
                     .collect();
+
+                // Replay: read the journal, apply the answers, mark each
+                // measure question resolved, and re-measure the answered
+                // plates into the out-dir. Memory, acted on.
+                if let Some(replay_path) = replay {
+                    let Some(bank) = bank else {
+                        eprintln!("--bank required with --replay");
+                        std::process::exit(1);
+                    };
+                    let Some(dir) = out_dir else {
+                        eprintln!("--out-dir required with --replay");
+                        std::process::exit(1);
+                    };
+                    let prov_path = std::path::Path::new(&bank).join("provenance.json");
+                    let text = std::fs::read_to_string(&prov_path).unwrap_or_else(|e| {
+                        eprintln!("NO PROVENANCE {}: {}", prov_path.display(), e);
+                        std::process::exit(1);
+                    });
+                    let entries: Vec<serde_json::Value> =
+                        serde_json::from_str(&text).unwrap_or_else(|e| {
+                            eprintln!("PROVENANCE INVALID {}: {}", prov_path.display(), e);
+                            std::process::exit(1);
+                        });
+                    let mut recs = question_records(&replay_path);
+                    let mut acted = 0;
+                    for rec in recs.iter_mut() {
+                        if rec["kind"] != "measure" || rec["resolved"] == serde_json::json!(true)
+                        {
+                            continue;
+                        }
+                        let Some(aspect) = rec["aspect"].as_str().map(|a| a.to_string()) else {
+                            continue;
+                        };
+                        let Some(plate) = rec["plate"].as_u64() else { continue };
+                        // Answers may name a precise plate (`3:subject-region=…`)
+                        // or a general aspect (`subject-region=…`); the precise
+                        // one wins for that plate.
+                        let specific = answers.iter().find(|(k, _)| {
+                            *k == format!("{plate}:{aspect}")
+                        });
+                        let general = answers.iter().find(|(k, _)| k == &aspect);
+                        let Some(v) = specific.or(general).map(|(_, v)| v.clone()) else {
+                            continue;
+                        };
+                        rec["answer"] = serde_json::json!(v);
+                        rec["resolved"] = serde_json::json!(true);
+                        rec["resolved_on"] = serde_json::json!(date_today());
+                        let out_path = format!("{dir}/plate-{plate:04}.json");
+                        match measure_plate(
+                            &bank,
+                            &entries,
+                            plate as u32,
+                            &out_path,
+                            parse_box(Some(&v), "--answer"),
+                        ) {
+                            Ok(_) => {
+                                rec["slug"] =
+                                    serde_json::json!(format!("committed → {out_path}"));
+                                println!("plate {plate}: answered, measured → {}", out_path);
+                            }
+                            Err(e) => {
+                                rec["slug"] = serde_json::json!(format!("still refuses: {e}"));
+                                eprintln!("plate {plate}: answered but still refuses: {}", e);
+                            }
+                        }
+                        acted += 1;
+                    }
+                    write_question_records(&replay_path, &recs);
+                    println!(
+                        "replay: {acted} questions acted on ({} records in {replay_path})",
+                        recs.len()
+                    );
+                    return;
+                }
+
                 let c = clarify::resolve(&prompt, &answers);
                 if let Some(path) = store {
                     if let Some(parent) = std::path::Path::new(&path).parent()

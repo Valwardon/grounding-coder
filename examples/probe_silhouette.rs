@@ -22,7 +22,7 @@ fn main() {
         let mut xs: Vec<usize> = Vec::new();
         for y in y0..y1 {
             for x in 0..img.width {
-                let l = labels[(y * img.width + x) as usize] as usize;
+                let l = labels[(y * img.width + x) as usize];
                 if subs.contains(&l) {
                     xs.push(x as usize);
                 }
