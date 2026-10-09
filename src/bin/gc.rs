@@ -725,6 +725,21 @@ enum Commands {
         #[arg(long)]
         research: bool,
     },
+    /// Palace: a read-only, deterministic index over everything the
+    /// loop has committed — decisions, lessons, encounters,
+    /// clarifications, measured facts and the knowledge graph —
+    /// grouped store → kind → key, every leaf pointing at its source
+    /// line. Invent nothing; a leaf that cannot be viewed is refused.
+    Palace {
+        /// Optional search term; without it, print the whole map
+        query: Option<String>,
+        /// Only check that every leaf resolves to its source
+        #[arg(long)]
+        verify: bool,
+        /// Project root holding data/ and .grounding/
+        #[arg(short, long, default_value = ".")]
+        project: String,
+    },
 }
 
 /// Search project sources for a term: relative .rs paths
@@ -2363,6 +2378,45 @@ fn main() {
                     "knowledge: {} verified, {} generalized, {} open, {} rejected, {} dormant",
                     verified, generalized, open, rejected, dormant
                 );
+            }
+            Commands::Palace {
+                query,
+                verify,
+                project,
+            } => {
+                use grounding_coder::engine::palace::Palace;
+                let palace = Palace::build(std::path::Path::new(&project));
+                let orphans = palace.unresolved();
+                if !orphans.is_empty() {
+                    for l in &orphans {
+                        eprintln!(
+                            "orphan: {}/{} -> {}:{}",
+                            l.wing, l.room, l.source.file, l.source.line
+                        );
+                    }
+                    eprintln!(
+                        "palace: {} orphan leaf(s) — memory that cannot be viewed is not trusted",
+                        orphans.len()
+                    );
+                    std::process::exit(1);
+                }
+                if verify {
+                    println!(
+                        "palace: {} leaves, all resolve to source",
+                        palace.leaves.len()
+                    );
+                } else if let Some(q) = query {
+                    let hits = palace.query(&q);
+                    println!("palace: {} hit(s) for {:?}", hits.len(), q);
+                    for l in hits {
+                        println!(
+                            "  {}/{}/{} -> {}:{}",
+                            l.wing, l.hall, l.room, l.source.file, l.source.line
+                        );
+                    }
+                } else {
+                    print!("{}", palace.render());
+                }
             }
         }
     });

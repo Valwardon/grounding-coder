@@ -15,6 +15,7 @@ pub mod knowledge;
 pub mod lang;
 pub mod measure;
 pub mod mesh;
+pub mod palace;
 pub mod pathfind;
 pub mod picture;
 pub mod plan;
