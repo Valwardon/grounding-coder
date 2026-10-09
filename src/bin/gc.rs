@@ -283,6 +283,11 @@ enum Commands {
         /// Encounter memory (what happened, one line per pass)
         #[arg(long, default_value = "data/encounters.jsonl")]
         encounters: String,
+        /// Reflect first: print everything the journal still leaves
+        /// open, then run this pass as usual (answers given this turn
+        /// close the questions they meet).
+        #[arg(long)]
+        reflect: bool,
     },
     /// Run the bot as a background daemon
     Daemon {
@@ -565,6 +570,53 @@ fn measure_standalone(
         file: path.to_string(),
     };
     measure::measure_with_region(&img, meta, region)
+}
+
+/// Read the question journal aloud: everything the loop still leaves
+/// open. The mind's start-of-turn review — reflection is memory made
+/// visible, not analysis of the self.
+fn reflect_open(path: &str) {
+    let records = question_records(path);
+    println!("REFLECT: what I am still unsure about — {}", path);
+    let (mut image_q, mut prose_q) = (0usize, 0usize);
+    for rec in records
+        .iter()
+        .filter(|r| r["resolved"] != serde_json::json!(true))
+    {
+        let date = rec["date"].as_str().unwrap_or("?");
+        match rec["kind"].as_str().unwrap_or("") {
+            "measure" => {
+                image_q += 1;
+                println!(
+                    "  [image] ({date}) plate {} · {} — {}\n           answer with --region x0,y0,x1,y1",
+                    rec["plate"].as_u64().unwrap_or(0),
+                    rec["title"].as_str().unwrap_or("?"),
+                    rec["question"].as_str().unwrap_or("?")
+                );
+            }
+            "prose" => {
+                prose_q += 1;
+                let names: Vec<String> = rec["aspects"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x["aspect"].as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                println!(
+                    "  [request] ({date}) {}\n           aspects open: {} → answer with --answer aspect=value",
+                    rec["request"].as_str().unwrap_or("?"),
+                    names.join(", ")
+                );
+            }
+            _ => {}
+        }
+    }
+    println!("REFLECT: {image_q} image question(s), {prose_q} prose question(s) open.");
+    if image_q + prose_q == 0 {
+        println!("REFLECT: nothing hangs open — the loop is clear.");
+    }
 }
 
 /// One line of episodic memory: what came in, what was asked, what the
@@ -971,92 +1023,112 @@ fn main() {
                 journal,
                 facts_dir,
                 encounters,
-            } => match (image, prose) {
-                (Some(img), None) => {
-                    let t = title.clone().unwrap_or_else(|| image_stem(&img));
-                    let region_box = parse_box(region.as_deref(), "--region");
-                    match measure_standalone(&img, &t, region_box) {
-                        Ok(facts) => {
-                            let out_path = format!("{facts_dir}/{}.json", image_stem(&img));
-                            if let Some(parent) = std::path::Path::new(&out_path)
-                                .parent()
-                                .filter(|p| !p.as_os_str().is_empty())
-                            {
-                                let _ = std::fs::create_dir_all(parent);
+                reflect,
+            } => {
+                if reflect {
+                    reflect_open(&journal);
+                }
+                match (image, prose) {
+                    (Some(img), None) => {
+                        let t = title.clone().unwrap_or_else(|| image_stem(&img));
+                        let region_box = parse_box(region.as_deref(), "--region");
+                        match measure_standalone(&img, &t, region_box) {
+                            Ok(facts) => {
+                                let out_path = format!("{facts_dir}/{}.json", image_stem(&img));
+                                if let Some(parent) = std::path::Path::new(&out_path)
+                                    .parent()
+                                    .filter(|p| !p.as_os_str().is_empty())
+                                {
+                                    let _ = std::fs::create_dir_all(parent);
+                                }
+                                let json = serde_json::to_string_pretty(&facts).unwrap_or_default();
+                                let _ = std::fs::write(&out_path, format!("{json}\n"));
+                                let mut recs = question_records(&journal);
+                                if let Some(rec) = recs.iter_mut().find(|r| {
+                                    r["kind"] == "measure"
+                                        && r["plate"] == serde_json::json!(0)
+                                        && r["resolved"] == serde_json::json!(false)
+                                }) {
+                                    rec["resolved"] = serde_json::json!(true);
+                                    rec["resolved_on"] = serde_json::json!(date_today());
+                                    rec["slug"] =
+                                        serde_json::json!(format!("committed → {out_path}"));
+                                }
+                                write_question_records(&journal, &recs);
+                                log_encounter(
+                                    &encounters,
+                                    "image",
+                                    &t,
+                                    "subject-region",
+                                    region.as_deref(),
+                                    "committed",
+                                    &format!(
+                                        "{:?} · method {}",
+                                        facts.subject.bbox, facts.subject.method
+                                    ),
+                                );
+                                println!("committed → {}", out_path);
                             }
-                            let json = serde_json::to_string_pretty(&facts).unwrap_or_default();
-                            let _ = std::fs::write(&out_path, format!("{json}\n"));
-                            let mut recs = question_records(&journal);
-                            if let Some(rec) = recs.iter_mut().find(|r| {
-                                r["kind"] == "measure"
-                                    && r["plate"] == serde_json::json!(0)
-                                    && r["resolved"] == serde_json::json!(false)
-                            }) {
-                                rec["resolved"] = serde_json::json!(true);
-                                rec["resolved_on"] = serde_json::json!(date_today());
-                                rec["slug"] = serde_json::json!(format!("committed → {out_path}"));
+                            Err(e) => {
+                                let mut recs = question_records(&journal);
+                                let mut fresh = measure_question(0, &t, e.clone());
+                                // A standalone image's question keeps
+                                // its own file, so a later pass (even a
+                                // reflect) can find it to re-measure.
+                                fresh["file"] = serde_json::json!(img);
+                                if let Some(old) = recs.iter_mut().find(|r| {
+                                    r["kind"] == "measure" && r["plate"] == serde_json::json!(0)
+                                }) {
+                                    *old = fresh;
+                                } else {
+                                    recs.push(fresh);
+                                }
+                                write_question_records(&journal, &recs);
+                                log_encounter(
+                                    &encounters,
+                                    "image",
+                                    &t,
+                                    "subject-region",
+                                    region.as_deref(),
+                                    "refused",
+                                    &e,
+                                );
+                                eprintln!("MEASURE FAILED: {}", e);
+                                eprintln!("question remembered → {}", journal);
+                                std::process::exit(2);
                             }
-                            write_question_records(&journal, &recs);
-                            log_encounter(
-                                &encounters,
-                                "image",
-                                &t,
-                                "subject-region",
-                                region.as_deref(),
-                                "committed",
-                                &format!(
-                                    "{:?} · method {}",
-                                    facts.subject.bbox, facts.subject.method
-                                ),
-                            );
-                            println!("committed → {}", out_path);
-                        }
-                        Err(e) => {
-                            let mut recs = question_records(&journal);
-                            let fresh = measure_question(0, &t, e.clone());
-                            if let Some(old) = recs.iter_mut().find(|r| {
-                                r["kind"] == "measure" && r["plate"] == serde_json::json!(0)
-                            }) {
-                                *old = fresh;
-                            } else {
-                                recs.push(fresh);
-                            }
-                            write_question_records(&journal, &recs);
-                            log_encounter(
-                                &encounters,
-                                "image",
-                                &t,
-                                "subject-region",
-                                region.as_deref(),
-                                "refused",
-                                &e,
-                            );
-                            eprintln!("MEASURE FAILED: {}", e);
-                            eprintln!("question remembered → {}", journal);
-                            std::process::exit(2);
                         }
                     }
-                }
-                (None, Some(p)) => {
-                    run_chat(&p, &project, budget, &answer, Some(&journal)).await;
-                    log_encounter(
-                        &encounters,
-                        "prose",
-                        &p,
-                        "code aspects",
-                        Some(&answer.join(", ")),
-                        "passed",
-                        "the loop closed; outcome printed above",
-                    );
-                }
-                _ => {
-                    eprintln!(
-                        "--encounter needs exactly one of --image <plate.bmp> or \
+                    (None, Some(p)) => {
+                        run_chat(&p, &project, budget, &answer, Some(&journal)).await;
+                        log_encounter(
+                            &encounters,
+                            "prose",
+                            &p,
+                            "code aspects",
+                            Some(&answer.join(", ")),
+                            "passed",
+                            "the loop closed; outcome printed above",
+                        );
+                    }
+                    _ => {
+                        if reflect {
+                            // A pure reflection is an answer in itself:
+                            // the report is the output, not a refusal.
+                            println!(
+                                "(reflected; give --image <plate.bmp> --region x0,y0,x1,y1 or \
+                             --prose \"<request>\" --answer aspect=value to act on one)"
+                            );
+                            std::process::exit(0);
+                        }
+                        eprintln!(
+                            "--encounter needs exactly one of --image <plate.bmp> or \
                              --prose \"<request>\""
-                    );
-                    std::process::exit(2);
+                        );
+                        std::process::exit(2);
+                    }
                 }
-            },
+            }
             Commands::Daemon { project } => {
                 println!("Starting grounding-coder daemon in {}...", project);
                 let bot = CodeBot::new(&project, 5);
