@@ -714,7 +714,14 @@ impl CodeBot {
         // an EnsureDep task for Cargo.toml. No is_known skip: bundled
         // knowledge must not suppress the manifest dep, or the import
         // would resolve nowhere at check time. Bounded: 8 lookups per run.
-        if intent.language.as_deref().unwrap_or("rust") == "rust" {
+        if intent
+            .language
+            .as_deref()
+            .map(|l| l.to_lowercase())
+            .as_deref()
+            .unwrap_or("rust")
+            == "rust"
+        {
             let mut roots = Vec::new();
             for imp in &intent.imports {
                 let seg = imp.split([':', '.']).next().unwrap_or("").to_lowercase();
@@ -803,7 +810,13 @@ impl CodeBot {
 
         // Verified external crates become EnsureDep tasks FIRST, so the
         // manifest lands before any code that needs it.
-        if intent.language.as_deref().unwrap_or("rust") == "rust"
+        if intent
+            .language
+            .as_deref()
+            .map(|l| l.to_lowercase())
+            .as_deref()
+            .unwrap_or("rust")
+            == "rust"
             && self.project_dir.join("Cargo.toml").exists()
         {
             let mut dep_roots = Vec::new();

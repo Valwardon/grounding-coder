@@ -50,6 +50,87 @@ fn parse_box(s: Option<&str>, flag: &str) -> Option<[u32; 4]> {
     }
 }
 
+/// Parse `aspect=value` CLI answers, ignoring malformed entries.
+fn parse_answers(list: &[String]) -> Vec<(String, String)> {
+    list.iter()
+        .filter_map(|a| {
+            a.split_once('=')
+                .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+        })
+        .collect()
+}
+
+/// Fold answered code aspects into a structured intent as facts the
+/// planner reads. The answer text is the user's own — never invented.
+fn apply_code_answers(
+    intent: &mut grounding_coder::engine::tasks::StructuredIntent,
+    answers: &[(String, String)],
+) {
+    for (aspect, value) in answers {
+        match aspect.as_str() {
+            "language" => {
+                if value.as_str() == "no preference" {
+                    intent.constraints.push(format!("{aspect}: {value}"));
+                } else {
+                    intent.language = Some(value.clone());
+                }
+            }
+            "platform" => intent.platform = value.clone(),
+            _ => intent.constraints.push(format!("{aspect}: {value}")),
+        }
+    }
+}
+
+/// Write a prose clarification round to the question journal: the
+/// durable record of what the request left open (and what closed it).
+fn store_prose_round(
+    c: &grounding_coder::engine::clarify::Clarify,
+    path: &str,
+    answers: &[(String, String)],
+) {
+    use grounding_coder::engine::clarify::Domain;
+    if let Some(parent) = std::path::Path::new(path).parent()
+        && !parent.as_os_str().is_empty()
+    {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let aspects: Vec<serde_json::Value> = c
+        .ambiguities
+        .iter()
+        .map(|a| {
+            serde_json::json!({
+                "aspect": a.aspect,
+                "question": a.question,
+                "options": a.options,
+            })
+        })
+        .collect();
+    let domain = match c.domain {
+        Domain::Scene => "scene",
+        Domain::Code => "code",
+        Domain::Unknown => "unknown",
+    };
+    let record = serde_json::json!({
+        "date": date_today(),
+        "kind": "prose",
+        "request": c.request,
+        "domain": domain,
+        "aspects": aspects,
+        "answers": answers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect::<std::collections::HashMap<_, _>>(),
+        "resolved": c.resolved,
+    });
+    let mut line = serde_json::to_string(&record).unwrap_or_default();
+    line.push('\n');
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+}
+
 /// Measure one plate and write its facts file. Shared by single-plate,
 /// sweep, and replay so all three measure identically.
 fn measure_plate(
@@ -150,6 +231,16 @@ enum Commands {
         /// Max correction attempts (RetryBudget)
         #[arg(short, long, default_value_t = 5)]
         budget: u32,
+        /// `aspect=value`, repeatable: the answers from a past
+        /// `gc clarify` round. When given, a code request must be
+        /// fully resolved — refusing to guess rather than plan on
+        /// half-answers. Answer fields fold into the structured
+        /// intent the planner reads.
+        #[arg(long = "clarify-answers")]
+        clarify_answers: Vec<String>,
+        /// Question-memory file: record the resolved round
+        #[arg(long = "clarify-store")]
+        clarify_store: Option<String>,
     },
     /// Run the bot as a background daemon
     Daemon {
@@ -421,6 +512,8 @@ fn main() {
                 prompt,
                 project,
                 budget,
+                clarify_answers,
+                clarify_store,
             } => {
                 // Self-questions first: the bot answers what it is,
                 // can do, and cannot do from its capability table —
@@ -461,8 +554,50 @@ fn main() {
                 // its receipt.
                 use grounding_coder::engine::understand;
                 use grounding_coder::engine::understand::Disposition;
-                let understood =
+                let mut understood =
                     understand::understand(&prompt, Some(std::path::Path::new(&project)));
+
+                // The coding loop closes here: answers from a past
+                // `gc clarify` round become facts the planner reads.
+                // A code request engaged with --clarify-answers owes a
+                // full answer — never plan on half of one.
+                let code_answers = parse_answers(&clarify_answers);
+                if !code_answers.is_empty() {
+                    use grounding_coder::engine::clarify;
+                    use grounding_coder::engine::clarify::Domain;
+                    let c = clarify::resolve(&prompt, &code_answers);
+                    if matches!(c.domain, Domain::Code) {
+                        if !c.resolved {
+                            for line in clarify::log_lines(&c) {
+                                eprintln!("{}", line);
+                            }
+                            eprintln!(
+                                "REFUSED: a code request owes every answer — resolve the open \
+                                 aspects above and re-run with --clarify-answers."
+                            );
+                            std::process::exit(2);
+                        }
+                        apply_code_answers(&mut understood.intent, &code_answers);
+                        if let Some(path) = &clarify_store {
+                            store_prose_round(&c, path, &code_answers);
+                            println!("resolved round recorded → {}", path);
+                        }
+                        let mut folded: Vec<String> = Vec::new();
+                        if let Some(lang) = &understood.intent.language {
+                            folded.push(format!("language={lang}"));
+                        }
+                        if !understood.intent.platform.is_empty() {
+                            folded.push(format!(
+                                "platform={}",
+                                understood.intent.platform
+                            ));
+                        }
+                        if !folded.is_empty() {
+                            println!("facts folded: {}", folded.join(", "));
+                        }
+                    }
+                }
+
                 if understand::disposition(understood.confidence, &understood.frame, &prompt)
                     != Disposition::Execute
                 {
