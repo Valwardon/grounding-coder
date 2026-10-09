@@ -38,3 +38,10 @@ stop.)
   came from.
 - The decision log in `data/decisions.jsonl` is the durable memory:
   one measured decision per line, with its evidence and alternatives.
+- The lesson memory in `data/lessons.jsonl` is what the loop has
+  learned, told as rules: each refusal names its lesson by key
+  (e.g. `L-substantial`), `gc reflect`/`gc encounter --reflect` cites
+  the filed rule behind each open question, and `gc lessons` prints
+  them all with where they live in the code. A rule is only filed once
+  its measurement is in; the tests verify the engine never cites a
+  lesson that is not filed.

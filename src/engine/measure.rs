@@ -666,19 +666,19 @@ pub fn measure_with_region(
     }
     let (members, comps, method) = chosen.ok_or_else(|| {
         if saw_frame_filling {
-            "subject runs off the frame: this plate is a scene, not a \
-             bounded subject — clarify which region is the subject, \
-             then re-run"
+            "L-ground-escape · subject runs off the frame: this plate is a \
+             scene, not a bounded subject — clarify which region is the \
+             subject, then re-run"
                 .to_string()
         } else if saw_small_subject {
-            "this plate's only figure is small against its ground: \
-             the subject is not substantial — clarify which region is \
-             the subject, then re-run"
+            "L-substantial · this plate's only figure is small against its \
+             ground: the subject is not substantial — clarify which region \
+             is the subject, then re-run"
                 .to_string()
         } else {
-            "no separable subject: this plate has no region measurably \
-             different from its surroundings — clarify which region is \
-             the subject, then re-run"
+            "L-separable · no separable subject: this plate has no region \
+             measurably different from its surroundings — clarify which \
+             region is the subject, then re-run"
                 .to_string()
         }
     })?;

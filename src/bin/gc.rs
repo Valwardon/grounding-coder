@@ -178,6 +178,40 @@ fn question_records(path: &str) -> Vec<serde_json::Value> {
         .unwrap_or_default()
 }
 
+/// The discrimination memory, off disk: every rule the loop holds,
+/// with where it lives in the code and the measurement that proved it.
+fn read_lessons(path: &str) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(path)
+        .map(|t| {
+            t.lines()
+                .filter_map(|l| serde_json::from_str(l).ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The lesson keys a refusal cites, pulled straight out of its text:
+/// whatever a refusal names, memory can explain. A key is the token
+/// that starts with "L-" and runs to the next space, dot, colon, or
+/// quote.
+fn cited_lessons(text: &str) -> Vec<String> {
+    let mut keys: Vec<String> = Vec::new();
+    let mut rest = text;
+    while let Some(i) = rest.find("L-") {
+        rest = &rest[i..];
+        let end = rest[2..]
+            .find([' ', '.', ':', '"', ')'])
+            .map(|e| e + 2)
+            .unwrap_or(rest.len());
+        let key = &rest[..end];
+        if key.len() > 2 && !keys.contains(&key.to_string()) {
+            keys.push(key.to_string());
+        }
+        rest = &rest[2..];
+    }
+    keys
+}
+
 fn write_question_records(path: &str, records: &[serde_json::Value]) {
     if let Some(parent) = std::path::Path::new(path).parent()
         && !parent.as_os_str().is_empty()
@@ -371,6 +405,17 @@ enum Commands {
         /// Output directory for re-measured facts (for replay)
         #[arg(long)]
         out_dir: Option<String>,
+    },
+    /// The discrimination memory: the rules the loop learned from
+    /// measurement, as a reviewable artifact the loop cites when it
+    /// refuses. The rules live in the code's error strings (each
+    /// refusal names its lesson); this command prints what they are,
+    /// where they live, and the measurement that proved them.
+    Lessons {
+        /// Question-memory file to scan for citations, so "gc lessons"
+        /// doubles as "what are you applying right now"
+        #[arg(long)]
+        journal: Option<String>,
     },
     /// Source photographic plates: search Commons, require complete
     /// provenance, fetch and decode. Refusals print with reasons.
@@ -577,6 +622,15 @@ fn measure_standalone(
 /// visible, not analysis of the self.
 fn reflect_open(path: &str) {
     let records = question_records(path);
+    let lessons = read_lessons("data/lessons.jsonl");
+    let lesson = |key: &str| -> String {
+        lessons
+            .iter()
+            .find(|l| l["id"] == serde_json::json!(key))
+            .and_then(|l| l["statement"].as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_default()
+    };
     println!("REFLECT: what I am still unsure about — {}", path);
     let (mut image_q, mut prose_q) = (0usize, 0usize);
     for rec in records
@@ -593,6 +647,12 @@ fn reflect_open(path: &str) {
                     rec["title"].as_str().unwrap_or("?"),
                     rec["question"].as_str().unwrap_or("?")
                 );
+                for key in cited_lessons(rec["question"].as_str().unwrap_or("")) {
+                    let statement = lesson(&key);
+                    if !statement.is_empty() {
+                        println!("           cites {key}: {statement}");
+                    }
+                }
             }
             "prose" => {
                 prose_q += 1;
@@ -692,8 +752,8 @@ async fn run_chat(
                     eprintln!("{}", line);
                 }
                 eprintln!(
-                    "REFUSED: a code request owes every answer — resolve the open \
-                                 aspects above and re-run, or with --clarify-answers / \
+                    "REFUSED (L-full-answer): a code request owes every answer — resolve \
+                                 the open aspects above and re-run, or with --clarify-answers / \
                                  --answer."
                 );
                 std::process::exit(2);
@@ -1509,6 +1569,40 @@ fn main() {
                     println!("{line}");
                 }
             }
+            Commands::Lessons { journal } => {
+                let lessons = read_lessons("data/lessons.jsonl");
+                println!(
+                    "LESSONS: the discrimination memory I hold — {} rules",
+                    lessons.len()
+                );
+                for row in &lessons {
+                    println!("  {} · {}", row["id"], row["name"]);
+                    println!("       {}", row["statement"]);
+                    println!(
+                        "       where {} · evidence {}",
+                        row["where"], row["evidence"]
+                    );
+                }
+                if let Some(path) = journal {
+                    let mut cited: Vec<String> = Vec::new();
+                    for rec in question_records(&path) {
+                        for key in cited_lessons(rec["question"].as_str().unwrap_or("")) {
+                            if !cited.contains(&key) {
+                                cited.push(key);
+                            }
+                        }
+                    }
+                    println!(
+                        "CITED right now by open questions in {}: {}",
+                        path,
+                        if cited.is_empty() {
+                            "none — the loop has nothing it is refusing".to_string()
+                        } else {
+                            cited.join(", ")
+                        }
+                    );
+                }
+            }
             Commands::Plate {
                 query,
                 limit,
@@ -2019,5 +2113,99 @@ fn main() {
     });
     if verbose {
         eprintln!("[verbose] wall time: {:.2}s", start.elapsed().as_secs_f64());
+    }
+}
+
+#[cfg(test)]
+mod lessons_tests {
+    use super::*;
+
+    /// The discrimination memory must parse, be keyed uniquely, and be
+    /// exactly the set of lessons; anything else is drift.
+    #[test]
+    fn every_filed_lesson_is_unique_and_known() {
+        let lessons = read_lessons("data/lessons.jsonl");
+        assert!(!lessons.is_empty(), "lessons file must not empty");
+        let mut ids: Vec<String> = lessons
+            .iter()
+            .filter_map(|l| l["id"].as_str().map(String::from))
+            .collect();
+        ids.sort();
+        let before = ids.len();
+        ids.dedup();
+        assert_eq!(before, ids.len(), "lesson ids must be unique: {ids:?}");
+        for id in [
+            "L-ground-escape",
+            "L-substantial",
+            "L-separable",
+            "L-region-attention",
+            "L-speckle",
+            "L-column-stack",
+            "L-full-answer",
+        ] {
+            assert!(ids.contains(&id.to_string()), "missing lesson {id}");
+        }
+    }
+
+    /// Every lesson a refusal cites must exist on disk, so a citation
+    /// can always be explained.
+    #[test]
+    fn a_question_cites_only_filed_lessons() {
+        let lessons = read_lessons("data/lessons.jsonl");
+        let ids: Vec<&str> = lessons.iter().filter_map(|l| l["id"].as_str()).collect();
+        for q in [
+            "L-ground-escape · subject runs off the frame: ...",
+            "L-substantial · small against its ground: ...",
+            "L-separable · no separable subject: ...",
+            "REFUSED (L-full-answer): a code request owes every answer",
+            "a plain question with no cite",
+        ] {
+            for key in cited_lessons(q) {
+                assert!(
+                    ids.contains(&key.as_str()),
+                    "cited {key} is not filed in data/lessons.jsonl"
+                );
+            }
+        }
+    }
+
+    /// The engine's actual refusal strings must carry filed lesson
+    /// keys, so what the loop says under pressure matches memory.
+    #[test]
+    fn the_engine_cites_only_filed_lessons() {
+        use grounding_coder::engine::measure;
+        use grounding_coder::engine::vision::{Image, Rgb};
+
+        let meta = || measure::PlateMeta {
+            title: "synthetic".into(),
+            query: String::new(),
+            source_url: String::new(),
+            page_url: String::new(),
+            author: String::new(),
+            license: String::new(),
+            file: "synthetic.bmp".into(),
+        };
+        let lessons = read_lessons("data/lessons.jsonl");
+        let ids: Vec<&str> = lessons.iter().filter_map(|l| l["id"].as_str()).collect();
+
+        let blank = Image::blank(32, 32, Rgb::new(128, 128, 128));
+        let err = measure::measure(&blank, meta()).expect_err("blank refuses");
+        for key in cited_lessons(&err) {
+            assert!(ids.contains(&key.as_str()), "engine cited {key}: {err}");
+        }
+
+        let mut scene = Image::blank(64, 64, Rgb::new(200, 200, 200));
+        scene.draw_rect(20, 0, 24, 64, Rgb::new(40, 60, 200));
+        let err = measure::measure(&scene, meta()).expect_err("frame-filling refuses");
+        for key in cited_lessons(&err) {
+            assert!(ids.contains(&key.as_str()), "engine cited {key}: {err}");
+        }
+
+        let mut small = Image::blank(128, 128, Rgb::new(180, 180, 175));
+        small.draw_rect(58, 60, 82, 84, Rgb::new(40, 60, 200));
+        let err = measure::measure(&small, meta()).expect_err("small subject refuses");
+        for key in cited_lessons(&err) {
+            assert!(ids.contains(&key.as_str()), "engine cited {key}: {err}");
+        }
     }
 }
