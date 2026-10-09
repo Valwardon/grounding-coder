@@ -242,6 +242,48 @@ enum Commands {
         #[arg(long = "clarify-store")]
         clarify_store: Option<String>,
     },
+    /// A single loop pass over one stimulus, however it arrives: an
+    /// image file (measured, or asked which region is its subject) or a
+    /// prose request (clarified, folded, or refused with its questions).
+    /// Each pass records its encounter in memory; nothing is churned in
+    /// batches.
+    Encounter {
+        /// Image stimulus: an absolute path to a BMP plate. Mutually
+        /// exclusive with --prose.
+        #[arg(long)]
+        image: Option<String>,
+        /// The image's subject, in words, when --image is used (facts
+        /// and the question journal carry it).
+        #[arg(long)]
+        title: Option<String>,
+        /// `x0,y0,x1,y1` — the answer to a past "which region is the
+        /// subject" question for this image, in the same run.
+        #[arg(long)]
+        region: Option<String>,
+        /// Prose stimulus: a natural-language request. Mutually
+        /// exclusive with --image. Full answers fold into the intent;
+        /// open aspects are remembered and refused.
+        #[arg(long)]
+        prose: Option<String>,
+        /// Target project directory (prose encounters)
+        #[arg(short, long, default_value = ".")]
+        project: String,
+        /// Max correction attempts (prose encounters)
+        #[arg(short, long, default_value_t = 5)]
+        budget: u32,
+        /// `aspect=value`, repeatable: answers to a prose encounter
+        #[arg(long = "answer")]
+        answer: Vec<String>,
+        /// Question memory (open questions, both domains)
+        #[arg(long, default_value = "data/clarifications.jsonl")]
+        journal: String,
+        /// Committed image facts land here
+        #[arg(long = "facts-dir", default_value = "data/visual")]
+        facts_dir: String,
+        /// Encounter memory (what happened, one line per pass)
+        #[arg(long, default_value = "data/encounters.jsonl")]
+        encounters: String,
+    },
     /// Run the bot as a background daemon
     Daemon {
         #[arg(short, long, default_value = ".")]
@@ -494,6 +536,365 @@ fn search_files(project: &str, query: &str, exts: &[&str]) -> Vec<String> {
     hits
 }
 
+/// The stem of an image path, used as its identity in memory.
+fn image_stem(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "plate".to_string())
+}
+
+/// Measure a single image as it arrives — a plate that walks in, not
+/// one pulled from a pre-collected bank. Same pipeline, its own title.
+fn measure_standalone(
+    path: &str,
+    title: &str,
+    region: Option<[u32; 4]>,
+) -> Result<grounding_coder::engine::measure::VisualFacts, String> {
+    use grounding_coder::engine::measure;
+    use grounding_coder::engine::vision::Image;
+    let img = Image::load_bmp(std::path::Path::new(path))
+        .map_err(|e| format!("plate unreadable: {e}"))?;
+    let meta = measure::PlateMeta {
+        title: title.to_string(),
+        query: String::new(),
+        source_url: String::new(),
+        page_url: String::new(),
+        author: String::new(),
+        license: String::new(),
+        file: path.to_string(),
+    };
+    measure::measure_with_region(&img, meta, region)
+}
+
+/// One line of episodic memory: what came in, what was asked, what the
+/// answer was, what happened. The running record of the loop.
+fn log_encounter(
+    path: &str,
+    kind: &str,
+    stimulus: &str,
+    aspect: &str,
+    answer: Option<&str>,
+    action: &str,
+    result: &str,
+) {
+    if let Some(parent) = std::path::Path::new(path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+    {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let record = serde_json::json!({
+        "date": date_today(),
+        "kind": kind,
+        "stimulus": stimulus,
+        "aspect": aspect,
+        "answer": answer,
+        "action": action,
+        "result": result,
+    });
+    let mut line = serde_json::to_string(&record).unwrap_or_default();
+    line.push('\n');
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+}
+
+/// One chat pass: understand → disposition → research-or-execute.
+/// The loop the mind shares with image measurement: a request is
+/// clarified into facts, confusion is remembered in the question
+/// journal, and action follows only from a full answer.
+async fn run_chat(
+    prompt: &str,
+    project: &str,
+    budget: u32,
+    clarify_answers: &[String],
+    clarify_store: Option<&str>,
+) {
+    // No model anywhere in this path: the deterministic
+    // understander parses, the disposition engine routes,
+    // the engine proves. Anything but Execute refuses with
+    // its receipt.
+    use grounding_coder::engine::understand;
+    use grounding_coder::engine::understand::Disposition;
+    let mut understood = understand::understand(prompt, Some(std::path::Path::new(project)));
+
+    // The coding loop closes here: answers from a past
+    // `gc clarify` round become facts the planner reads.
+    // A code request engaged with --clarify-answers owes a
+    // full answer — never plan on half of one.
+    let code_answers = parse_answers(clarify_answers);
+    if !code_answers.is_empty() {
+        use grounding_coder::engine::clarify;
+        use grounding_coder::engine::clarify::Domain;
+        let c = clarify::resolve(prompt, &code_answers);
+        if matches!(c.domain, Domain::Code) {
+            if !c.resolved {
+                if let Some(path) = &clarify_store {
+                    store_prose_round(&c, path, &code_answers);
+                    println!("UNRESOLVED ROUND REMEMBERED → {}", path);
+                }
+                for line in clarify::log_lines(&c) {
+                    eprintln!("{}", line);
+                }
+                eprintln!(
+                    "REFUSED: a code request owes every answer — resolve the open \
+                                 aspects above and re-run, or with --clarify-answers / \
+                                 --answer."
+                );
+                std::process::exit(2);
+            }
+            apply_code_answers(&mut understood.intent, &code_answers);
+            if let Some(path) = &clarify_store {
+                store_prose_round(&c, path, &code_answers);
+                println!("resolved round recorded → {}", path);
+            }
+            let mut folded: Vec<String> = Vec::new();
+            if let Some(lang) = &understood.intent.language {
+                folded.push(format!("language={lang}"));
+            }
+            if !understood.intent.platform.is_empty() {
+                folded.push(format!("platform={}", understood.intent.platform));
+            }
+            if !folded.is_empty() {
+                println!("facts folded: {}", folded.join(", "));
+            }
+        }
+    }
+
+    if understand::disposition(understood.confidence, &understood.frame, prompt)
+        != Disposition::Execute
+    {
+        // Unknown Resolution: investigate before refusing.
+        // Per-unknown records, typed routes, bounded budget,
+        // trail-kept attempts, structured report on
+        // exhaustion. Exit 2 still signals "did not act".
+        use grounding_coder::engine::research::ResearchOracle;
+        use grounding_coder::engine::unknown::{
+            Decision, Evidence, ResearchAttempt, UnknownRecord, UnknownStatus, decide,
+        };
+        let tasks = understand::research_tasks(prompt);
+        let trail_path = std::path::Path::new(&project)
+            .join(".grounding")
+            .join("research.jsonl");
+        let trail = grounding_coder::engine::unknown::load_trail(&trail_path);
+        let mut oracle = ResearchOracle::new(6);
+        let mut web_left = 6u32;
+        for task in tasks.iter().take(3) {
+            let mut record = UnknownRecord::open(&task.unknown);
+            // Trail = attempted routes already walked.
+            if let Some((summary, source)) = trail.get(&task.unknown) {
+                record.record_attempt(ResearchAttempt {
+                    method: "trail".to_string(),
+                    query: task.unknown.clone(),
+                    found: true,
+                    reliable: false,
+                    remaining: "prior trail hit, unverified".to_string(),
+                });
+                record.record_evidence(Evidence {
+                    source: format!("trail:{}", source),
+                    content: summary.clone(),
+                    reliable: false,
+                });
+            }
+            loop {
+                match decide(&record, web_left, false) {
+                    Decision::Proceed { evidence } => {
+                        println!(
+                            "RESEARCHED {}: {} [{}]",
+                            task.unknown, evidence.content, evidence.source
+                        );
+                        for f in grounding_coder::engine::unknown::followups(&record, &evidence) {
+                            println!("  next question: {}", f);
+                            record.followups.push(f);
+                        }
+                        break;
+                    }
+                    Decision::Continue { method, query } => {
+                        match method {
+                            "web" => {
+                                web_left = web_left.saturating_sub(1);
+                                match oracle.research_word(&query).await {
+                                    Some(def) => {
+                                        let reliable = def.source_url.contains("wikipedia.org");
+                                        record.record_attempt(ResearchAttempt {
+                                            method: "web".to_string(),
+                                            query: query.clone(),
+                                            found: true,
+                                            reliable,
+                                            remaining: if reliable {
+                                                "answered".to_string()
+                                            } else {
+                                                "unverified snippet".to_string()
+                                            },
+                                        });
+                                        record.record_evidence(Evidence {
+                                            source: def.source_url.clone(),
+                                            content: def.summary.clone(),
+                                            reliable,
+                                        });
+                                    }
+                                    None => {
+                                        record.record_attempt(ResearchAttempt {
+                                            method: "web".to_string(),
+                                            query: query.clone(),
+                                            found: false,
+                                            reliable: false,
+                                            remaining: "no usable result".to_string(),
+                                        });
+                                    }
+                                }
+                            }
+                            "codebase" => {
+                                let hits = search_codebase(project, &query);
+                                if hits.is_empty() {
+                                    record.record_attempt(ResearchAttempt {
+                                        method: "codebase".to_string(),
+                                        query: query.clone(),
+                                        found: false,
+                                        reliable: false,
+                                        remaining: "not in sources".to_string(),
+                                    });
+                                } else {
+                                    println!(
+                                        "RESEARCHED {}: in project sources: {}",
+                                        task.unknown,
+                                        hits.join(", ")
+                                    );
+                                    record.record_attempt(ResearchAttempt {
+                                        method: "codebase".to_string(),
+                                        query: query.clone(),
+                                        found: true,
+                                        reliable: true,
+                                        remaining: "answered".to_string(),
+                                    });
+                                    record.record_evidence(Evidence {
+                                        source: "codebase".to_string(),
+                                        content: format!(
+                                            "{} appears in {}",
+                                            query,
+                                            hits.join(", ")
+                                        ),
+                                        reliable: true,
+                                    });
+                                }
+                            }
+                            "docs" => {
+                                let hits = search_docs(project, &query);
+                                if hits.is_empty() {
+                                    record.record_attempt(ResearchAttempt {
+                                        method: "docs".to_string(),
+                                        query: query.clone(),
+                                        found: false,
+                                        reliable: false,
+                                        remaining: "not in docs".to_string(),
+                                    });
+                                } else {
+                                    println!(
+                                        "RESEARCHED {}: in project docs: {}",
+                                        task.unknown,
+                                        hits.join(", ")
+                                    );
+                                    record.record_attempt(ResearchAttempt {
+                                        method: "docs".to_string(),
+                                        query: query.clone(),
+                                        found: true,
+                                        reliable: true,
+                                        remaining: "answered".to_string(),
+                                    });
+                                    record.record_evidence(Evidence {
+                                        source: "docs".to_string(),
+                                        content: format!(
+                                            "{} documented in {}",
+                                            query,
+                                            hits.join(", ")
+                                        ),
+                                        reliable: true,
+                                    });
+                                }
+                            }
+                            _ => {
+                                // "user" with nobody home, or
+                                // anything unrecognized: the
+                                // route itself is exhausted.
+                                record.record_attempt(ResearchAttempt {
+                                    method: method.to_string(),
+                                    query: query.clone(),
+                                    found: false,
+                                    reliable: false,
+                                    remaining: "route unavailable".to_string(),
+                                });
+                            }
+                        }
+                    }
+                    Decision::Blocked { report } => {
+                        println!("STATUS: BLOCKED");
+                        println!("OBJECTIVE: {}", report.objective);
+                        for e in &report.established {
+                            println!("ESTABLISHED: {}", e);
+                        }
+                        for i in &report.investigated {
+                            println!("INVESTIGATED: {}", i);
+                        }
+                        for u in &report.unresolved {
+                            println!("UNRESOLVED: {}", u);
+                        }
+                        println!("NEXT POSSIBLE STEP: {}", report.next_step);
+                        println!("NO CHANGES APPLIED.");
+                        break;
+                    }
+                }
+            }
+            // Persist the record (status + attempts): the
+            // next turn never re-walks these routes.
+            record.status = match decide(&record, 0, false) {
+                Decision::Proceed { .. } => UnknownStatus::Resolved,
+                Decision::Blocked { .. } => {
+                    if matches!(record.status, UnknownStatus::Resolved) {
+                        UnknownStatus::Resolved
+                    } else {
+                        UnknownStatus::Exhausted
+                    }
+                }
+                Decision::Continue { .. } => UnknownStatus::Exhausted,
+            };
+            let dir = std::path::Path::new(&project).join(".grounding");
+            let _ = std::fs::create_dir_all(&dir);
+            let row = serde_json::json!({
+                "term": record.question,
+                "kind": format!("{:?}", record.kind),
+                "status": format!("{:?}", record.status),
+                "summary": record.known_facts.first().map(|e| e.content.clone()).unwrap_or_default(),
+                "source": record.known_facts.first().map(|e| e.source.clone()).unwrap_or_default(),
+                "attempts": record.attempted_routes.iter().map(|a| format!("{}:{}", a.method, a.query)).collect::<Vec<_>>(),
+            });
+            let mut trail_text = std::fs::read_to_string(&trail_path).unwrap_or_default();
+            trail_text.push_str(&row.to_string());
+            trail_text.push('\n');
+            let _ = std::fs::write(&trail_path, trail_text);
+        }
+        eprintln!(
+            "UNDERSTOOD confidence {:.2} frame={} — too thin: {:?}",
+            understood.confidence, understood.frame, understood.intent.unknown_requirements,
+        );
+        std::process::exit(2);
+    }
+    let config = config::load_config_default();
+    let intent_json = serde_json::to_string(&understood.intent).expect("intent should serialize");
+    let mut bot = CodeBot::new(project, budget);
+    bot.set_progress_listener(std::sync::Arc::new(|ev| eprintln!("[progress] {}", ev)));
+    bot.set_github_token(config.github_key.clone());
+    match bot.run_task(&intent_json).await {
+        Ok(result) => println!("{}", result),
+        Err(e) => {
+            eprintln!("FAILED: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
     if cli.verbose {
@@ -548,300 +949,114 @@ fn main() {
                     }
                     return;
                 }
-                // No model anywhere in this path: the deterministic
-                // understander parses, the disposition engine routes,
-                // the engine proves. Anything but Execute refuses with
-                // its receipt.
-                use grounding_coder::engine::understand;
-                use grounding_coder::engine::understand::Disposition;
-                let mut understood =
-                    understand::understand(&prompt, Some(std::path::Path::new(&project)));
-
-                // The coding loop closes here: answers from a past
-                // `gc clarify` round become facts the planner reads.
-                // A code request engaged with --clarify-answers owes a
-                // full answer — never plan on half of one.
-                let code_answers = parse_answers(&clarify_answers);
-                if !code_answers.is_empty() {
-                    use grounding_coder::engine::clarify;
-                    use grounding_coder::engine::clarify::Domain;
-                    let c = clarify::resolve(&prompt, &code_answers);
-                    if matches!(c.domain, Domain::Code) {
-                        if !c.resolved {
-                            for line in clarify::log_lines(&c) {
-                                eprintln!("{}", line);
+                // The mind delegates the rest of the pass to the shared
+                // loop: understand → disposition → research-or-execute.
+                run_chat(
+                    &prompt,
+                    &project,
+                    budget,
+                    &clarify_answers,
+                    clarify_store.as_deref(),
+                )
+                .await;
+            }
+            Commands::Encounter {
+                image,
+                title,
+                region,
+                prose,
+                project,
+                budget,
+                answer,
+                journal,
+                facts_dir,
+                encounters,
+            } => match (image, prose) {
+                (Some(img), None) => {
+                    let t = title.clone().unwrap_or_else(|| image_stem(&img));
+                    let region_box = parse_box(region.as_deref(), "--region");
+                    match measure_standalone(&img, &t, region_box) {
+                        Ok(facts) => {
+                            let out_path = format!("{facts_dir}/{}.json", image_stem(&img));
+                            if let Some(parent) = std::path::Path::new(&out_path)
+                                .parent()
+                                .filter(|p| !p.as_os_str().is_empty())
+                            {
+                                let _ = std::fs::create_dir_all(parent);
                             }
-                            eprintln!(
-                                "REFUSED: a code request owes every answer — resolve the open \
-                                 aspects above and re-run with --clarify-answers."
+                            let json = serde_json::to_string_pretty(&facts).unwrap_or_default();
+                            let _ = std::fs::write(&out_path, format!("{json}\n"));
+                            let mut recs = question_records(&journal);
+                            if let Some(rec) = recs.iter_mut().find(|r| {
+                                r["kind"] == "measure"
+                                    && r["plate"] == serde_json::json!(0)
+                                    && r["resolved"] == serde_json::json!(false)
+                            }) {
+                                rec["resolved"] = serde_json::json!(true);
+                                rec["resolved_on"] = serde_json::json!(date_today());
+                                rec["slug"] = serde_json::json!(format!("committed → {out_path}"));
+                            }
+                            write_question_records(&journal, &recs);
+                            log_encounter(
+                                &encounters,
+                                "image",
+                                &t,
+                                "subject-region",
+                                region.as_deref(),
+                                "committed",
+                                &format!(
+                                    "{:?} · method {}",
+                                    facts.subject.bbox, facts.subject.method
+                                ),
                             );
+                            println!("committed → {}", out_path);
+                        }
+                        Err(e) => {
+                            let mut recs = question_records(&journal);
+                            let fresh = measure_question(0, &t, e.clone());
+                            if let Some(old) = recs.iter_mut().find(|r| {
+                                r["kind"] == "measure" && r["plate"] == serde_json::json!(0)
+                            }) {
+                                *old = fresh;
+                            } else {
+                                recs.push(fresh);
+                            }
+                            write_question_records(&journal, &recs);
+                            log_encounter(
+                                &encounters,
+                                "image",
+                                &t,
+                                "subject-region",
+                                region.as_deref(),
+                                "refused",
+                                &e,
+                            );
+                            eprintln!("MEASURE FAILED: {}", e);
+                            eprintln!("question remembered → {}", journal);
                             std::process::exit(2);
-                        }
-                        apply_code_answers(&mut understood.intent, &code_answers);
-                        if let Some(path) = &clarify_store {
-                            store_prose_round(&c, path, &code_answers);
-                            println!("resolved round recorded → {}", path);
-                        }
-                        let mut folded: Vec<String> = Vec::new();
-                        if let Some(lang) = &understood.intent.language {
-                            folded.push(format!("language={lang}"));
-                        }
-                        if !understood.intent.platform.is_empty() {
-                            folded.push(format!(
-                                "platform={}",
-                                understood.intent.platform
-                            ));
-                        }
-                        if !folded.is_empty() {
-                            println!("facts folded: {}", folded.join(", "));
                         }
                     }
                 }
-
-                if understand::disposition(understood.confidence, &understood.frame, &prompt)
-                    != Disposition::Execute
-                {
-                    // Unknown Resolution: investigate before refusing.
-                    // Per-unknown records, typed routes, bounded budget,
-                    // trail-kept attempts, structured report on
-                    // exhaustion. Exit 2 still signals "did not act".
-                    use grounding_coder::engine::research::ResearchOracle;
-                    use grounding_coder::engine::unknown::{
-                        decide, Decision, Evidence, ResearchAttempt, UnknownRecord, UnknownStatus,
-                    };
-                    let tasks = understand::research_tasks(&prompt);
-                    let trail_path = std::path::Path::new(&project)
-                        .join(".grounding")
-                        .join("research.jsonl");
-                    let trail = grounding_coder::engine::unknown::load_trail(&trail_path);
-                    let mut oracle = ResearchOracle::new(6);
-                    let mut web_left = 6u32;
-                    for task in tasks.iter().take(3) {
-                        let mut record = UnknownRecord::open(&task.unknown);
-                        // Trail = attempted routes already walked.
-                        if let Some((summary, source)) = trail.get(&task.unknown) {
-                            record.record_attempt(ResearchAttempt {
-                                method: "trail".to_string(),
-                                query: task.unknown.clone(),
-                                found: true,
-                                reliable: false,
-                                remaining: "prior trail hit, unverified".to_string(),
-                            });
-                            record.record_evidence(Evidence {
-                                source: format!("trail:{}", source),
-                                content: summary.clone(),
-                                reliable: false,
-                            });
-                        }
-                        loop {
-                            match decide(&record, web_left, false) {
-                                Decision::Proceed { evidence } => {
-                                    println!(
-                                        "RESEARCHED {}: {} [{}]",
-                                        task.unknown, evidence.content, evidence.source
-                                    );
-                                    for f in grounding_coder::engine::unknown::followups(
-                                        &record,
-                                        &evidence,
-                                    ) {
-                                        println!("  next question: {}", f);
-                                        record.followups.push(f);
-                                    }
-                                    break;
-                                }
-                                Decision::Continue { method, query } => {
-                                    match method {
-                                        "web" => {
-                                            web_left = web_left.saturating_sub(1);
-                                            match oracle.research_word(&query).await {
-                                                Some(def) => {
-                                                    let reliable = def
-                                                        .source_url
-                                                        .contains("wikipedia.org");
-                                                    record.record_attempt(ResearchAttempt {
-                                                        method: "web".to_string(),
-                                                        query: query.clone(),
-                                                        found: true,
-                                                        reliable,
-                                                        remaining: if reliable {
-                                                            "answered".to_string()
-                                                        } else {
-                                                            "unverified snippet".to_string()
-                                                        },
-                                                    });
-                                                    record.record_evidence(Evidence {
-                                                        source: def.source_url.clone(),
-                                                        content: def.summary.clone(),
-                                                        reliable,
-                                                    });
-                                                }
-                                                None => {
-                                                    record.record_attempt(ResearchAttempt {
-                                                        method: "web".to_string(),
-                                                        query: query.clone(),
-                                                        found: false,
-                                                        reliable: false,
-                                                        remaining: "no usable result"
-                                                            .to_string(),
-                                                    });
-                                                }
-                                            }
-                                        }
-                                        "codebase" => {
-                                            let hits =
-                                                search_codebase(&project, &query);
-                                            if hits.is_empty() {
-                                                record.record_attempt(ResearchAttempt {
-                                                    method: "codebase".to_string(),
-                                                    query: query.clone(),
-                                                    found: false,
-                                                    reliable: false,
-                                                    remaining: "not in sources".to_string(),
-                                                });
-                                            } else {
-                                                println!(
-                                                    "RESEARCHED {}: in project sources: {}",
-                                                    task.unknown,
-                                                    hits.join(", ")
-                                                );
-                                                record.record_attempt(ResearchAttempt {
-                                                    method: "codebase".to_string(),
-                                                    query: query.clone(),
-                                                    found: true,
-                                                    reliable: true,
-                                                    remaining: "answered".to_string(),
-                                                });
-                                                record.record_evidence(Evidence {
-                                                    source: "codebase".to_string(),
-                                                    content: format!(
-                                                        "{} appears in {}",
-                                                        query,
-                                                        hits.join(", ")
-                                                    ),
-                                                    reliable: true,
-                                                });
-                                            }
-                                        }
-                                        "docs" => {
-                                            let hits = search_docs(&project, &query);
-                                            if hits.is_empty() {
-                                                record.record_attempt(ResearchAttempt {
-                                                    method: "docs".to_string(),
-                                                    query: query.clone(),
-                                                    found: false,
-                                                    reliable: false,
-                                                    remaining: "not in docs".to_string(),
-                                                });
-                                            } else {
-                                                println!(
-                                                    "RESEARCHED {}: in project docs: {}",
-                                                    task.unknown,
-                                                    hits.join(", ")
-                                                );
-                                                record.record_attempt(ResearchAttempt {
-                                                    method: "docs".to_string(),
-                                                    query: query.clone(),
-                                                    found: true,
-                                                    reliable: true,
-                                                    remaining: "answered".to_string(),
-                                                });
-                                                record.record_evidence(Evidence {
-                                                    source: "docs".to_string(),
-                                                    content: format!(
-                                                        "{} documented in {}",
-                                                        query,
-                                                        hits.join(", ")
-                                                    ),
-                                                    reliable: true,
-                                                });
-                                            }
-                                        }
-                                        _ => {
-                                            // "user" with nobody home, or
-                                            // anything unrecognized: the
-                                            // route itself is exhausted.
-                                            record.record_attempt(ResearchAttempt {
-                                                method: method.to_string(),
-                                                query: query.clone(),
-                                                found: false,
-                                                reliable: false,
-                                                remaining: "route unavailable".to_string(),
-                                            });
-                                        }
-                                    }
-                                }
-                                Decision::Blocked { report } => {
-                                    println!("STATUS: BLOCKED");
-                                    println!("OBJECTIVE: {}", report.objective);
-                                    for e in &report.established {
-                                        println!("ESTABLISHED: {}", e);
-                                    }
-                                    for i in &report.investigated {
-                                        println!("INVESTIGATED: {}", i);
-                                    }
-                                    for u in &report.unresolved {
-                                        println!("UNRESOLVED: {}", u);
-                                    }
-                                    println!("NEXT POSSIBLE STEP: {}", report.next_step);
-                                    println!("NO CHANGES APPLIED.");
-                                    break;
-                                }
-                            }
-                        }
-                        // Persist the record (status + attempts): the
-                        // next turn never re-walks these routes.
-                        record.status = match decide(&record, 0, false) {
-                            Decision::Proceed { .. } => UnknownStatus::Resolved,
-                            Decision::Blocked { .. } => {
-                                if matches!(
-                                    record.status,
-                                    UnknownStatus::Resolved
-                                ) {
-                                    UnknownStatus::Resolved
-                                } else {
-                                    UnknownStatus::Exhausted
-                                }
-                            }
-                            Decision::Continue { .. } => UnknownStatus::Exhausted,
-                        };
-                        let dir = std::path::Path::new(&project).join(".grounding");
-                        let _ = std::fs::create_dir_all(&dir);
-                        let row = serde_json::json!({
-                            "term": record.question,
-                            "kind": format!("{:?}", record.kind),
-                            "status": format!("{:?}", record.status),
-                            "summary": record.known_facts.first().map(|e| e.content.clone()).unwrap_or_default(),
-                            "source": record.known_facts.first().map(|e| e.source.clone()).unwrap_or_default(),
-                            "attempts": record.attempted_routes.iter().map(|a| format!("{}:{}", a.method, a.query)).collect::<Vec<_>>(),
-                        });
-                        let mut trail_text =
-                            std::fs::read_to_string(&trail_path).unwrap_or_default();
-                        trail_text.push_str(&row.to_string());
-                        trail_text.push('\n');
-                        let _ = std::fs::write(&trail_path, trail_text);
-                    }
+                (None, Some(p)) => {
+                    run_chat(&p, &project, budget, &answer, Some(&journal)).await;
+                    log_encounter(
+                        &encounters,
+                        "prose",
+                        &p,
+                        "code aspects",
+                        Some(&answer.join(", ")),
+                        "passed",
+                        "the loop closed; outcome printed above",
+                    );
+                }
+                _ => {
                     eprintln!(
-                        "UNDERSTOOD confidence {:.2} frame={} — too thin: {:?}",
-                        understood.confidence,
-                        understood.frame,
-                        understood.intent.unknown_requirements,
+                        "--encounter needs exactly one of --image <plate.bmp> or \
+                             --prose \"<request>\""
                     );
                     std::process::exit(2);
                 }
-                let config = config::load_config_default();
-                let intent_json =
-                    serde_json::to_string(&understood.intent).expect("intent should serialize");
-                let mut bot = CodeBot::new(&project, budget);
-                bot.set_progress_listener(std::sync::Arc::new(|ev| eprintln!("[progress] {}", ev)));
-                bot.set_github_token(config.github_key.clone());
-                match bot.run_task(&intent_json).await {
-                    Ok(result) => println!("{}", result),
-                    Err(e) => {
-                        eprintln!("FAILED: {}", e);
-                        std::process::exit(1);
-                    }
-                }
-            }
+            },
             Commands::Daemon { project } => {
                 println!("Starting grounding-coder daemon in {}...", project);
                 let bot = CodeBot::new(&project, 5);
@@ -971,7 +1186,11 @@ fn main() {
                     );
                     println!(
                         "measuring \"{}\" (plate {idx})",
-                        if title.is_empty() { "(untitled)" } else { &title }
+                        if title.is_empty() {
+                            "(untitled)"
+                        } else {
+                            &title
+                        }
                     );
                     match measure_plate(&bank, entries, idx, out_path, region) {
                         Ok(facts) => {
@@ -1042,14 +1261,8 @@ fn main() {
                         eprintln!("--out required for a single-plate measure");
                         std::process::exit(1);
                     };
-                    let _ = handle_one(
-                        &entries,
-                        idx,
-                        &out_path,
-                        clarify_out.as_deref(),
-                        None,
-                        true,
-                    );
+                    let _ =
+                        handle_one(&entries, idx, &out_path, clarify_out.as_deref(), None, true);
                 } else {
                     // Sweep the whole bank: committed plates write their
                     // facts, refusals become open questions.
@@ -1119,28 +1332,29 @@ fn main() {
                         eprintln!("NO PROVENANCE {}: {}", prov_path.display(), e);
                         std::process::exit(1);
                     });
-                    let entries: Vec<serde_json::Value> =
-                        serde_json::from_str(&text).unwrap_or_else(|e| {
+                    let entries: Vec<serde_json::Value> = serde_json::from_str(&text)
+                        .unwrap_or_else(|e| {
                             eprintln!("PROVENANCE INVALID {}: {}", prov_path.display(), e);
                             std::process::exit(1);
                         });
                     let mut recs = question_records(&replay_path);
                     let mut acted = 0;
                     for rec in recs.iter_mut() {
-                        if rec["kind"] != "measure" || rec["resolved"] == serde_json::json!(true)
-                        {
+                        if rec["kind"] != "measure" || rec["resolved"] == serde_json::json!(true) {
                             continue;
                         }
                         let Some(aspect) = rec["aspect"].as_str().map(|a| a.to_string()) else {
                             continue;
                         };
-                        let Some(plate) = rec["plate"].as_u64() else { continue };
+                        let Some(plate) = rec["plate"].as_u64() else {
+                            continue;
+                        };
                         // Answers may name a precise plate (`3:subject-region=…`)
                         // or a general aspect (`subject-region=…`); the precise
                         // one wins for that plate.
-                        let specific = answers.iter().find(|(k, _)| {
-                            *k == format!("{plate}:{aspect}")
-                        });
+                        let specific = answers
+                            .iter()
+                            .find(|(k, _)| *k == format!("{plate}:{aspect}"));
                         let general = answers.iter().find(|(k, _)| k == &aspect);
                         let Some(v) = specific.or(general).map(|(_, v)| v.clone()) else {
                             continue;
@@ -1157,8 +1371,7 @@ fn main() {
                             parse_box(Some(&v), "--answer"),
                         ) {
                             Ok(_) => {
-                                rec["slug"] =
-                                    serde_json::json!(format!("committed → {out_path}"));
+                                rec["slug"] = serde_json::json!(format!("committed → {out_path}"));
                                 println!("plate {plate}: answered, measured → {}", out_path);
                             }
                             Err(e) => {
