@@ -62,23 +62,13 @@ fn parse_answers(list: &[String]) -> Vec<(String, String)> {
 
 /// Fold answered code aspects into a structured intent as facts the
 /// planner reads. The answer text is the user's own — never invented.
+/// (Lives in the engine so the fold is the same single source the
+/// tests exercise.)
 fn apply_code_answers(
     intent: &mut grounding_coder::engine::tasks::StructuredIntent,
     answers: &[(String, String)],
 ) {
-    for (aspect, value) in answers {
-        match aspect.as_str() {
-            "language" => {
-                if value.as_str() == "no preference" {
-                    intent.constraints.push(format!("{aspect}: {value}"));
-                } else {
-                    intent.language = Some(value.clone());
-                }
-            }
-            "platform" => intent.platform = value.clone(),
-            _ => intent.constraints.push(format!("{aspect}: {value}")),
-        }
-    }
+    grounding_coder::engine::tasks::apply_intent_answers(intent, answers);
 }
 
 /// Write a prose clarification round to the question journal: the

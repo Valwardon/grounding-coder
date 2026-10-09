@@ -11,10 +11,10 @@ fn tmp_dir() -> std::path::PathBuf {
     base
 }
 
-fn build_intent(params: serde_json::Value) -> String {
+fn build_intent(language: &str, params: serde_json::Value) -> String {
     serde_json::to_string(&serde_json::json!({
         "goal": "build the project",
-        "language": "c",
+        "language": language,
         "actions": [{"Action": {"action": "build native binary", "params": params, "references": []}}],
         "references": [],
         "define": [],
@@ -50,7 +50,7 @@ async fn c_hello_builds_and_runs() {
     .unwrap();
     let mut bot = CodeBot::new(project.to_str().unwrap(), 5);
     let outcome = bot
-        .run_task(&build_intent(serde_json::json!([])))
+        .run_task(&build_intent("c", serde_json::json!([])))
         .await
         .expect("run");
     assert!(
@@ -79,9 +79,10 @@ async fn unknown_target_blocks_with_no_artifact() {
     fs::write(project.join("hello.c"), "int main(void){return 0;}\n").unwrap();
     let mut bot = CodeBot::new(project.to_str().unwrap(), 5);
     let outcome = bot
-        .run_task(&build_intent(serde_json::json!([
-            "target: quantum-firmware"
-        ])))
+        .run_task(&build_intent(
+            "c",
+            serde_json::json!(["target: quantum-firmware"]),
+        ))
         .await
         .expect("run");
     let rendered = format!("{}", outcome);
@@ -104,12 +105,11 @@ async fn unknown_language_blocks_before_any_build() {
     let project = tmp_dir();
     fs::write(project.join("hello.c"), "int main(void){return 0;}\n").unwrap();
     let mut bot = CodeBot::new(project.to_str().unwrap(), 5);
-    // Direct task path with a bogus language override is unreachable via
-    // intents (language resolves from the tree), so this asserts the
-    // backend registry refuses instead: an empty tree has no C disagree —
-    // covered by unknown_target above. This test pins the C project shape.
+    // A folded language is authoritative for the build backend — that is
+    // the fold reaching the plan — so this pins the honest C-project
+    // shape (hello.c + language "c").
     let outcome = bot
-        .run_task(&build_intent(serde_json::json!([])))
+        .run_task(&build_intent("c", serde_json::json!([])))
         .await
         .expect("run");
     // gcc present → SUCCESS; gcc absent → honest BLOCKED. Never junk.
@@ -139,7 +139,7 @@ async fn java_hello_builds_to_class() {
     .unwrap();
     let mut bot = CodeBot::new(project.to_str().unwrap(), 5);
     let outcome = bot
-        .run_task(&build_intent(serde_json::json!([])))
+        .run_task(&build_intent("java", serde_json::json!([])))
         .await
         .expect("run");
     assert!(
@@ -201,7 +201,7 @@ async fn rust_bin_builds_native() {
     .unwrap();
     let mut bot = CodeBot::new(project.to_str().unwrap(), 5);
     let outcome = bot
-        .run_task(&build_intent(serde_json::json!([])))
+        .run_task(&build_intent("rust", serde_json::json!([])))
         .await
         .expect("run");
     assert!(

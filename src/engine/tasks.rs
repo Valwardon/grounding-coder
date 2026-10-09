@@ -839,13 +839,21 @@ impl TaskDecomposer {
                 // A "build android apk" action becomes Build{target:
                 // "android apk"}; the backend parses its own vocabulary.
                 if action_lower.contains("build") {
+                    let lang = intent.language.clone().unwrap_or_default();
+                    let mut payload = serde_json::json!({
+                        "target": params.join(" "),
+                        "action": action,
+                    });
+                    // A folded language is authoritative: the build oracle
+                    // picks its backend from this key (mod.rs Build arm), so
+                    // an answered language provably reshapes the plan.
+                    if !lang.is_empty() {
+                        payload["language"] = serde_json::json!(lang);
+                    }
                     let task = SubTask::new(
                         TaskKind::Build,
                         format!("Build: {}", action),
-                        serde_json::json!({
-                            "target": params.join(" "),
-                            "action": action,
-                        }),
+                        payload,
                         "intent_build".to_string(),
                     )
                     .with_priority(0.6)
@@ -991,6 +999,28 @@ pub fn parse_intent(json: &str) -> Option<StructuredIntent> {
         Err(e) => {
             log::error!("Failed to parse intent: {}", e);
             None
+        }
+    }
+}
+
+/// Fold answered code aspects into a structured intent as facts the
+/// planner reads. The answer text is the user's own — never invented.
+/// `language` (unless "no preference") selects the intent's language,
+/// `platform` selects the target platform, and every other answered
+/// aspect rides along as an `"aspect: value"` constraint in the
+/// attitudes the plan was asked to honor.
+pub fn apply_intent_answers(intent: &mut StructuredIntent, answers: &[(String, String)]) {
+    for (aspect, value) in answers {
+        match aspect.as_str() {
+            "language" => {
+                if value.as_str() == "no preference" {
+                    intent.constraints.push(format!("{aspect}: {value}"));
+                } else {
+                    intent.language = Some(value.clone());
+                }
+            }
+            "platform" => intent.platform = value.clone(),
+            _ => intent.constraints.push(format!("{aspect}: {value}")),
         }
     }
 }
