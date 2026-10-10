@@ -10,6 +10,7 @@
 //! leaf still resolves to it — memory you cannot view is not trusted.
 //! Same files in, same index out, byte for byte.
 
+use chrono::{DateTime, Utc};
 use std::path::Path;
 
 /// Where a leaf came from: the file and the 1-based line that holds it.
@@ -33,6 +34,11 @@ pub struct Leaf {
     /// The record's own key: a topic, a lesson id, an aspect, a
     /// concept, a plate title.
     pub room: String,
+    /// Whether the record's claim had stopped holding when the palace
+    /// was built (`valid_to` in the past). Always false for stores that
+    /// carry no expiry. The expired record stays indexed — memory you
+    /// cannot view is not trusted, even when it is retired.
+    pub expired: bool,
     pub source: Source,
 }
 
@@ -130,6 +136,24 @@ impl Palace {
         self.leaves.iter().filter(|l| !resolves(l)).collect()
     }
 
+    /// Knowledge leaves whose claim still holds (not expired), in index
+    /// order. The palace's temporal view: same files in, same answer.
+    pub fn active(&self) -> Vec<&Leaf> {
+        self.leaves
+            .iter()
+            .filter(|l| l.wing == "knowledge" && !l.expired)
+            .collect()
+    }
+
+    /// Knowledge leaves whose claim has stopped holding (superseded or
+    /// refuted), in index order. Kept, viewable, off attention.
+    pub fn expired(&self) -> Vec<&Leaf> {
+        self.leaves
+            .iter()
+            .filter(|l| l.wing == "knowledge" && l.expired)
+            .collect()
+    }
+
     /// Leaf counts per wing, in first-seen (store) order.
     pub fn wing_counts(&self) -> Vec<(String, usize)> {
         let mut out: Vec<(String, usize)> = Vec::new();
@@ -161,9 +185,10 @@ impl Palace {
                 out.push_str(&format!("  {}\n", l.hall));
                 hall = l.hall.clone();
             }
+            let mark = if l.expired { "  [expired]" } else { "" };
             out.push_str(&format!(
-                "    {}  [{}:{}]\n",
-                l.room, l.source.file, l.source.line
+                "    {}  [{}:{}]{}\n",
+                l.room, l.source.file, l.source.line, mark
             ));
         }
         out
@@ -235,6 +260,7 @@ fn index_jsonl(
         return;
     };
     let file = path.to_string_lossy().to_string();
+    let now = Utc::now();
     for (i, line) in body.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
@@ -246,12 +272,23 @@ fn index_jsonl(
             wing: wing.to_string(),
             hall: text(&v, hall_key).unwrap_or_else(|| "?".to_string()),
             room: room_of(&v),
+            expired: record_expired(&v, now),
             source: Source {
                 file: file.clone(),
                 line: i + 1,
             },
         });
     }
+}
+
+/// Whether a record's `valid_to` (RFC3339) is in the past as of `now`.
+/// Only the knowledge store carries it today; every other record is
+/// timeless and reads as active.
+fn record_expired(v: &serde_json::Value, now: DateTime<Utc>) -> bool {
+    v.get("valid_to")
+        .and_then(|x| x.as_str())
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        .is_some_and(|t| t.with_timezone(&Utc) <= now)
 }
 
 /// Measured plates: one whole-file JSON record per plate, indexed by
@@ -289,6 +326,7 @@ fn index_visual(leaves: &mut Vec<Leaf>, dir: &Path) {
             wing: "visual".to_string(),
             hall: "measured".to_string(),
             room,
+            expired: false,
             source: Source {
                 file: path.to_string_lossy().to_string(),
                 line: 1,
@@ -406,6 +444,7 @@ mod tests {
             wing: "decisions".to_string(),
             hall: "active".to_string(),
             room: "invented-never-committed".to_string(),
+            expired: false,
             source: Source {
                 file: p.join("data/decisions.jsonl").to_string_lossy().to_string(),
                 line: 1,

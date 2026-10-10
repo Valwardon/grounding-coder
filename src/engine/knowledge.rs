@@ -19,6 +19,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
+
 /// Lifecycle of one concept. Forward motion always passes through
 /// evidence; anything else is a dream wearing a lab coat.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -125,6 +127,15 @@ pub struct KnowledgeItem {
     /// consolidation.
     #[serde(default)]
     pub absorbed_by: Option<String>,
+    /// When this item's claim took effect. Set at creation; `None` on
+    /// legacy lines reads as "always".
+    #[serde(default)]
+    pub valid_from: Option<DateTime<Utc>>,
+    /// When the claim stopped holding — refuted or superseded. `None`
+    /// means it still holds. Expired memory stays on disk but never
+    /// surfaces; it is evidence, not garbage.
+    #[serde(default)]
+    pub valid_to: Option<DateTime<Utc>>,
 }
 
 impl KnowledgeItem {
@@ -144,7 +155,20 @@ impl KnowledgeItem {
             failures: 0,
             dormant: false,
             absorbed_by: None,
+            valid_from: Some(Utc::now()),
+            valid_to: None,
         }
+    }
+
+    /// Whether the claim had stopped holding at `now` (superseded or
+    /// refuted). `now` is explicit so tests measure, never race a clock.
+    pub fn is_expired_at(&self, now: DateTime<Utc>) -> bool {
+        self.valid_to.is_some_and(|t| t <= now)
+    }
+
+    /// Expired as of the moment of asking: off attention, still on disk.
+    pub fn is_expired(&self) -> bool {
+        self.is_expired_at(Utc::now())
     }
 }
 
@@ -273,6 +297,30 @@ impl KnowledgeStore {
         }
     }
 
+    /// Retire a fact as of now without deleting it: `valid_to` records
+    /// when it stopped holding and every read path skips it afterwards.
+    /// The append-only file keeps the record — dormant and expired alike
+    /// are evidence. Returns false for an unknown concept.
+    pub fn expire(&mut self, concept: &str) -> bool {
+        if let Some(item) = self.items.get_mut(concept) {
+            item.valid_to = Some(Utc::now());
+            self.persist();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Supersede `old` with a freshly committed `replacement`: the old
+    /// claim stops holding now, the new one starts (it carries its own
+    /// `valid_from`). The old record is kept, never deleted. Returns
+    /// whether `old` existed.
+    pub fn supersede(&mut self, old: &str, replacement: KnowledgeItem) -> bool {
+        let retired = self.expire(old);
+        self.insert(replacement);
+        retired
+    }
+
     /// Promote a pattern across verified items. Requires at least two
     /// distinct verified supporters — a generalization from one
     /// example is a dream, and is `Rejected` instead of kept.
@@ -280,10 +328,13 @@ impl KnowledgeStore {
         let verified: Vec<String> = supporting
             .iter()
             .filter(|c| {
-                matches!(
-                    self.items.get(c.as_str()).map(|i| i.state),
-                    Some(KnowledgeState::Verified) | Some(KnowledgeState::Generalized)
-                )
+                self.items.get(c.as_str()).is_some_and(|i| {
+                    !i.is_expired()
+                        && matches!(
+                            i.state,
+                            KnowledgeState::Verified | KnowledgeState::Generalized
+                        )
+                })
             })
             .cloned()
             .collect();
@@ -353,7 +404,7 @@ impl KnowledgeStore {
         let mut verified: Vec<String> = self
             .items
             .values()
-            .filter(|i| i.state == KnowledgeState::Verified && !i.dormant)
+            .filter(|i| i.state == KnowledgeState::Verified && !i.dormant && !i.is_expired())
             .map(|i| i.concept.clone())
             .collect();
         verified.sort();
@@ -430,6 +481,7 @@ impl KnowledgeStore {
             .values()
             .filter(|i| {
                 !i.dormant
+                    && !i.is_expired()
                     && (i.state == KnowledgeState::Rejected
                         || (matches!(
                             i.state,
@@ -502,9 +554,10 @@ pub fn extract_gaps(task: &CompletedTask, store: &mut KnowledgeStore) -> Vec<Str
             continue;
         }
         if let Some(existing) = store.get(concept.as_str()) {
-            if existing.dormant {
-                // Sleeping memory does not wake just because a task
-                // brushed past it — it was compressed or primed.
+            if existing.dormant || existing.is_expired() {
+                // Sleeping or retired memory does not wake just because
+                // a task brushed past it — it was compressed, primed, or
+                // superseded.
                 continue;
             }
             match existing.state {
@@ -548,7 +601,9 @@ pub fn prioritize(store: &mut KnowledgeStore) -> Option<String> {
         .items
         .values()
         .filter(|i| {
-            !i.dormant && matches!(i.state, KnowledgeState::Question | KnowledgeState::Unknown)
+            !i.dormant
+                && !i.is_expired()
+                && matches!(i.state, KnowledgeState::Question | KnowledgeState::Unknown)
         })
         .collect();
     open.sort_by(|a, b| {

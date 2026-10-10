@@ -736,6 +736,12 @@ enum Commands {
         /// Only check that every leaf resolves to its source
         #[arg(long)]
         verify: bool,
+        /// Show only knowledge whose claim still holds (not expired)
+        #[arg(long)]
+        active: bool,
+        /// Show only knowledge whose claim has been superseded/refuted
+        #[arg(long)]
+        expired: bool,
         /// Project root holding data/ and .grounding/
         #[arg(short, long, default_value = ".")]
         project: String,
@@ -2382,6 +2388,8 @@ fn main() {
             Commands::Palace {
                 query,
                 verify,
+                active,
+                expired,
                 project,
             } => {
                 use grounding_coder::engine::palace::Palace;
@@ -2405,6 +2413,25 @@ fn main() {
                         "palace: {} leaves, all resolve to source",
                         palace.leaves.len()
                     );
+                } else if active || expired {
+                    let hits: Vec<_> = palace
+                        .query(query.as_deref().unwrap_or(""))
+                        .into_iter()
+                        .filter(|l| l.wing == "knowledge")
+                        .filter(|l| (active && !l.expired) || (expired && l.expired))
+                        .collect();
+                    let what = match (active, expired) {
+                        (true, false) => "active",
+                        (false, true) => "expired",
+                        _ => "active-or-expired",
+                    };
+                    println!("palace: {} {} knowledge leaf(s)", hits.len(), what);
+                    for l in hits {
+                        println!(
+                            "  {}/{}/{} -> {}:{}",
+                            l.wing, l.hall, l.room, l.source.file, l.source.line
+                        );
+                    }
                 } else if let Some(q) = query {
                     let hits = palace.query(&q);
                     println!("palace: {} hit(s) for {:?}", hits.len(), q);
