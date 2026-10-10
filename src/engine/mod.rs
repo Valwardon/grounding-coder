@@ -1032,20 +1032,28 @@ impl CodeBot {
                         &crate::engine::lang::need_for_target(target),
                     )
                 } else {
-                    match language.trim().to_lowercase().as_str() {
+                    let wanted = language.trim().to_lowercase();
+                    match wanted.as_str() {
                         "rust" => crate::engine::lang::Backend::Rust,
                         "c" => crate::engine::lang::Backend::C,
                         "kotlin" | "java" | "jvm" => crate::engine::lang::Backend::Kotlin,
                         "python" => crate::engine::lang::Backend::Python,
                         "html" | "web" => crate::engine::lang::Backend::Html,
-                        _ => {
-                            let _ = self.writer.rollback(&global);
-                            return Ok(blocked_outcome(
-                                BlockReason::NoVerifiedPattern,
-                                "BUILD_ERROR",
-                                format!("No backend for language '{}' — BLOCKED", language),
-                            ));
-                        }
+                        // Everything else — a registry language, a project
+                        // extra from .grounding.toml, or an honest unknown —
+                        // resolves by name. No backend for that name blocks;
+                        // it never falls back to a different language.
+                        other => match crate::engine::lang::backend_by_name(&extra, other) {
+                            Some(b) => b,
+                            None => {
+                                let _ = self.writer.rollback(&global);
+                                return Ok(blocked_outcome(
+                                    BlockReason::NoVerifiedPattern,
+                                    "BUILD_ERROR",
+                                    format!("No backend for language '{}' — BLOCKED", language),
+                                ));
+                            }
+                        },
                     }
                 };
                 self.emit(ProgressEvent::Stage {

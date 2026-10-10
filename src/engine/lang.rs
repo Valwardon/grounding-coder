@@ -1853,6 +1853,23 @@ pub struct LanguageSpec {
     /// Test command run after a clean verify. Empty = no test stage.
     #[serde(default, deserialize_with = "de_str_list")]
     pub test_cmd: Vec<String>,
+    /// Optional build command to produce an artifact. Empty = no build oracle.
+    #[serde(default, deserialize_with = "de_str_list")]
+    pub build_cmd: Vec<String>,
+    /// What this language affords a build task, in
+    /// `[native, jvm, interpreted, systems, web, mobile]` order. Declared
+    /// by project extras (`capabilities = [...]` in `.grounding.toml`);
+    /// `None` falls back to [`affordance`] by name.
+    #[serde(default, deserialize_with = "de_capability")]
+    pub capabilities: Option<Capability>,
+}
+
+fn de_capability<'de, D>(d: D) -> Result<Option<Capability>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let o: Option<Vec<f64>> = Option::deserialize(d)?;
+    Ok(o.and_then(|v| <[f64; 6]>::try_from(v).ok()))
 }
 
 fn de_str_list<'de, D>(d: D) -> Result<Vec<String>, D::Error>
@@ -1959,6 +1976,9 @@ impl LanguageBackend for GenericBackend<'_> {
                 let err = String::from_utf8_lossy(&o.stderr).to_string();
                 stderr.push_str(&err);
                 if !o.status.success() {
+                    // parse_generic_errors never returns empty (it falls back
+                    // to the last output line), so a nonzero exit always
+                    // yields at least one diagnostic — never a false clean.
                     errors.extend(parse_generic_errors(&stdout, &err));
                 }
             }
@@ -2142,11 +2162,14 @@ fn registry_specs() -> Vec<LanguageSpec> {
                 "encoding".to_string(),
                 "sync".to_string(),
                 "time".to_string(),
+                "context".to_string(),
             ],
             std_exact: vec![],
             skip_lines: 1,
             verify_cmd: vec!["go".to_string(), "build".to_string(), "./...".to_string()],
             test_cmd: vec!["go".to_string(), "test".to_string(), "./...".to_string()],
+            build_cmd: vec![],
+            capabilities: None,
         },
         LanguageSpec {
             name: "node".to_string(),
@@ -2175,6 +2198,62 @@ fn registry_specs() -> Vec<LanguageSpec> {
                 "index.js".to_string(),
             ],
             test_cmd: vec![],
+            build_cmd: vec![],
+            capabilities: None,
+        },
+        LanguageSpec {
+            name: "typescript".to_string(),
+            extensions: vec!["ts".to_string(), "tsx".to_string()],
+            import_template: "import {p};".to_string(),
+            import_prefixes: vec![
+                "import ".to_string(),
+                "const ".to_string(),
+                "let ".to_string(),
+            ],
+            std_prefixes: vec!["fs".to_string(), "path".to_string()],
+            std_exact: vec![],
+            skip_lines: 0,
+            verify_cmd: vec!["tsc".to_string(), "--noEmit".to_string()],
+            test_cmd: vec![],
+            build_cmd: vec![],
+            capabilities: None,
+        },
+        LanguageSpec {
+            name: "zig".to_string(),
+            extensions: vec!["zig".to_string()],
+            import_template: "@import(\"{p}\");".to_string(),
+            import_prefixes: vec!["@import(".to_string()],
+            std_prefixes: vec!["std".to_string()],
+            std_exact: vec![],
+            skip_lines: 0,
+            verify_cmd: vec!["zig".to_string(), "build".to_string()],
+            test_cmd: vec!["zig".to_string(), "build".to_string(), "test".to_string()],
+            build_cmd: vec!["zig".to_string(), "build".to_string()],
+            capabilities: None,
+        },
+        // Java: import/stdlib knowledge for the merged registry view.
+        // Its build/verify oracle stays in the hand-tuned Kotlin backend
+        // (`javac`, measured in tests/build.rs), and there is no portable
+        // verify command for a bare .java tree — so verify_cmd is empty and
+        // GenericBackend honestly reports VERIFICATION_UNSUPPORTED rather
+        // than claiming a clean it did not run. A project with gradle/
+        // maven/wrapper sets its own in `.grounding.toml`.
+        LanguageSpec {
+            name: "java".to_string(),
+            extensions: vec!["java".to_string()],
+            import_template: "import {p};".to_string(),
+            import_prefixes: vec!["import ".to_string()],
+            std_prefixes: vec![],
+            std_exact: vec![
+                "java.io".to_string(),
+                "java.util".to_string(),
+                "java.lang".to_string(),
+            ],
+            skip_lines: 0,
+            verify_cmd: vec![],
+            test_cmd: vec![],
+            build_cmd: vec![],
+            capabilities: None,
         },
     ]
 }
@@ -2185,6 +2264,22 @@ fn registry() -> &'static [LanguageSpec] {
     use std::sync::OnceLock;
     static REG: OnceLock<Vec<LanguageSpec>> = OnceLock::new();
     REG.get_or_init(registry_specs)
+}
+
+/// The registry merged with a project's `.grounding.toml` extras: extras
+/// come first and shadow same-named registry specs, so a project can
+/// override a registered language or add one the engine has never heard
+/// of. The name/extension lookups in selection are the borrowable
+/// equivalent of this view (extra first, then registry).
+pub fn registry_specs_with_extras(extra: &[LanguageSpec]) -> Vec<LanguageSpec> {
+    let mut merged = extra.to_vec();
+    merged.extend(
+        registry()
+            .iter()
+            .filter(|spec| !extra.iter().any(|e| e.name == spec.name))
+            .cloned(),
+    );
+    merged
 }
 
 // --- Selection ---
@@ -2253,6 +2348,14 @@ mod toml_lang {
                 },
                 verify_cmd: list_field("verify_cmd"),
                 test_cmd: list_field("test_cmd"),
+                build_cmd: list_field("build_cmd"),
+                capabilities: {
+                    let nums: Vec<f64> = list_field("capabilities")
+                        .into_iter()
+                        .filter_map(|s| s.parse::<f64>().ok())
+                        .collect();
+                    <[f64; 6]>::try_from(nums).ok()
+                },
             })
         }
     }
@@ -2359,6 +2462,8 @@ pub fn affordance(name: &str) -> Capability {
         "node" | "js" => [0.0, 0.0, 1.0, 0.0, 0.5, 0.0],
         "html" | "web" => [0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         "go" => [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        "zig" => [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        "typescript" | "ts" => [0.0, 0.0, 1.0, 0.0, 0.5, 0.0],
         _ => [0.0; 6],
     }
 }
@@ -2399,7 +2504,13 @@ pub fn need_for_target(target: &str) -> Capability {
         [0.0, 0.3, 0.0, 0.0, 0.0, 1.0]
     } else if t.contains("jvm") || t.contains("jar") || t.contains("java") || t.contains("kotlin") {
         [0.0, 1.0, 0.0, 0.0, 0.0, 0.0]
-    } else if t.contains("wasm") || t.contains("web") || t.contains("html") || t.contains("js") {
+    } else if t.contains("wasm")
+        || t.contains("web")
+        || t.contains("html")
+        || t.contains("js")
+        || t.contains("node")
+        || t.contains("ts")
+    {
         [0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
     } else if t.contains("script") || t.contains("run") || t.contains("test") {
         [0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
@@ -2438,9 +2549,15 @@ pub fn backend_for_project_with_need<'a>(
     if project_dir.join("go.mod").exists() || has_source_files(project_dir, &["go"]) {
         candidates.push(generic_by_name(extra, "go"));
     }
+    if project_dir.join("build.zig").exists() || has_source_files(project_dir, &["zig"]) {
+        candidates.push(generic_by_name(extra, "zig"));
+    }
     if project_dir.join("package.json").exists()
-        || has_source_files(project_dir, &["js", "mjs", "cjs"])
+        || has_source_files(project_dir, &["js", "mjs", "cjs", "ts", "tsx"])
     {
+        if has_source_files(project_dir, &["ts", "tsx"]) {
+            candidates.push(generic_by_name(extra, "typescript"));
+        }
         candidates.push(generic_by_name(extra, "node"));
     }
     if project_dir.join("Makefile").exists()
@@ -2463,7 +2580,7 @@ pub fn backend_for_project_with_need<'a>(
     let mut best = 0usize;
     let mut best_score = -1.0f64;
     for (i, backend) in candidates.iter().enumerate() {
-        let s = cosine6(need, &affordance(backend_name(backend)));
+        let s = cosine6(need, &capability_of(extra, backend));
         if s > best_score {
             best_score = s;
             best = i;
@@ -2486,6 +2603,55 @@ fn generic_by_name<'a>(extra: &'a [LanguageSpec], name: &str) -> Backend<'a> {
     }
 }
 
+/// Backend for a language *name*. Order: project extra (a
+/// `.grounding.toml` language, registered or not, wins), then the
+/// hand-tuned built-ins (they own the measured oracles), then the
+/// registry by name. `None` means honestly no backend for that name —
+/// callers must block, never fall back to a language that was not asked
+/// for.
+pub fn backend_by_name<'a>(extra: &'a [LanguageSpec], name: &str) -> Option<Backend<'a>> {
+    let wanted = name.trim().to_lowercase();
+    if wanted.is_empty() {
+        return None;
+    }
+    if let Some(spec) = extra.iter().find(|s| s.name == wanted) {
+        return Some(Backend::Generic(GenericBackend { spec }));
+    }
+    match wanted.as_str() {
+        "rust" | "rs" => return Some(Backend::Rust),
+        "python" | "py" => return Some(Backend::Python),
+        "kotlin" | "kt" | "java" | "jvm" => return Some(Backend::Kotlin),
+        "c" | "h" => return Some(Backend::C),
+        "html" | "htm" | "web" => return Some(Backend::Html),
+        _ => {}
+    }
+    let key = match wanted.as_str() {
+        "javascript" | "js" | "mjs" | "cjs" => "node",
+        "ts" => "typescript",
+        "golang" => "go",
+        other => other,
+    };
+    extra
+        .iter()
+        .chain(registry())
+        .find(|s| s.name == key)
+        .map(|spec| Backend::Generic(GenericBackend { spec }))
+}
+
+/// What a backend affords a need: a spec's declared `capabilities`
+/// (project extra or registry entry) wins, else the name's built-in
+/// [`affordance`]. Extras declaring capabilities therefore compete in
+/// need-driven selection instead of always tying at zeros.
+fn capability_of(extra: &[LanguageSpec], backend: &Backend<'_>) -> Capability {
+    let name = backend_name(backend);
+    extra
+        .iter()
+        .chain(registry())
+        .find(|s| s.name == name)
+        .and_then(|s| s.capabilities)
+        .unwrap_or_else(|| affordance(name))
+}
+
 fn first_source_extension(project_dir: &Path, extra: &[LanguageSpec]) -> Option<String> {
     let mut exts: Vec<String> = KNOWN_EXTENSIONS.iter().map(|s| s.to_string()).collect();
     exts.extend(extra.iter().flat_map(|s| s.extensions.clone()));
@@ -2506,7 +2672,7 @@ fn first_source_extension(project_dir: &Path, extra: &[LanguageSpec]) -> Option<
 
 /// Every extension the engine indexes for symbols.
 pub const KNOWN_EXTENSIONS: &[&str] = &[
-    "rs", "kt", "java", "py", "c", "h", "go", "js", "mjs", "cjs", "ts", "html", "htm",
+    "rs", "kt", "java", "py", "c", "h", "go", "js", "mjs", "cjs", "ts", "tsx", "html", "htm", "zig",
 ];
 
 /// Unified handle for dispatch without lifetime gymnastics at call sites.
@@ -2539,14 +2705,7 @@ impl LanguageBackend for Backend<'_> {
     }
 
     fn extensions(&self) -> &'static [&'static str] {
-        match self {
-            Backend::Rust => RustBackend.extensions(),
-            Backend::Python => PythonBackend.extensions(),
-            Backend::Kotlin => KotlinBackend.extensions(),
-            Backend::C => CBackend.extensions(),
-            Backend::Html => HtmlBackend.extensions(),
-            Backend::Generic(_) => &[],
-        }
+        dispatch!(self, extensions())
     }
 
     fn import_line(&self, path: &str) -> String {
@@ -2640,10 +2799,31 @@ fn collect_with(dir: &Path, extensions: &[&str]) -> Vec<String> {
 }
 
 fn command_available(name: &str) -> bool {
-    Command::new(name)
-        .arg("--version")
-        .output()
-        .is_ok_and(|o| o.status.success())
+    // Presence on PATH, measured by lookup — not by running `--version`.
+    // `sh --version` exits 2 under dash (`/bin/sh` here), so a version
+    // probe reports an existing shell as missing and blocks a verify
+    // that would have run.
+    if name.contains('/') || name.contains('\\') {
+        return executable(std::path::Path::new(name));
+    }
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+        .any(|dir| executable(&dir.join(name)))
+}
+
+fn executable(path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        path.metadata()
+            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
 }
 
 fn has_pytest_module() -> bool {
